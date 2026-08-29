@@ -50,7 +50,7 @@ _WIDGETS = ["QApplication", "QMainWindow", "QWidget", "QVBoxLayout",
            "QWizard", "QWizardPage", "QAction", "QSizePolicy", "QHeaderView",
            "QAbstractItemView", "QStatusBar", "QToolBar", "QStyle",
            "QStyleFactory", "QListWidget", "QListWidgetItem", "QInputDialog",
-           "QFrame", "QSpacerItem", "QMenuBar", "QPlainTextEdit",
+           "QToolTip", "QFrame", "QSpacerItem", "QMenuBar", "QPlainTextEdit",
            "QTableWidgetSelectionRange", "QProgressDialog", "QSplashScreen"]
 for n in _WIDGETS:
     setattr(qtwidgets, n, type(n, (_Base,), {}))
@@ -93,6 +93,7 @@ qtcore.QThreadPool = type("QThreadPool", (_Base,), {})
 qtcore.QRunnable = type("QRunnable", (_Base,), {})
 qtcore.QSettings = type("QSettings", (_Base,), {})
 qtcore.QStandardPaths = type("QStandardPaths", (_Base,), {})
+qtcore.QLockFile = type("QLockFile", (_Base,), {})
 qtcore.QFileInfo = type("QFileInfo", (_Base,), {})
 qtcore.QDir = type("QDir", (_Base,), {})
 qtcore.QProcess = type("QProcess", (_Base,), {})

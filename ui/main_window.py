@@ -75,13 +75,13 @@ from physics.airfoils import generate_naca4_section
 from geometry.stl_healer import heal_stl_mesh, HealReportDialog
 from geometry.generators import (
     create_primitive, generate_wing_mesh, generate_flaps_mesh,
-    generate_slats_mesh,
+    generate_slats_mesh, cad_to_stl, CAD_EXTENSIONS,
 )
 from mesh.gmsh_generator import generate_mesh_impl
-from mesh.mesh_worker import MeshWorker
+from mesh.mesh_worker import MeshWorker, MeshAdaptWorker
 from solver.workers import (
     SU2Worker, SweepWorker, OptimizationWorker, SessionRunner,
-    hidden_subprocess_kwargs,
+    hidden_subprocess_kwargs, _mesh_npoin,
 )
 from solver.session import CalculationSession
 # === T6: лицензирование (опционально — не падает, если модуль недоступен)
@@ -1131,6 +1131,13 @@ class MainWindow(QMainWindow):
         self.btn_make_mesh = QPushButton("🔧 Построить расчётную сетку")
         self.btn_make_mesh.clicked.connect(self.make_mesh_from_bodies)
         lay8.addWidget(self.btn_make_mesh)
+        self.btn_adapt_mesh = QPushButton("🧬 Адаптировать сетку (SU2_ADAPT)")
+        self.btn_adapt_mesh.setToolTip(
+            "Локально сгустить сетку по решению (restart.dat) из последнего "
+            "расчёта: точнее в областях высоких градиентов, чем при "
+            "глобальном сгущении. Требует SU2_ADAPT из дистрибутива SU2.")
+        self.btn_adapt_mesh.clicked.connect(self.adapt_current_mesh)
+        lay8.addWidget(self.btn_adapt_mesh)
         self.settings_stack.addWidget(self.page_mesh)
 
         # Page 9: Solver — теперь с кнопкой «✅ Применить» для ядер
@@ -1405,6 +1412,50 @@ class MainWindow(QMainWindow):
         self.lbl_opt_status = QLabel("Ожидание...")
         self.lbl_opt_status.setStyleSheet("color: #666; font-style: italic;")
         lay10.addWidget(self.lbl_opt_status)
+
+        # ---- Табличная оптимизация (DOE): перебор вариантов по таблице ----
+        doe_group = QGroupBox("Табличная оптимизация (перебор вариантов)")
+        doe_lay = QVBoxLayout(doe_group)
+        self.doe_table = QTableWidget(0, 4)
+        self.doe_table.setHorizontalHeaderLabels(
+            ["Размах, м", "Хорда корня, м", "Хорда конца, м", "Стреловидность, °"])
+        self.doe_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.doe_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        doe_lay.addWidget(self.doe_table)
+        doe_btns = QHBoxLayout()
+        btn_doe_from_current = QPushButton("➕ Из текущих параметров")
+        btn_doe_from_current.setToolTip(
+            "Добавить строку со значениями из генератора крыла.")
+        btn_doe_from_current.clicked.connect(self.add_doe_row_from_current)
+        btn_doe_add = QPushButton("➕ Ввести вручную…")
+        btn_doe_add.clicked.connect(self.add_doe_row_dialog)
+        btn_doe_del = QPushButton("🗑 Удалить выбранное")
+        btn_doe_del.clicked.connect(self.remove_doe_rows)
+        btn_doe_clear = QPushButton("🧹 Очистить")
+        btn_doe_clear.clicked.connect(self.clear_doe_table)
+        doe_btns.addWidget(btn_doe_from_current)
+        doe_btns.addWidget(btn_doe_add)
+        doe_btns.addWidget(btn_doe_del)
+        doe_btns.addWidget(btn_doe_clear)
+        doe_btns.addStretch()
+        doe_lay.addLayout(doe_btns)
+        self.doe_results = QTableWidget(0, 4)
+        self.doe_results.setHorizontalHeaderLabels(
+            ["Вариант", "Cl", "K", "Статус"])
+        self.doe_results.horizontalHeader().setStretchLastSection(True)
+        doe_lay.addWidget(self.doe_results)
+        doe_run_lay = QHBoxLayout()
+        self.btn_start_doe = QPushButton("🔁 ЗАПУСТИТЬ ПЕРЕБОР")
+        self.btn_start_doe.setToolTip(
+            "Прогнать все строки таблицы: каждая строка = один расчёт "
+            "(геометрия перестраивается, сетка перегенерируется).")
+        self.btn_start_doe.clicked.connect(self.run_doe_optimization)
+        self.lbl_doe_status = QLabel("—")
+        self.lbl_doe_status.setStyleSheet("color: #666; font-style: italic;")
+        doe_run_lay.addWidget(self.btn_start_doe)
+        doe_run_lay.addWidget(self.lbl_doe_status, 1)
+        doe_lay.addLayout(doe_run_lay)
+        lay10.addWidget(doe_group)
         self.settings_stack.addWidget(self.page_opt)
 
         # Page 11: Trim & Balancing
@@ -2424,6 +2475,7 @@ class MainWindow(QMainWindow):
             },
             "rule_set": self.rule_set.to_dict(),
             "opt_points": opt_points,
+            "doe_rows": self._get_doe_candidates(),
             # Полётные условия — сериализуем как часть проекта
             "flight": self.flight.to_dict(),
             # Настройки нагрузки (слайдеры)
@@ -2502,6 +2554,17 @@ class MainWindow(QMainWindow):
                 self.points_table.setItem(row, 0, QTableWidgetItem(pt.get("name", "")))
                 self.points_table.setItem(row, 1, QTableWidgetItem(f"{pt.get('aoa', 3.0):.2f}"))
                 self.points_table.setItem(row, 2, QTableWidgetItem(f"{pt.get('weight', 1.0):.2f}"))
+        # Таблица DOE (перебор вариантов)
+        if hasattr(self, 'doe_table'):
+            self.doe_table.setRowCount(0)
+            for drow in data.get("doe_rows", []):
+                row = self.doe_table.rowCount()
+                self.doe_table.insertRow(row)
+                for col, key in enumerate(self._doe_param_names()):
+                    val = drow.get(key, self._doe_current_values().get(key, 0.0))
+                    item = QTableWidgetItem(f"{float(val):.3f}")
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    self.doe_table.setItem(row, col, item)
         # Полётные условия
         fc_data = data.get("flight")
         if fc_data:
@@ -2790,13 +2853,30 @@ class MainWindow(QMainWindow):
 
     def _add_body(self, path, role):
         ext = os.path.splitext(path)[1].lower()
-        if ext in (".step", ".stp", ".iges", ".igs", ".x_t", ".x_b", ".sat"):
-            msg = (f"📎 Файл {os.path.basename(path)} является CAD-моделью.\n\n"
-                   "Рекомендуемый рабочий процесс в AeroOpt:\n"
-                   "Экспортируйте ваши тела в формат STL из вашей CAD-системы "
-                   "(КОМПАС, SolidWorks, Inventor, Fusion 360, CATIA) перед импортом "
-                   "для стабильной триангуляции.")
-            QMessageBox.information(self, "Импорт CAD-модели", msg)
+        source_path = path
+        if ext in CAD_EXTENSIONS:
+            # Direct CAD Import: конвертируем модель в STL через gmsh
+            self.log_text.append(
+                f"🔄 Direct CAD Import: {os.path.basename(path)} ({ext})")
+            os.makedirs(WORK_DIR_BASE, exist_ok=True)
+            stl_name = f"_cad_{self.next_body_id}_{os.path.splitext(os.path.basename(path))[0]}.stl"
+            stl_path = os.path.join(WORK_DIR_BASE, stl_name)
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                cad_to_stl(path, stl_path,
+                           log=lambda m: self.log_text.append(m))
+                self.log_text.append(f"  ✅ CAD → STL: {stl_path}")
+                path = stl_path
+            except Exception as e:
+                QApplication.restoreOverrideCursor()
+                self.log_text.append(f"❌ Ошибка импорта CAD: {e}")
+                QMessageBox.critical(
+                    self, "Ошибка чтения CAD-формата",
+                    f"Не удалось импортировать {ext}-файл: {e}\n\n"
+                    "Проверьте, что файл не повреждён. Как запасной вариант "
+                    "экспортируйте модель в STL из CAD-системы.")
+                return
+            QApplication.restoreOverrideCursor()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             mesh = pv.read(path).triangulate().clean(tolerance=1e-6)
@@ -2804,17 +2884,17 @@ class MainWindow(QMainWindow):
             actor = self.plotter.add_mesh(mesh, color=color, opacity=0.8,
                                           show_edges=True)
             self.bodies.append({
-                "id": self.next_body_id, "name": os.path.basename(path),
+                "id": self.next_body_id, "name": os.path.basename(source_path),
                 "path": path, "role": role, "visible": True, "color": color,
                 "mesh": mesh, "actor": actor,
             })
             self.next_body_id += 1
             self.update_bodies_table()
-            self.log_text.append(f"✅ Загружен: {os.path.basename(path)}")
+            self.log_text.append(f"✅ Загружен: {os.path.basename(source_path)}")
             self.invalidate_mesh("загружен новый STL")
         except Exception as e:
             self.log_text.append(f"❌ Ошибка загрузки: {e}")
-            if ext in (".step", ".stp", ".iges", ".igs", ".x_t", ".x_b"):
+            if ext in CAD_EXTENSIONS:
                 QMessageBox.critical(self, "Ошибка чтения CAD-формата",
                                      f"Не удалось импортировать {ext}-файл напрямую. "
                                      "Экспортируйте его в STL из CAD-системы.")
@@ -3741,6 +3821,108 @@ class MainWindow(QMainWindow):
         self.ribbon_btn_mesh.setEnabled(True)
 
     # =============================================================
+    # АДАПТИВНАЯ СЕТКА (SU2_ADAPT по решению)
+    # =============================================================
+    def adapt_current_mesh(self):
+        if getattr(self, "_adapting", False):
+            return
+        if not os.path.isfile(MESH_FILE):
+            QMessageBox.warning(self, "Адаптивная сетка",
+                                "Сначала постройте сетку (кнопка «🔧 Построить сетку»).")
+            return
+        # Нужно решение (restart.dat) из завершённого расчёта
+        restart = self._find_latest_restart()
+        if not restart:
+            QMessageBox.information(
+                self, "Адаптивная сетка",
+                "Для адаптации нужно решение (restart.dat) из завершённого "
+                "расчёта.\n\n1. Постройте сетку и выполните расчёт.\n"
+                "2. Затем нажмите «Адаптировать сетку» — сетка локально "
+                "сгустится в областях высоких градиентов, и её можно "
+                "считать ещё раз (точнее и с меньшим числом ячеек, чем "
+                "при глобальном сгущении).")
+            return
+        case_dir = os.path.dirname(restart)
+        npoin_before = _mesh_npoin(MESH_FILE) or 0
+        reply = QMessageBox.question(
+            self, "Адаптивная сетка",
+            f"Сетка сейчас: {npoin_before or '?'} точек.\n\n"
+            f"Адаптировать по решению из:\n{os.path.basename(case_dir)}\n\n"
+            "После адаптации рабочая сетка (mesh.su2) будет заменена "
+            "адаптированной. Продолжить?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        self._adapting = True
+        self.btn_adapt_mesh.setEnabled(False)
+        self.progress.setVisible(True)
+        self.progress.setValue(0)
+        self.lbl_su2_status.setText("🧬 Адаптация сетки (SU2_ADAPT)...")
+        self.lbl_su2_status.setStyleSheet("color: blue; font-style: italic;")
+        self.log_text.append("\n" + "=" * 50)
+        self.log_text.append("🧬 АДАПТИВНАЯ СЕТКА (SU2_ADAPT)")
+        self.log_text.append("=" * 50)
+        self._adapt_worker = MeshAdaptWorker(
+            case_dir=case_dir,
+            mesh_path=MESH_FILE,
+            restart_path=restart,
+            adapt_markers=("airfoil",),
+            parent=self,
+        )
+        self._adapt_worker.progress_signal.connect(
+            lambda p, s: self.statusBar().showMessage(f"Адаптация: {s}", 5000))
+        self._adapt_worker.finished_signal.connect(self.on_adapt_finished)
+        self._adapt_worker.start()
+
+    def _find_latest_restart(self):
+        """Ищет самый свежий restart.dat в work/case_*/aoa_*/."""
+        candidates = []
+        for root, _dirs, files in os.walk(WORK_DIR_BASE):
+            if "restart.dat" in files:
+                candidates.append(os.path.join(root, "restart.dat"))
+        if not candidates:
+            return None
+        try:
+            return max(candidates, key=os.path.getmtime)
+        except OSError:
+            return candidates[-1]
+
+    def on_adapt_finished(self, ok, msg):
+        self._adapting = False
+        self.btn_adapt_mesh.setEnabled(True)
+        self.progress.setVisible(False)
+        if getattr(self, "_adapt_worker", None):
+            self._adapt_worker.deleteLater()
+            self._adapt_worker = None
+        if not ok:
+            self.log_text.append(f"❌ {msg}")
+            self.lbl_su2_status.setText("❌ Ошибка адаптации")
+            self.lbl_su2_status.setStyleSheet("color: red; font-weight: bold;")
+            QMessageBox.critical(self, "Ошибка адаптации сетки", msg)
+            return
+        # Заменяем рабочую сетку адаптированной
+        try:
+            npoin_before = _mesh_npoin(MESH_FILE) or 0
+            shutil.copy2(msg, MESH_FILE)
+            npoin_after = _mesh_npoin(MESH_FILE) or 0
+            self.log_text.append(
+                f"✅ Адаптированная сетка: {msg}")
+            self.log_text.append(
+                f"   Точки: {npoin_before} → {npoin_after} "
+                f"({(npoin_after / max(npoin_before, 1)):.2f}×)")
+            self.lbl_su2_status.setText("✅ Сетка адаптирована")
+            self.lbl_su2_status.setStyleSheet("color: green; font-weight: bold;")
+            QMessageBox.information(
+                self, "Адаптация завершена",
+                f"Сетка адаптирована по решению.\n\n"
+                f"Точки: {npoin_before} → {npoin_after}\n\n"
+                "Теперь можно запустить расчёт заново — результат будет "
+                "точнее в областях высоких градиентов.")
+        except Exception as e:
+            self.log_text.append(f"❌ Не удалось применить адаптированную сетку: {e}")
+            QMessageBox.critical(self, "Ошибка", f"{e}")
+
+    # =============================================================
     # РАСЧЁТ
     # =============================================================
     def start_calculation(self):
@@ -3813,6 +3995,19 @@ class MainWindow(QMainWindow):
                 )
                 self._launch_session_runner()
                 return
+        # Подсказка по числу ядер: для крупных сеток — больше ядер
+        try:
+            npoin = _mesh_npoin(MESH_FILE) or 0
+            if npoin > 0:
+                phys = max(1, int(getattr(self, "_cpu_cores_max", 1) or 1))
+                rec = min(phys, max(1, int(round(npoin / 150000.0))))
+                cur = self._resolve_cores_for_level()
+                self.log_text.append(
+                    f"💡 Сетка ~{npoin} точек: рекомендуется ≈{rec} ядер "
+                    f"(сейчас {cur}). Для ускорения увеличьте нагрузку CPU "
+                    f"в Solver Settings.")
+        except Exception:
+            pass
         physics = self.get_physics()
         solver = self.get_solver()
         ref_data = self.calculate_reference_data()
@@ -4130,6 +4325,20 @@ class MainWindow(QMainWindow):
         if res.get("stopped"):
             return
         self.all_results.append(res)
+        # Оценка времени до конца серии: среднее на точку × оставшиеся
+        try:
+            t0 = getattr(self, "calc_start_time", None)
+            if t0:
+                total = len(self.session_runner.session.aoa_list)
+                done = len(self.all_results)
+                if 0 < done < total:
+                    avg = (time.time() - t0) / done
+                    remain = avg * (total - done)
+                    self.log_text.append(
+                        f"⏱ Точка {done}/{total}: среднее {avg:.0f} с/точка, "
+                        f"осталось ~{int(remain // 60)}м {int(remain % 60)}с")
+        except Exception:
+            pass
         row = self.table.rowCount()
         self.table.insertRow(row)
         cl = res.get('cl', 0)
@@ -4324,22 +4533,197 @@ class MainWindow(QMainWindow):
                                  "Проверьте сетку и граничные условия.")
 
 
+    # =============================================================
+    # DOE: табличный перебор вариантов (ТЗ — параметрическая
+    # оптимизация по таблице параметров)
+    # =============================================================
+    def _doe_param_names(self):
+        return ["span", "chord_root", "chord_tip", "sweep"]
+
+    def _doe_current_values(self):
+        return {
+            "span": self.w_span.value(),
+            "chord_root": self.w_chord_root.value(),
+            "chord_tip": self.w_chord_tip.value(),
+            "sweep": self.w_sweep.value(),
+        }
+
+    def add_doe_row_from_current(self):
+        v = self._doe_current_values()
+        row = self.doe_table.rowCount()
+        self.doe_table.insertRow(row)
+        for col, key in enumerate(self._doe_param_names()):
+            item = QTableWidgetItem(f"{v[key]:.3f}")
+            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.doe_table.setItem(row, col, item)
+
+    def add_doe_row_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Вариант перебора (DOE)")
+        form = QFormLayout(dialog)
+        v = self._doe_current_values()
+        spins = {}
+        cfg = [
+            ("span", "Размах, м:", 0.1, 100.0, v["span"]),
+            ("chord_root", "Хорда корня, м:", 0.01, 30.0, v["chord_root"]),
+            ("chord_tip", "Хорда конца, м:", 0.01, 30.0, v["chord_tip"]),
+            ("sweep", "Стреловидность, °:", -30.0, 70.0, v["sweep"]),
+        ]
+        for key, label, lo, hi, val in cfg:
+            sp = QDoubleSpinBox()
+            sp.setRange(lo, hi)
+            sp.setDecimals(3)
+            sp.setValue(float(val))
+            form.addRow(label, sp)
+            spins[key] = sp
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(dialog.accept)
+        btns.rejected.connect(dialog.reject)
+        form.addRow(btns)
+        if dialog.exec_() == QDialog.Accepted:
+            row = self.doe_table.rowCount()
+            self.doe_table.insertRow(row)
+            for col, key in enumerate(self._doe_param_names()):
+                item = QTableWidgetItem(f"{spins[key].value():.3f}")
+                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.doe_table.setItem(row, col, item)
+
+    def remove_doe_rows(self):
+        rows = sorted({i.row() for i in self.doe_table.selectedIndexes()},
+                      reverse=True)
+        for r in rows:
+            self.doe_table.removeRow(r)
+
+    def clear_doe_table(self):
+        self.doe_table.setRowCount(0)
+        self.doe_results.setRowCount(0)
+        self.lbl_doe_status.setText("—")
+
+    def _get_doe_candidates(self):
+        cands = []
+        defaults = self._doe_current_values()
+        for row in range(self.doe_table.rowCount()):
+            vals = {}
+            ok = True
+            for col, key in enumerate(self._doe_param_names()):
+                it = self.doe_table.item(row, col)
+                try:
+                    vals[key] = float(it.text()) if it else defaults[key]
+                except (ValueError, TypeError):
+                    ok = False
+                    break
+            if ok:
+                cands.append(vals)
+        return cands
+
+    def run_doe_optimization(self):
+        # === лицензия (та же проверка, что и у обычной оптимизации) ===
+        if self._license is not None:
+            allowed, reason = self._license.is_calculation_allowed()
+            if not allowed:
+                QMessageBox.warning(self, "Лицензия", reason)
+                self.log_text.append(f"⛔ {reason}")
+                return
+        cands = self._get_doe_candidates()
+        if not cands:
+            QMessageBox.warning(self, "Перебор вариантов",
+                                "Таблица вариантов пуста или содержит "
+                                "некорректные значения. Добавьте строки "
+                                "кнопкой «➕ Из текущих параметров».")
+            return
+        if not self.bodies:
+            QMessageBox.warning(self, "Ошибка", "Загрузите геометрию.")
+            return
+        if not self.validate_rules_before_run():
+            return
+        ref_data = self.calculate_reference_data()
+        flight_points = self._get_opt_points()
+        self.btn_start_doe.setEnabled(False)
+        self.btn_start_opt.setEnabled(False)
+        self.doe_results.setRowCount(0)
+        self.lbl_doe_status.setText(f"🔄 Перебор {len(cands)} вариантов...")
+        self.progress.setVisible(True)
+        self.progress.setValue(0)
+        active_markers = [b["role"] for b in self.bodies if b.get("visible", True)]
+        self.opt_worker = OptimizationWorker(
+            target_cl=self.opt_target_cl.value(),
+            target_k=self.opt_target_k.value(),
+            physics=self.get_physics(),
+            solver=self.get_solver(),
+            initial_params=self._doe_current_values(),
+            rule_set=self.rule_set,
+            flight_points=flight_points,
+            ref_data=ref_data,
+            body_markers=active_markers,
+            candidates=cands,
+        )
+        self.opt_worker.log_signal.connect(self.log_text.append)
+        self.opt_worker.progress_signal.connect(self.progress.setValue)
+        self.opt_worker.opt_finished.connect(self.on_doe_finished)
+        self.opt_worker.update_geometry_signal.connect(self._update_geometry_from_opt)
+        self.opt_worker.variant_ready.connect(self._on_doe_variant_ready)
+        self.opt_worker.start()
+
+    def _on_doe_variant_ready(self, info):
+        try:
+            row = self.doe_results.rowCount()
+            self.doe_results.insertRow(row)
+            idx = int(info.get("index", row)) + 1
+            self.doe_results.setItem(row, 0, QTableWidgetItem(f"#{idx}"))
+            self.doe_results.setItem(
+                row, 1, QTableWidgetItem(f"{float(info.get('cl_weighted', 0.0)):.4f}"))
+            self.doe_results.setItem(
+                row, 2, QTableWidgetItem(f"{float(info.get('k_weighted', 0.0)):.2f}"))
+            item = QTableWidgetItem("OK" if info.get("ok") else "отклонено")
+            if info.get("ok"):
+                item.setBackground(QColor(200, 255, 200))
+            else:
+                item.setBackground(QColor(255, 220, 220))
+                item.setToolTip(str(info.get("rejected_reason", "")))
+            self.doe_results.setItem(row, 3, item)
+        except Exception:
+            pass
+
+    def on_doe_finished(self, best):
+        self.btn_start_doe.setEnabled(True)
+        self.btn_start_opt.setEnabled(True)
+        self.progress.setVisible(False)
+        if best and best.get("k_weighted"):
+            text = (f"✅ Лучший вариант: span={best.get('span', 0):.2f} м, "
+                    f"cr={best.get('chord_root', 0):.2f} м, "
+                    f"ct={best.get('chord_tip', 0):.2f} м, "
+                    f"sweep={best.get('sweep', 0):.1f}° → "
+                    f"Cl={best.get('cl_weighted', 0):.3f}, "
+                    f"K={best.get('k_weighted', 0):.1f}")
+            self.lbl_doe_status.setText(text)
+            self.log_text.append(f"🏆 {text}")
+            try:
+                self._update_geometry_from_opt(best)
+            except Exception as e:
+                self.log_text.append(f"⚠️ Не удалось применить лучший вариант: {e}")
+        else:
+            self.lbl_doe_status.setText("❌ Допустимых вариантов не найдено")
+        if self.opt_worker:
+            self.opt_worker.deleteLater()
+            self.opt_worker = None
+
+
     def _on_cpu_slider_changed(self, value):
         """При изменении слайдера — если анализ идёт, ставим в очередь."""
         cores = max(1, value)
         self.spin_cpu_cores.blockSignals(True)
         self.spin_cpu_cores.setValue(cores)
         self.spin_cpu_cores.blockSignals(False)
-        
-        if self._analysis_running and hasattr(self, '_worker'):
-            # Отложенное применение
-            self._worker.request_cores_change(cores)
-            self.lbl_load_status.setText(
-                f"⏳ {cores} ядер — применится при следующем этапе")
+        # Расчёт уже запущен — новое число ядер применится на следующем этапе
+        # (SessionRunner читает session.cpu_cores при подготовке каждого кейса).
+        runner = getattr(self, "session_runner", None)
+        running = runner is not None and getattr(runner, "isRunning", lambda: False)()
+        if running:
+            self.log_text.append(
+                f"ℹ️ Изменение числа ядер на {cores} применится при следующем этапе.")
         else:
-            # Применяем сразу
-            self._solver_cores = cores
-            self._refresh_load_status_label()
+            self.log_text.append(f"✅ Применено ядер CPU: {cores}")
+        self._refresh_load_status_label()
 
 
 
@@ -5126,6 +5510,9 @@ class MainWindow(QMainWindow):
                 and self._mesh_worker.isRunning():
             self._mesh_worker.cancel()
             self._mesh_worker.wait(5000)
+        if hasattr(self, '_adapt_worker') and self._adapt_worker \
+                and self._adapt_worker.isRunning():
+            self._adapt_worker.wait(5000)
         if hasattr(self, 'plotter'):
             self.plotter.close()
         event.accept()
@@ -5181,6 +5568,17 @@ def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
     window = MainWindow()
     window.show()
+    # Меню «SU2»: настройки config.cfg с подсказками, пресеты устойчивости,
+    # откат config.cfg.orig, справка по SU2_PARTITION.
+    try:
+        import su2_config_dialog
+        su2_config_dialog.install_menu(window)
+    except Exception as e:
+        try:
+            from app_logging import get_logger
+            get_logger().warning("Меню SU2 не подключено: %s", e)
+        except Exception:
+            pass
     return app.exec_()
 
 

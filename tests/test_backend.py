@@ -20,6 +20,16 @@ def check(name, cond, extra=""):
         print(f"  ❌ {name} {extra}")
 
 
+def _raises(exc_type, fn, *args, **kwargs):
+    try:
+        fn(*args, **kwargs)
+        return False
+    except exc_type:
+        return True
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------- rules
 print("== optimization.rules ==")
 from optimization.rules import (Rule, RuleSet, RuleOperator, RuleSeverity,
@@ -140,17 +150,18 @@ class _FakeSession:
 cfg = build_su2_config(aoa=4.0, physics=_FakeSession.physics,
                        solver="RANS", ref_data=_FakeSession.ref_data,
                        markers=_FakeSession.active_markers)
-check("маркер AIRFOIL в нижнем регистре",
-      "MARKER_EULER= ( airfoil" in cfg or "MARKER_NAVIER" in cfg or
-      "( airfoil" in cfg, "")
+# markers = ["wing", "fuselage"] — они попадают в MARKER_HEATFLUX (RANS)
+check("маркеры тел в нижнем регистре в конфиге",
+      "wing" in cfg and "fuselage" in cfg and "WING" not in cfg
+      and "FUSELAGE" not in cfg, "")
 check("маркер FARFIELD в нижнем регистре", "( farfield )" in cfg)
-check("AOA из аргумента", "AOA= 4.0" in cfg)
+check("AOA из аргумента", "AOA= 4" in cfg)
 check("RANS-режим", "RANS" in cfg)
 check("нет заглушки REF_DIMENSIONALIZATION",
       "REF_DIMENSIONALIZATION" in cfg or "REF_AREA" in cfg)
 # ref_data = (Lref, Sref, ox, oy, oz) → REF_AREA = Sref = 1.2
 check("S_ref из ref_data", "REF_AREA= 1.2" in cfg)
-check("L_ref из ref_data", "REF_LENGTH= 10.0" in cfg)
+check("L_ref из ref_data", "REF_LENGTH= 10" in cfg)
 
 # --- согласованность с CConfig::SetPostprocessing (SU2 v8) ---
 # CFL_ADAPT_PARAM: factor down < 1, factor up > 1, min < max — иначе
@@ -186,7 +197,7 @@ with tempfile.TemporaryDirectory() as td:
     p = write_case_config(td, 6.0, _FakeSession())
     check("write_case_config создаёт файл", os.path.isfile(p))
     txt = open(p).read()
-    check("конфиг кейса AOA=6", "AOA= 6.0" in txt)
+    check("конфиг кейса AOA=6", "AOA= 6" in txt)
     check("конфиг ссылается на mesh.su2", "mesh.su2" in txt)
 
 # ---------------------------------------------------------------- atmosphere
@@ -245,6 +256,93 @@ check("общей грани нет в границе", (1, 2, 3) not in _check_
 # один тетраэдр — все 4 грани являются границей
 check("один тет → 4 границы",
       len(_extract_boundary_faces(_np.array([[0, 1, 2, 3]]))) == 4)
+
+# ---------------------------------------------------------------- su2_autoconfig
+print("== su2_autoconfig (пресеты устойчивости) ==")
+import su2_autoconfig as AC
+
+with tempfile.TemporaryDirectory() as td:
+    cfg = os.path.join(td, "config.cfg")
+    with open(cfg, "w", encoding="utf-8") as f:
+        f.write("SOLVER= EULER\nCFL_NUMBER= 10\nCFL_ADAPT= YES\n"
+                "MUSCL_FLOW= YES\nINNER_ITER= 6000\n")
+    out, changes = AC.apply_preset(cfg, "safe")
+    txt = open(cfg, encoding="utf-8").read()
+    check("apply_preset safe: CFL_NUMBER= 2.0", "CFL_NUMBER= 2.0" in txt)
+    check("apply_preset safe: CFL_ADAPT= NO", "CFL_ADAPT= NO" in txt)
+    check("apply_preset safe: MUSCL_FLOW= NO", "MUSCL_FLOW= NO" in txt)
+    check("apply_preset safe: границы не тронуты",
+          "SOLVER= EULER" in txt and "INNER_ITER= 6000" in txt)
+    check("бэкап config.cfg.orig создан", os.path.isfile(cfg + ".orig"))
+    AC.apply_preset(cfg, "safe")
+    txt2 = open(cfg, encoding="utf-8").read()
+    check("повторный apply_preset не дублирует ключи",
+          txt2.count("CFL_NUMBER=") == 1 and txt2.count("CFL_ADAPT=") == 1)
+    AC.apply_preset(cfg, "ultra")
+    txt3 = open(cfg, encoding="utf-8").read()
+    check("ultra: CFL 0.5 + LINEAR_SOLVER_ITER 20",
+          "CFL_NUMBER= 0.5" in txt3 and "LINEAR_SOLVER_ITER= 20" in txt3)
+    check("restore_original", AC.restore_original(cfg) is True)
+    check("оригинал восстановлен", "CFL_ADAPT= YES" in
+          open(cfg, encoding="utf-8").read())
+    check("неизвестный пресет → ValueError",
+          _raises(ValueError, AC.apply_preset, cfg, "nope"))
+
+# детектор по history.csv
+with tempfile.TemporaryDirectory() as td:
+    case = os.path.join(td, "case")
+    os.makedirs(case)
+    h = os.path.join(case, "history.csv")
+    with open(h, "w", encoding="utf-8") as f:
+        f.write('"Inner_Iter","RMS[Rho]","CL"\n')
+        f.write('0,-2.0,0.1\n')
+        f.write('100,-6.5,0.42\n')
+    res = AC.detect_result(case)
+    check("detect_result: сошёлся", res["status"] == "converged", str(res))
+    with open(h, "w", encoding="utf-8") as f:
+        f.write('"Inner_Iter","RMS[Rho]","CL"\n')
+        f.write('0,-2.0,0.1\n')
+        f.write('50,12.0,1e10\n')
+    res = AC.detect_result(case)
+    check("detect_result: разошёлся", res["status"] == "diverged", str(res))
+    action, preset, _ = AC.suggest(case)
+    check("suggest после расхождения → safe", action == "apply_preset"
+          and preset == "safe")
+    res = AC.detect_result(case, screen_text="SU2 has diverged (Residual > 10^20 detected)")
+    check("detect_result по тексту экрана", res["status"] == "diverged")
+
+# ---------------------------------------------------------------- helpers нового функционала
+print("== новые helper-функции (CAD, адаптация, DOE) ==")
+from geometry.generators import cad_to_stl
+check("cad_to_stl: без gmsh или битого файла → RuntimeError",
+      _raises(RuntimeError, cad_to_stl, "/nonexistent/файл.step",
+              os.path.join(tempfile.gettempdir(), "out.stl")))
+
+from solver.workers import find_su2_adapt_exe, _mesh_npoin
+check("find_su2_adapt_exe возвращает str", isinstance(find_su2_adapt_exe(), str))
+with tempfile.TemporaryDirectory() as td:
+    m = os.path.join(td, "mesh.su2")
+    with open(m, "w", encoding="ascii") as f:
+        f.write("NPOIN= 12345\nNELEM= 60000\n")
+    check("_mesh_npoin читает NPOIN", _mesh_npoin(m) == 12345)
+
+from solver.workers import OptimizationWorker
+ow = OptimizationWorker(
+    target_cl=0.45, target_k=15, physics={"mach": 0.3}, solver="EULER",
+    initial_params={"span": 10, "chord_root": 1.8, "chord_tip": 0.9,
+                    "sweep": 12},
+    rule_set=None, flight_points=[], ref_data=(1, 1, 1, 0, 0),
+    body_markers=["wing"], candidates=[{"span": 8.0, "chord_root": 1.5,
+                                        "chord_tip": 0.8, "sweep": 15.0}])
+check("OptimizationWorker принимает candidates (DOE)",
+      ow.candidates == [{"span": 8.0, "chord_root": 1.5,
+                         "chord_tip": 0.8, "sweep": 15.0}])
+ow2 = OptimizationWorker(
+    target_cl=0.45, target_k=15, physics={}, solver="EULER",
+    initial_params={}, rule_set=None, flight_points=[], ref_data=(1, 1, 1, 0, 0),
+    body_markers=[])
+check("OptimizationWorker.candidates по умолчанию None",
+      ow2.candidates is None)
 
 # ---------------------------------------------------------------- summary
 print()

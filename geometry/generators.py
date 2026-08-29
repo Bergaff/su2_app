@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import os
+
 import numpy as np
 import pyvista as pv
 
@@ -453,3 +455,53 @@ def generate_wing(params: WingParameters, airfoil_manager=None) -> pv.PolyData:
         kink_pos_ratio=params.kink_pos if params.flap_kink else None,
     )
     return mesh
+
+
+# ---------------------------------------------------------------------------
+# Direct CAD Import: STEP/IGES/BREP/… → STL через gmsh (OCC-ядро)
+# ---------------------------------------------------------------------------
+# gmsh уже есть в зависимостях приложения (используется для объёмной сетки),
+# поэтому новых тяжёлых библиотек не добавляется. Конвертация идёт через
+# OpenCascade: модель открывается, поверхности триангулируются и пишутся в STL.
+
+CAD_EXTENSIONS = (".step", ".stp", ".iges", ".igs", ".x_t", ".x_b", ".sat",
+                  ".brep", ".bdf", ".nas", ".ply", ".obj", ".off")
+
+def cad_to_stl(src_path: str, out_path: str, log=None) -> str:
+    """Конвертирует CAD-модель в STL триангуляцией поверхностей через gmsh.
+
+    Параметры:
+        src_path — исходный CAD-файл (STEP/IGES/BREP/…)
+        out_path — куда писать STL (расширение .stl)
+        log      — опциональный callable(msg) для лога
+
+    Возвращает out_path. При ошибке поднимает RuntimeError.
+    """
+    if log:
+        log(f"  🔄 Конвертация CAD → STL: {os.path.basename(src_path)}")
+    try:
+        import gmsh
+    except Exception as e:
+        raise RuntimeError(
+            "Модуль gmsh недоступен — Direct CAD Import требует gmsh. "
+            f"({e})") from e
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Verbosity", 2)
+        gmsh.open(src_path)            # OCC читает STEP/IGES/BREP/…
+        gmsh.model.occ.synchronize()
+        gmsh.model.mesh.generate(2)    # триангуляция поверхностей
+        gmsh.write(out_path)           # STL
+    except Exception as e:
+        raise RuntimeError(f"Не удалось импортировать CAD-модель: {e}") from e
+    finally:
+        try:
+            gmsh.finalize()
+        except Exception:
+            pass
+
+    if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+        raise RuntimeError("gmsh не создал STL-файл (пустой результат).")
+    return out_path

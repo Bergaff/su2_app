@@ -90,6 +90,126 @@ def find_su2_partition_exe() -> str:
     return ""
 
 
+def find_su2_adapt_exe() -> str:
+    """Ищет исполняемый файл SU2_ADAPT (адаптация сетки по решению).
+
+    SU2_ADAPT обычно лежит рядом с SU2_CFD.exe в каталоге bin.
+    """
+    candidates: list = []
+    su2_dir = os.path.dirname(config.su2_exe) if getattr(config, "su2_exe", None) else ""
+    if su2_dir:
+        for name in ("SU2_ADAPT.exe", "SU2_ADAPT", "su2_adapt.exe", "su2_adapt"):
+            candidates.append(os.path.join(su2_dir, name))
+    su2_home = os.environ.get("SU2_HOME") or os.environ.get("SU2_RUN")
+    if su2_home:
+        for sub in ("bin", ""):
+            for name in ("SU2_ADAPT.exe", "SU2_ADAPT", "su2_adapt.exe", "su2_adapt"):
+                candidates.append(os.path.join(su2_home, sub, name))
+    for path in candidates:
+        try:
+            if path and os.path.isfile(path):
+                return os.path.abspath(path)
+        except Exception:
+            continue
+    which = shutil.which("SU2_ADAPT") or shutil.which("SU2_ADAPT.exe")
+    if which:
+        return which
+    return ""
+
+
+def run_su2_adapt(case_dir: str, mesh_path: str, restart_path: str,
+                  adapt_markers=("airfoil",), abs_error: float = 1e-6,
+                  log_cb=None) -> str:
+    """Запускает SU2_ADAPT: адаптивная перестройка сетки по решению.
+
+    Требования:
+      * SU2_ADAPT найден рядом с SU2_CFD.exe (иначе RuntimeError);
+      * restart.dat — решение из завершённого расчёта той же сетки.
+
+    Работает в каталоге case_dir (туда кладутся mesh.su2, restart.dat,
+    адаптационный config.cfg). Результат — mesh_adapt.su2 в case_dir;
+    возвращается путь к нему.
+    """
+    adapt_exe = find_su2_adapt_exe()
+    if not adapt_exe:
+        raise RuntimeError(
+            "SU2_ADAPT не найден рядом с SU2_CFD.exe. "
+            "Установите полный дистрибутив SU2 (с адаптивным модулем).")
+
+    def _log(m):
+        if log_cb:
+            try:
+                log_cb(m)
+            except Exception:
+                pass
+
+    os.makedirs(case_dir, exist_ok=True)
+    shutil.copy2(mesh_path, os.path.join(case_dir, "mesh.su2"))
+    shutil.copy2(restart_path, os.path.join(case_dir, "restart.dat"))
+
+    markers = [str(m).strip() for m in (adapt_markers or []) if str(m).strip()]
+    if not markers:
+        markers = ["airfoil"]
+
+    cfg_path = os.path.join(case_dir, "adapt.cfg")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        f.write(
+            "SOLVER= EULER\n"
+            "MATH_PROBLEM= DIRECT\n"
+            "MESH_FORMAT= SU2\n"
+            "MESH_FILENAME= mesh.su2\n"
+            "RESTART_FILENAME= restart.dat\n"
+            "MESH_OUT_FILENAME= mesh_adapt.su2\n"
+            f"MARKER_ADAPT= ( {' '.join(markers)} )\n"
+            f"ADAPT_ABS_ERROR= {float(abs_error):g}\n"
+            "ADAPT_BOUNDARY= YES\n"
+            "ADAPT_NUM_ADAPT= 1\n"
+            "ADAPT_STATISTICS= YES\n"
+        )
+
+    _log(f"🔧 SU2_ADAPT: {adapt_exe}")
+    _log(f"   Сетка: mesh.su2, решение: restart.dat, маркеры: {markers}")
+    try:
+        proc = subprocess.run(
+            [adapt_exe, "adapt.cfg"],
+            cwd=case_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8", errors="replace",
+            timeout=3600,
+            **hidden_subprocess_kwargs(),
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("SU2_ADAPT превысил таймаут 60 мин.") from None
+    except Exception as e:
+        raise RuntimeError(f"Не удалось запустить SU2_ADAPT: {e}") from e
+
+    out_mesh = os.path.join(case_dir, "mesh_adapt.su2")
+    if proc.returncode != 0 or not os.path.isfile(out_mesh):
+        tail = (proc.stdout or "")[-1500:] + (proc.stderr or "")[-1500:]
+        raise RuntimeError("SU2_ADAPT завершился ошибкой.\n" + tail)
+    _log("✅ Адаптация завершена: mesh_adapt.su2")
+    return out_mesh
+
+
+def _mesh_npoin(mesh_path: str):
+    """Читает число точек из mesh.su2 (NMARK-формат). Возвращает int|None."""
+    try:
+        with open(mesh_path, "r", encoding="ascii", errors="ignore") as f:
+            for ln in f:
+                s = ln.strip()
+                if s.startswith("NPOIN="):
+                    try:
+                        return int(s.split("=", 1)[1].strip())
+                    except (ValueError, IndexError):
+                        return None
+                if s.startswith(("NELEM=", "NMARK=")):
+                    continue
+    except OSError:
+        pass
+    return None
+
+
 def partition_mesh(case_dir: str, n_proc: int, log_cb=None) -> bool:
     """Запускает SU2_PARTITION для декомпозиции mesh.su2 на n_proc частей.
 
@@ -756,9 +876,11 @@ class OptimizationWorker(QThread):
     progress_signal = pyqtSignal(int)
     opt_finished = pyqtSignal(object)             # dict лучшего кандидата
     update_geometry_signal = pyqtSignal(object)   # dict параметров → GUI перестраивает крыло
+    variant_ready = pyqtSignal(object)            # dict результата одного варианта (DOE)
 
     def __init__(self, target_cl, target_k, physics, solver, initial_params,
-                 rule_set, flight_points, ref_data, body_markers, parent=None):
+                 rule_set, flight_points, ref_data, body_markers, parent=None,
+                 candidates=None):
         super().__init__(parent)
         self.target_cl = target_cl
         self.target_k = target_k
@@ -774,6 +896,9 @@ class OptimizationWorker(QThread):
         self._cond = QWaitCondition()
         self._geom_ready = False
         self.n_iterations = 6
+        # Табличная оптимизация (DOE): если передан список кандидатов,
+        # перебираем его вместо случайного поиска.
+        self.candidates = list(candidates) if candidates else None
 
     # ------------------------------------------------------------------
     def stop(self):
@@ -869,12 +994,18 @@ class OptimizationWorker(QThread):
         best = {"cl_weighted": 0.0, "k_weighted": 0.0}
         best_score = -1e18
         t0 = _time.time()
-        self.log_signal.emit(f"🧬 Старт оптимизации: {self.n_iterations} кандидатов, "
+        if self.candidates is not None:
+            cands = self.candidates
+            mode = "табличный перебор"
+        else:
+            cands = [self._candidate(it) for it in range(self.n_iterations)]
+            mode = "случайный поиск"
+        n_total = max(1, len(cands))
+        self.log_signal.emit(f"🧬 Старт оптимизации ({mode}): {n_total} кандидатов, "
                              f"точек на кандидата: {len(self.flight_points)}")
-        for it in range(self.n_iterations):
+        for it, cand in enumerate(cands):
             if self._stop:
                 break
-            cand = self._candidate(it)
             self.log_signal.emit(f"→ Кандидат #{it + 1}: span={cand.get('span')}, "
                                  f"cr={cand.get('chord_root')}, ct={cand.get('chord_tip')}, "
                                  f"sweep={cand.get('sweep')}")
@@ -919,7 +1050,20 @@ class OptimizationWorker(QThread):
                 reason = "жёсткое правило" if hard_block else "нет расчёта"
                 self.log_signal.emit(f"  кандидат #{it + 1} отклонён: {reason}.")
 
-            pct = int(100.0 * (it + 1) / self.n_iterations)
+            # Результат варианта — для таблицы DOE в GUI
+            try:
+                self.variant_ready.emit({
+                    "index": it,
+                    "params": dict(cand),
+                    "ok": bool(ev.get("ok")) and not hard_block,
+                    "cl_weighted": ev.get("cl_weighted", 0.0),
+                    "k_weighted": ev.get("k_weighted", 0.0),
+                    "rejected_reason": reason if (not ev.get("ok") or hard_block) else "",
+                })
+            except Exception:
+                pass
+
+            pct = int(100.0 * (it + 1) / n_total)
             self.progress_signal.emit(pct)
 
         if self._stop:
