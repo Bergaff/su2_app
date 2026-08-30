@@ -984,6 +984,112 @@ with tempfile.TemporaryDirectory() as td:
     finally:
         MW.WORK_DIR_BASE = _old_base
 
+print("== build_exe: очистка dist перед сборкой ==")
+import build_exe as BE
+
+check("_rmtree_force: нет каталога → успех, а не WinError 3",
+      BE._rmtree_force(os.path.join(tempfile.gettempdir(),
+                                    "нет_такой_папки_xyz")) == (True, None))
+
+with tempfile.TemporaryDirectory() as td:
+    d = os.path.join(td, "AeroOpt")
+    os.makedirs(os.path.join(d, "_internal"))
+    open(os.path.join(d, "AeroOpt.exe"), "w").write("x")
+    open(os.path.join(d, "_internal", "base_library.zip"), "w").write("y")
+    ok, err = BE._rmtree_force(d, delay=0)
+    check("_rmtree_force: обычное дерево удаляется", ok and err is None)
+    check("_rmtree_force: каталога больше нет", not os.path.exists(d))
+
+with tempfile.TemporaryDirectory() as td:
+    d = os.path.join(td, "AeroOpt")
+    os.makedirs(d)
+    ro = os.path.join(d, "readonly.txt")
+    with open(ro, "w") as f:
+        f.write("r")
+    os.chmod(ro, 0o444)
+    ok, _err = BE._rmtree_force(d, delay=0)
+    check("_rmtree_force: read-only файл снимается и удаляется",
+          ok and not os.path.exists(d))
+
+
+class _FakeShutil:
+    """Подмена shutil: считаем вызовы rmtree."""
+    def __init__(self, errors):
+        self._errors = list(errors)
+        self.calls = 0
+    def rmtree(self, path, **kw):
+        self.calls += 1
+        if self._errors:
+            raise self._errors.pop(0)
+        raise FileNotFoundError(2, "нет", path)
+
+
+_real_shutil = BE.shutil
+with tempfile.TemporaryDirectory() as td:
+    d = os.path.join(td, "AeroOpt")
+    os.makedirs(d)
+    BE.shutil = _FakeShutil([PermissionError(13, "Отказано в доступе", d)])
+    try:
+        ok, err = BE._rmtree_force(d, delay=0)
+        check("_rmtree_force: после WinError 5 повторяет попытку и succeeds",
+              ok and err is None, f"ok={ok} err={err}")
+        check("_rmtree_force: было ровно 2 попытки", BE.shutil.calls == 2,
+              str(BE.shutil.calls))
+    finally:
+        BE.shutil = _real_shutil
+    BE.shutil = _FakeShutil([PermissionError(13, "Отказано в доступе", d)] * 5)
+    try:
+        ok, err = BE._rmtree_force(d, attempts=3, delay=0)
+        check("_rmtree_force: при вечной блокировке честно вернёт False",
+              ok is False and "Отказано" in str(err), f"ok={ok} err={err}")
+        check("_rmtree_force: попыток ровно attempts", BE.shutil.calls == 3,
+              str(BE.shutil.calls))
+    finally:
+        BE.shutil = _real_shutil
+
+check("_running_pids вне Windows → пусто", BE._running_pids() == [])
+check("_kill_app вне Windows не падает", BE._kill_app() is None)
+
+with tempfile.TemporaryDirectory() as td:
+    check("_prepare_dist без dist возвращает True",
+          BE._prepare_dist(td) is True)
+
+    d = os.path.join(td, "dist", "AeroOpt")
+    os.makedirs(d)
+    open(os.path.join(d, "AeroOpt.exe"), "w").write("x")
+    check("_prepare_dist удаляет свободный dist/AeroOpt",
+          BE._prepare_dist(td) is True and not os.path.exists(d))
+
+    # блокировка: удаление не проходит → фоллбэк на переименование
+    os.makedirs(d)
+    open(os.path.join(d, "AeroOpt.exe"), "w").write("x")
+    _real_rmtree = BE._rmtree_force
+    BE._rmtree_force = lambda p, **kw: (False, PermissionError(13, "занято", p))
+    try:
+        ok = BE._prepare_dist(td)
+        olds = [n for n in os.listdir(os.path.join(td, "dist"))
+                if n.startswith("AeroOpt_old_")]
+        check("_prepare_dist при блокировке не падает, а собирает дальше",
+              ok is True)
+        check("_prepare_dist переименовал занятую папку",
+              len(olds) == 1 and not os.path.exists(d), str(olds))
+    finally:
+        BE._rmtree_force = _real_rmtree
+
+    # тотальный отказ: ни удалить, ни переименовать
+    os.makedirs(d)
+    BE._rmtree_force = lambda p, **kw: (False, PermissionError(13, "занято", p))
+    _real_rename = os.rename
+    def _deny_rename(a, b):
+        raise OSError(5, "Отказано в доступе", a)
+    os.rename = _deny_rename
+    try:
+        check("_prepare_dist: если ничего не вышло → False (сборка прерывается)",
+              BE._prepare_dist(td) is False)
+    finally:
+        os.rename = _real_rename
+        BE._rmtree_force = _real_rmtree
+
 # ---------------------------------------------------------------- summary
 print()
 if FAIL:

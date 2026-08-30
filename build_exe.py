@@ -1,6 +1,157 @@
 import os
+import shutil
+import stat
 import sys
 import subprocess
+import time
+
+APP_EXE = "AeroOpt.exe"
+
+def _running_pids(image=APP_EXE):
+    """PID процессов с таким именем (пусто, если tasklist недоступен)."""
+    if sys.platform != "win32":
+        return []
+    try:
+        r = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq " + image, "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, encoding="cp866", errors="replace")
+    except Exception:
+        return []
+    pids = []
+    for line in (r.stdout or "").splitlines():
+        cols = [c.strip().strip('"') for c in line.split('","')]
+        if len(cols) >= 2 and cols[0].lower() == image.lower():
+            pids.append(cols[1])
+    return pids
+
+
+def _kill_app():
+    """Снимает AeroOpt.exe и ждёт, пока Windows отпустит дескрипторы.
+
+    Раньше taskkill вызывался и сразу шёл rmtree — а Windows освобождает
+    файл не мгновенно, отсюда WinError 5 на «вроде бы закрытом» exe.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        subprocess.run(["taskkill", "/F", "/T", "/IM", APP_EXE],
+                       capture_output=True)
+    except Exception:
+        pass
+    for _ in range(20):
+        if not _running_pids():
+            break
+        time.sleep(0.25)
+    time.sleep(0.5)
+
+
+def _rmtree_force(path, attempts=6, delay=0.7):
+    """Удаляет дерево, снимая read-only и пережидая блокировку.
+
+    Возвращает (ok, err). Отсутствие каталога — это УСПЕХ, а не ошибка:
+    раньше FileNotFoundError [WinError 3] печатался как сбой, хотя папку
+    уже стёрли (вручную или частично предыдущей попыткой).
+    """
+    def _retry(func, target, _exc):
+        try:
+            os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
+            func(target)
+        except OSError:
+            pass
+
+    kw = {}
+    if sys.version_info >= (3, 12):
+        kw["onexc"] = _retry
+    else:
+        kw["onerror"] = lambda f, t, ei: _retry(f, t, ei)
+
+    err = None
+    for attempt in range(1, attempts + 1):
+        if not os.path.exists(path):
+            return True, None
+        try:
+            shutil.rmtree(path, **kw)
+            if not os.path.exists(path):
+                return True, None
+            err = "каталог не исчез после rmtree"
+        except FileNotFoundError:
+            return True, None          # уже удалён — нормально
+        except OSError as e:
+            err = e
+        if attempt < attempts:
+            time.sleep(delay * attempt)
+    return (not os.path.exists(path)), err
+
+
+def _prepare_dist(project_root):
+    """Освобождает dist\AeroOpt перед сборкой. True — можно собирать.
+
+    Если удалить не выходит, папка ПЕРЕИМЕНОВЫВАЕТСЯ: переименование
+    каталога Windows разрешает даже при занятом файле внутри, поэтому
+    сборка больше не упирается в блокировку.
+    """
+    dist_dir = os.path.join(project_root, "dist", "AeroOpt")
+    if not os.path.isdir(dist_dir):
+        print("✅ dist/AeroOpt нет — чистая сборка.")
+        return True
+
+    # Командная строка, открытая внутри dist, сама держит папку.
+    cwd = os.path.abspath(os.getcwd())
+    dist_root = os.path.join(project_root, "dist")
+    if cwd == dist_root or cwd.startswith(dist_root + os.sep):
+        print("⚠️  Текущий каталог внутри dist/ — он и блокирует папку.")
+        print("   Перехожу в корень проекта: " + project_root)
+        try:
+            os.chdir(project_root)
+        except OSError:
+            pass
+
+    print("🧹 Освобождаю dist/AeroOpt ...")
+    _kill_app()
+
+    ok, err = _rmtree_force(dist_dir)
+    if ok:
+        print("✅ dist/AeroOpt удалён.")
+        return True
+
+    print("⚠️  Удалить не удалось: " + str(err))
+    pids = _running_pids()
+    if pids:
+        print("   " + APP_EXE + " всё ещё работает, PID: " + ", ".join(pids))
+    left = []
+    for root, _dirs, files in os.walk(dist_dir):
+        for f in files:
+            left.append(os.path.join(root, f))
+            if len(left) >= 10:
+                break
+        if len(left) >= 10:
+            break
+    if left:
+        print("   Остались файлы:")
+        for f in left:
+            print("     - " + f)
+
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    renamed = os.path.join(os.path.dirname(dist_dir), "AeroOpt_old_" + stamp)
+    try:
+        os.rename(dist_dir, renamed)
+    except OSError as e:
+        print("   Переименовать тоже не вышло: " + str(e))
+        print()
+        print("   Сделайте одно из и запустите сборку заново:")
+        print("     1. Диспетчер задач → снимите " + APP_EXE +
+              " и зависшие python.exe;")
+        print("     2. закройте окно проводника, открытое в dist\\AeroOpt;")
+        print("     3. запускайте сборку НЕ изнутри dist\\AeroOpt;")
+        print("     4. добавьте C:\\su2_app в исключения антивируса/Defender;")
+        print("     5. перезагрузите ПК и сразу запустите python build_exe.py.")
+        return False
+
+    print("   ↪️  Не удалил, а переименовал в " + os.path.basename(renamed) +
+          " — сборка продолжается.")
+    print("      Сотрите эту папку вручную, когда " + APP_EXE + " точно закрыт.")
+    return True
+
 
 def build():
     print("=" * 60)
@@ -56,29 +207,17 @@ def build():
         print(f"❌ Не найден точка входа: {os.path.join(project_root, entry)}")
         return
 
-    # Перед сборкой закрываем запущенный AeroOpt.exe — иначе Windows держит
-    # файл dist\AeroOpt\AeroOpt.exe и PyInstaller падает с WinError 5.
+    # Перед сборкой освобождаем dist/AeroOpt. Именно здесь раньше падало
+    # с WinError 5 (exe занят) и WinError 3 (папку уже стёрли вручную,
+    # а скрипт считал это ошибкой и трижды требовал Enter).
     if sys.platform == "win32":
-        try:
-            subprocess.run(["taskkill", "/F", "/IM", "AeroOpt.exe"],
-                           capture_output=True)
-            print("ℹ️  Завершены запущенные процессы AeroOpt.exe (если были).")
-        except Exception:
-            pass
-        dist_dir = os.path.join(project_root, "dist", "AeroOpt")
-        if os.path.isdir(dist_dir):
-            import shutil
-            for attempt in range(3):
-                try:
-                    shutil.rmtree(dist_dir)
-                    break
-                except Exception as e:
-                    print(f"⚠️  Не удалось удалить {dist_dir} (попытка {attempt+1}/3): {e}")
-                    print("   Закройте AeroOpt.exe и окно проводника с этой папкой, затем Enter...")
-                    try:
-                        input()
-                    except Exception:
-                        break
+        if not _prepare_dist(project_root):
+            print("\n❌ Сборка прервана: не удалось освободить dist/AeroOpt.")
+            print("   dist/AeroOpt остался нетронутым — ничего не сломано.\n")
+            return
+        # Кэш PyInstaller тоже может быть занят — чистим, но не фатально.
+        _rmtree_force(os.path.join(project_root, "build", "AeroOpt"),
+                      attempts=2, delay=0.3)
 
     # Автоматически находим ЛОКАЛЬНЫЕ пакеты проекта (папки с __init__.py
     # прямо в корне: mesh, ui, solver и т.п.) и заставляем PyInstaller
@@ -149,10 +288,17 @@ def build():
         # И заодно показываем в консоли.
         print(proc.stdout or "")
 
+    exe_path = os.path.join(project_root, "dist", "AeroOpt", APP_EXE)
+    if proc.returncode == 0 and not os.path.isfile(exe_path):
+        print("\n❌ PyInstaller завершился без ошибки, но " + exe_path +
+              " не появился.")
+        print("   Пришлите build_log.txt.\n")
+        return
+
     if proc.returncode == 0:
         print("\n" + "=" * 60)
         print("🎉 СБОРКА УСПЕШНО ЗАВЕРШЕНА!")
-        print("   Результат: dist/AeroOpt/AeroOpt.exe")
+        print("   Результат: " + exe_path)
         print("   Папку dist/AeroOpt можно архивировать и переносить.")
         print("=" * 60)
     else:
