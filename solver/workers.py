@@ -491,6 +491,25 @@ class SU2Worker:
             return self._result(aoa, False,
                 "Отсутствует mesh.su2. Постройте расчётную сетку заново.")
 
+        # Проверяем config.cfg ДО запуска SU2. Иначе SU2 падает с
+        # «Error in TokenizeString(): ... no "=" sign», а в логе это
+        # выглядит как загадочный обрыв без указания строки.
+        try:
+            import su2_autoconfig as _ac
+            _ok, _problems = _ac.validate_config(cfg_path)
+        except Exception:
+            _ok, _problems = True, []
+        if not _ok:
+            _lines = "\n".join(f"   стр. {n}: {txt!r}  <- {why}"
+                                for n, txt, why in _problems[:5])
+            return self._result(
+                aoa, False,
+                "config.cfg нечитаем для SU2 — запуск отменён.\n\n"
+                f"{_lines}\n\n"
+                "SU2 понимает как комментарий только '%', а не '#': любая "
+                "строка без '=' роняет решатель. Исправьте файл или "
+                "восстановите config.cfg.orig.")
+
         cmd, env_overlay, launch_mode = self._build_cmd(exe)
 
         # === ПАТЧ: лог GPU-режима =========================================

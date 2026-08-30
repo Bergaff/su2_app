@@ -1090,6 +1090,88 @@ with tempfile.TemporaryDirectory() as td:
         os.rename = _real_rename
         BE._rmtree_force = _real_rmtree
 
+print("== config.cfg: синтаксис SU2 (комментарий только '%') ==")
+import su2_autoconfig as AC
+import su2_config_dialog as SCD
+from solver.config_builder import build_su2_config as _bsc
+
+_phys = {"mach": 0.2, "reynolds": 3e6}
+_ref = (1.0, 1.0, 0.25, 0.0, 0.0)
+_LEGACY = """CFL_NUMBER= 5.0
+# ===== AEROOPT-AUTOCONFIG: устойчивый пресет =====
+# Пресет: safe. Откат: вернуть config.cfg.orig
+TIME_DISCRETE_FLOW= EULER_IMPLICIT
+# ===== /AEROOPT-AUTOCONFIG =======================
+"""
+
+check("исходный config.cfg линтер SU2 принимает",
+      AC.su2_lint_lines(_bsc(3.0, _phys, "EULER", _ref,
+                             markers=["airfoil"])) == [])
+check("строка с '#' и без '=' - ошибка (это и роняло SU2)",
+      len(AC.su2_lint_lines("CFL_NUMBER= 2.0\n# комментарий\n")) == 1)
+check("строка с '%' и без '=' - комментарий, ошибки нет",
+      AC.su2_lint_lines("CFL_NUMBER= 2.0\n% комментарий\n") == [])
+check("'%' в середине строки отбрасывает хвост, как в SU2",
+      AC.su2_lint_lines("CFL_NUMBER= 2.0 % хвост\n") == [])
+check("пустые строки и строки из пробелов пропускаются",
+      AC.su2_lint_lines("\n   \n\t\nCFL_NUMBER= 2.0\n") == [])
+check("нет имени перед '=' - ошибка",
+      len(AC.su2_lint_lines("= 5\n")) == 1)
+check("два слова перед '=' - ошибка",
+      len(AC.su2_lint_lines("A B= 5\n")) == 1)
+check("продолжение строки через обратный слэш склеивается",
+      AC.su2_lint_lines("MARKER_SYM= \\\n ( sym )\n") == [])
+
+check("старый блок с '#' линтер бракует (регрессия, которую чиним)",
+      len(AC.su2_lint_lines(_LEGACY)) == 3,
+      str(AC.su2_lint_lines(_LEGACY)))
+
+with tempfile.TemporaryDirectory() as td:
+    p_cfg = os.path.join(td, "config.cfg")
+    open(p_cfg, "w", encoding="utf-8", newline="").write(_LEGACY)
+    check("старый '#'-блок вычищается при новом применении пресета",
+          "# =====" not in "".join(
+              AC._strip_managed_block(AC._read_lines(p_cfg))))
+    open(p_cfg, "w", encoding="utf-8", newline="").write(
+        _bsc(3.0, _phys, "EULER", _ref, markers=["airfoil"],
+             use_symmetry=True, symmetry_planes=["xz"]))
+    AC.apply_preset(p_cfg, "safe")
+    _txt = open(p_cfg, encoding="utf-8").read()
+    check("после apply_preset конфиг читаем для SU2",
+          AC.validate_config(p_cfg)[0] is True,
+          str(AC.validate_config(p_cfg)[1][:2]))
+    check("в конфиге не осталось '#'-комментариев",
+          not any(l.strip().startswith("#") for l in _txt.splitlines()))
+    check("блок пресета помечен '%'", "% ===== AEROOPT-AUTOCONFIG" in _txt)
+    AC.apply_preset(p_cfg, "ultra")
+    check("повторный пресет: блок один, конфиг всё ещё валиден",
+          open(p_cfg, encoding="utf-8").read().count("AEROOPT-AUTOCONFIG") == 2
+          and AC.validate_config(p_cfg)[0] is True)
+    SCD.write_config_values(p_cfg, {"NEW_KEY_X": "1"})
+    check("write_config_values: доп. параметры тоже под '%'",
+          "% ===== AeroOpt" in open(p_cfg, encoding="utf-8").read()
+          and AC.validate_config(p_cfg)[0] is True,
+          str(AC.validate_config(p_cfg)[1][:2]))
+
+_screen = ('SU2: Error in TokenizeString(): line in the configuration '
+           'file with no "=" sign.')
+check("is_config_parse_error распознаёт ошибку разбора",
+      AC.is_config_parse_error(_screen) is True)
+check("обычное расхождение ошибкой разбора не считается",
+      AC.is_config_parse_error("SU2 has diverged (NaN detected).") is False)
+with tempfile.TemporaryDirectory() as td:
+    with open(os.path.join(td, "history.csv"), "w", encoding="utf-8") as f:
+        f.write('"Inner_Iter","rms[Rho]"\n0,0.004\n462,12.95\n')
+    _r = AC.detect_result(td, _screen)
+    check("detect_result: ошибка конфига важнее устаревшего history.csv",
+          _r["status"] == "config_error"
+          and "предыдущ" in _r["detail"].lower(),
+          f"{_r['status']}: {_r['detail'][:60]}")
+    _r2 = AC.detect_result(td, "SU2 has diverged (NaN detected).")
+    check("detect_result: настоящее расхождение по-прежнему видно",
+          _r2["status"] == "diverged" and _r2.get("last_iter") == 462,
+          str(_r2["status"]))
+
 # ---------------------------------------------------------------- summary
 print()
 if FAIL:

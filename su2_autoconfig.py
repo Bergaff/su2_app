@@ -63,8 +63,26 @@ PRESETS = {
 
 PRESET_ORDER = ["safe", "ultra"]
 
-BLOCK_HEADER = "# ===== AEROOPT-AUTOCONFIG: устойчивый пресет ====="
-BLOCK_FOOTER = "# ===== /AEROOPT-AUTOCONFIG ======================="
+# ВАЖНО: единственный символ комментария в config.cfg у SU2 - это '%'.
+# Знак '#' SU2 комментарием НЕ считает: в CConfig::TokenizeString() строка
+# ищется только по '%' (pos = str.find_first_of('%')), а дальше требуется
+# '='. Строка "# ..." без '=' роняет SU2 с
+#   Error in TokenizeString(): line in the configuration file with no "=" sign
+# (проверено по SU2 v8.5.0, Common/src/CConfig.cpp).
+BLOCK_HEADER = "% ===== AEROOPT-AUTOCONFIG: устойчивый пресет ====="
+BLOCK_FOOTER = "% ===== /AEROOPT-AUTOCONFIG ======================="
+
+# Старые версии писали блок с '#' - их тоже надо уметь вычищать.
+_LEGACY_BLOCK_STARTS = ("# ===== AEROOPT-AUTOCONFIG",
+                        "% ===== AEROOPT-AUTOCONFIG")
+_LEGACY_BLOCK_ENDS = ("# ===== /AEROOPT-AUTOCONFIG",
+                      "% ===== /AEROOPT-AUTOCONFIG")
+
+# Разделители SU2 (CConfig::TokenizeString) - нужны для линтера конфига.
+_SU2_DELIMS = " (){}:,\t\n\v\f\r"
+
+# Допустимое имя опции SU2: латиница, цифры, подчёркивание.
+_VALID_OPTION_NAME = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 # ---------------------------------------------------------------------------
@@ -95,10 +113,10 @@ def _strip_managed_block(lines):
     skip = False
     for ln in lines:
         s = ln.strip()
-        if s == BLOCK_HEADER.strip():
+        if s.startswith(_LEGACY_BLOCK_STARTS):
             skip = True
             continue
-        if s == BLOCK_FOOTER.strip():
+        if s.startswith(_LEGACY_BLOCK_ENDS):
             skip = False
             continue
         if not skip:
@@ -121,6 +139,75 @@ def _set_key(lines, key, value):
         else:
             out.append(ln if ln.endswith("\n") else ln + "\n")
     return out, found
+
+
+
+def su2_lint_lines(text):
+    """Проверяет config.cfg ровно так, как это делает SU2.
+
+    Повторяет логику CConfig::TokenizeString() (SU2 v8.5.0):
+      * комментарий - только '%', причём всё от первого '%' отбрасывается;
+      * пустая строка и строка из одних разделителей пропускаются;
+      * в оставшейся части обязан быть '=', до '=' - ровно одно имя.
+
+    Возвращает список (номер_строки, строка, причина). Пустой список -
+    SU2 такой файл прочитает.
+    """
+    problems = []
+    pending = ""          # склейка продолжений через обратный слэш
+    start_no = 0
+    for i, raw in enumerate(text.splitlines(), 1):
+        line = raw.rstrip("\r")
+        if not pending:
+            start_no = i
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        line = pending + line
+        pending = ""
+
+        pos = line.find("%")
+        if not line or pos == 0:
+            continue                      # пусто или комментарий
+        if pos != -1:
+            line = line[:pos]             # SU2 отбрасывает хвост от '%'
+        if not line.strip(_SU2_DELIMS):
+            continue                      # строка из одних разделителей
+        if "=" not in line:
+            problems.append((start_no, raw.rstrip("\r"),
+                             'нет знака "=" — SU2 не считает "#" '
+                             "комментарием, только %"))
+            continue
+        name_part = line.split("=", 1)[0]
+        stripped = name_part.strip(_SU2_DELIMS)
+        if not stripped:
+            problems.append((start_no, raw.rstrip("\r"),
+                             'перед "=" нет имени параметра'))
+            continue
+        if len(stripped.split()) > 1 or any(
+                c in _SU2_DELIMS for c in stripped):
+            problems.append((start_no, raw.rstrip("\r"),
+                             'перед "=" два и более слова'))
+            continue
+        # Имя параметра SU2 приводит к верхнему регистру и ищет в таблице
+        # опций. Строка вида "# =====" даёт имя "#" - SU2 ответит
+        # "invalid option name", поэтому ловим это здесь же.
+        if not _VALID_OPTION_NAME.match(stripped):
+            problems.append((start_no, raw.rstrip("\r"),
+                             f"недопустимое имя параметра {stripped!r} "
+                             "(SU2 понимает как комментарий только '%')"))
+    return problems
+
+
+def validate_config(path):
+    """Возвращает (ok, problems) для config.cfg на диске."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError as e:
+        return False, [(0, "", f"не удалось прочитать файл: {e}")]
+    problems = su2_lint_lines(text)
+    return (not problems), problems
 
 
 def apply_preset(config_path, preset="safe"):
@@ -158,11 +245,21 @@ def apply_preset(config_path, preset="safe"):
             lines[-1] = lines[-1] + "\n"
         lines.append("\n")
         lines.append(BLOCK_HEADER + "\n")
-        lines.append(f"# Пресет: {preset}. Откат: вернуть config.cfg.orig\n")
+        lines.append(f"% Пресет: {preset}. Откат: вернуть config.cfg.orig\n")
         lines.extend(appended)
         lines.append(BLOCK_FOOTER + "\n")
 
     _write_lines(config_path, lines)
+
+    # Самопроверка: если после правки конфиг стал нечитаемым для SU2 -
+    # откатываемся на бэкап и честно сообщаем, а не запускаем SU2 в падение.
+    ok, problems = validate_config(config_path)
+    if not ok:
+        bad = "; ".join(f"стр.{n}: {txt!r}" for n, txt, _r in problems[:3])
+        shutil.copy2(backup, config_path)
+        raise RuntimeError(
+            "После применения пресета config.cfg стал нечитаемым для SU2 "
+            f"({bad}). Откатил config.cfg.orig на место.")
     return config_path, changes
 
 
@@ -236,9 +333,31 @@ def _parse_history(case_dir):
     return last_iter, last_v, first_v, n
 
 
+#: Признаки того, что SU2 умер на РАЗБОРЕ config.cfg, а не на счёте.
+#: В этом случае history.csv остаётся от прошлой попытки, и вердикт
+#: «расхождение на итерации N» был бы ложным - SU2 ни одной итерации
+#: не сделал.
+CONFIG_PARSE_MARKERS = (
+    'error in tokenizestring()',
+    'no "=" sign',
+    "no '=' sign",
+    "two or more options before",
+    "invalid option name",
+    "no value assigned",
+)
+
+
+def is_config_parse_error(text):
+    """True, если SU2 упал на разборе config.cfg (не на расчёте)."""
+    t = (text or "").lower()
+    return any(m in t for m in CONFIG_PARSE_MARKERS)
+
+
 def detect_from_text(text):
     """Быстрая проверка по экрану/логам SU2 (если history.csv нет)."""
     t = (text or "").lower()
+    if is_config_parse_error(t):
+        return "config_error"
     if "has diverged" in t or "residual > 10^20" in t or "residual > 1e20" in t:
         return "diverged"
     if "error exit" in t or "error in " in t:
@@ -246,6 +365,14 @@ def detect_from_text(text):
     if "convergence" in t and "reached" in t:
         return "converged"
     return "unknown"
+
+
+_CONFIG_ERROR_DETAIL = (
+    "SU2 не смог прочитать config.cfg (ошибка разбора, ни одной итерации "
+    "не выполнено). Показатели из history.csv относятся к ПРЕДЫДУЩЕЙ "
+    "попытке и не отражают этот запуск.\n"
+    "Причина почти всегда одна: в config.cfg появилась строка без знака "
+    "'='. SU2 считает комментарием только '%', а не '#'.")
 
 
 def detect_result(path, screen_text=None):
@@ -267,10 +394,14 @@ def detect_result(path, screen_text=None):
                 "diverged": "Расчёт разошёлся (по логу SU2: Residual > 10^20).",
                 "error": "SU2 завершился с ошибкой (см. лог).",
                 "converged": "Сходимость достигнута (по логу SU2).",
+                "config_error": _CONFIG_ERROR_DETAIL,
             }[text_status]
             return {"status": text_status, "detail": msg}
         return {"status": "unknown",
                 "detail": "history.csv не найден или пуст - результат неясен."}
+
+    if text_status == "config_error":
+        return {"status": "config_error", "detail": _CONFIG_ERROR_DETAIL}
 
     last_iter, last_v, first_v, n = info
     base = {

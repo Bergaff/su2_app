@@ -294,7 +294,9 @@ def write_config_values(path, values):
 
     missing = [k for k in values if k not in done]
     if missing:
-        out.append("\n# ===== AeroOpt: дополнительные параметры =====\n")
+        # Комментарий в config.cfg у SU2 - только '%' (не '#'): строка с '#'
+        # и без '=' роняет SU2 в TokenizeString().
+        out.append("\n% ===== AeroOpt: дополнительные параметры =====\n")
         for k in missing:
             out.append(f"{k}= {values[k]}\n")
 
