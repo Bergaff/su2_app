@@ -90,6 +90,126 @@ def find_su2_partition_exe() -> str:
     return ""
 
 
+def find_su2_adapt_exe() -> str:
+    """Ищет исполняемый файл SU2_ADAPT (адаптация сетки по решению).
+
+    SU2_ADAPT обычно лежит рядом с SU2_CFD.exe в каталоге bin.
+    """
+    candidates: list = []
+    su2_dir = os.path.dirname(config.su2_exe) if getattr(config, "su2_exe", None) else ""
+    if su2_dir:
+        for name in ("SU2_ADAPT.exe", "SU2_ADAPT", "su2_adapt.exe", "su2_adapt"):
+            candidates.append(os.path.join(su2_dir, name))
+    su2_home = os.environ.get("SU2_HOME") or os.environ.get("SU2_RUN")
+    if su2_home:
+        for sub in ("bin", ""):
+            for name in ("SU2_ADAPT.exe", "SU2_ADAPT", "su2_adapt.exe", "su2_adapt"):
+                candidates.append(os.path.join(su2_home, sub, name))
+    for path in candidates:
+        try:
+            if path and os.path.isfile(path):
+                return os.path.abspath(path)
+        except Exception:
+            continue
+    which = shutil.which("SU2_ADAPT") or shutil.which("SU2_ADAPT.exe")
+    if which:
+        return which
+    return ""
+
+
+def run_su2_adapt(case_dir: str, mesh_path: str, restart_path: str,
+                  adapt_markers=("airfoil",), abs_error: float = 1e-6,
+                  log_cb=None) -> str:
+    """Запускает SU2_ADAPT: адаптивная перестройка сетки по решению.
+
+    Требования:
+      * SU2_ADAPT найден рядом с SU2_CFD.exe (иначе RuntimeError);
+      * restart.dat — решение из завершённого расчёта той же сетки.
+
+    Работает в каталоге case_dir (туда кладутся mesh.su2, restart.dat,
+    адаптационный config.cfg). Результат — mesh_adapt.su2 в case_dir;
+    возвращается путь к нему.
+    """
+    adapt_exe = find_su2_adapt_exe()
+    if not adapt_exe:
+        raise RuntimeError(
+            "SU2_ADAPT не найден рядом с SU2_CFD.exe. "
+            "Установите полный дистрибутив SU2 (с адаптивным модулем).")
+
+    def _log(m):
+        if log_cb:
+            try:
+                log_cb(m)
+            except Exception:
+                pass
+
+    os.makedirs(case_dir, exist_ok=True)
+    shutil.copy2(mesh_path, os.path.join(case_dir, "mesh.su2"))
+    shutil.copy2(restart_path, os.path.join(case_dir, "restart.dat"))
+
+    markers = [str(m).strip() for m in (adapt_markers or []) if str(m).strip()]
+    if not markers:
+        markers = ["airfoil"]
+
+    cfg_path = os.path.join(case_dir, "adapt.cfg")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        f.write(
+            "SOLVER= EULER\n"
+            "MATH_PROBLEM= DIRECT\n"
+            "MESH_FORMAT= SU2\n"
+            "MESH_FILENAME= mesh.su2\n"
+            "RESTART_FILENAME= restart.dat\n"
+            "MESH_OUT_FILENAME= mesh_adapt.su2\n"
+            f"MARKER_ADAPT= ( {' '.join(markers)} )\n"
+            f"ADAPT_ABS_ERROR= {float(abs_error):g}\n"
+            "ADAPT_BOUNDARY= YES\n"
+            "ADAPT_NUM_ADAPT= 1\n"
+            "ADAPT_STATISTICS= YES\n"
+        )
+
+    _log(f"🔧 SU2_ADAPT: {adapt_exe}")
+    _log(f"   Сетка: mesh.su2, решение: restart.dat, маркеры: {markers}")
+    try:
+        proc = subprocess.run(
+            [adapt_exe, "adapt.cfg"],
+            cwd=case_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8", errors="replace",
+            timeout=3600,
+            **hidden_subprocess_kwargs(),
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("SU2_ADAPT превысил таймаут 60 мин.") from None
+    except Exception as e:
+        raise RuntimeError(f"Не удалось запустить SU2_ADAPT: {e}") from e
+
+    out_mesh = os.path.join(case_dir, "mesh_adapt.su2")
+    if proc.returncode != 0 or not os.path.isfile(out_mesh):
+        tail = (proc.stdout or "")[-1500:] + (proc.stderr or "")[-1500:]
+        raise RuntimeError("SU2_ADAPT завершился ошибкой.\n" + tail)
+    _log("✅ Адаптация завершена: mesh_adapt.su2")
+    return out_mesh
+
+
+def _mesh_npoin(mesh_path: str):
+    """Читает число точек из mesh.su2 (NMARK-формат). Возвращает int|None."""
+    try:
+        with open(mesh_path, "r", encoding="ascii", errors="ignore") as f:
+            for ln in f:
+                s = ln.strip()
+                if s.startswith("NPOIN="):
+                    try:
+                        return int(s.split("=", 1)[1].strip())
+                    except (ValueError, IndexError):
+                        return None
+                if s.startswith(("NELEM=", "NMARK=")):
+                    continue
+    except OSError:
+        pass
+    return None
+
+
 def partition_mesh(case_dir: str, n_proc: int, log_cb=None) -> bool:
     """Запускает SU2_PARTITION для декомпозиции mesh.su2 на n_proc частей.
 
@@ -756,9 +876,12 @@ class OptimizationWorker(QThread):
     progress_signal = pyqtSignal(int)
     opt_finished = pyqtSignal(object)             # dict лучшего кандидата
     update_geometry_signal = pyqtSignal(object)   # dict параметров → GUI перестраивает крыло
+    variant_ready = pyqtSignal(object)            # dict результата одного варианта (DOE)
 
     def __init__(self, target_cl, target_k, physics, solver, initial_params,
-                 rule_set, flight_points, ref_data, body_markers, parent=None):
+                 rule_set, flight_points, ref_data, body_markers, parent=None,
+                 candidates=None, cpu_cores=1, use_symmetry=False,
+                 symmetry_planes=None):
         super().__init__(parent)
         self.target_cl = target_cl
         self.target_k = target_k
@@ -769,11 +892,21 @@ class OptimizationWorker(QThread):
         self.flight_points = flight_points
         self.ref_data = ref_data
         self.body_markers = body_markers
+        # ТЗ №1 (многоядерность) и №2 (плоскость симметрии): оптимизация
+        # раньше всегда считала в одно ядро и без симметрии — теперь
+        # настройки обычного расчёта пробрасываются и сюда.
+        self.cpu_cores = max(1, int(cpu_cores or 1))
+        self.use_symmetry = bool(use_symmetry)
+        self.symmetry_planes = (list(symmetry_planes) if symmetry_planes
+                                else (["xz"] if self.use_symmetry else None))
         self._stop = False
         self._mutex = QMutex()
         self._cond = QWaitCondition()
         self._geom_ready = False
         self.n_iterations = 6
+        # Табличная оптимизация (DOE): если передан список кандидатов,
+        # перебираем его вместо случайного поиска.
+        self.candidates = list(candidates) if candidates else None
 
     # ------------------------------------------------------------------
     def stop(self):
@@ -822,6 +955,30 @@ class OptimizationWorker(QThread):
         return cand
 
     # ------------------------------------------------------------------
+    def _enabled_symmetry_planes(self, mesh_path: str) -> list:
+        """Плоскости симметрии, которые действительно есть в сетке.
+
+        MARKER_SYM с несуществующим маркером роняет SU2, поэтому каждая
+        заявленная плоскость проверяется по ``mesh.su2`` (как это делает
+        :func:`solver.config_builder.write_case_config` для обычного
+        расчёта).
+        """
+        if not self.symmetry_planes:
+            return []
+        try:
+            from solver.config_builder import _mesh_has_marker
+        except Exception:
+            return []
+        tags = {"xz": ("symmetry_plane", "symmetry_xz"),
+                "xy": ("symmetry_xy",), "yz": ("symmetry_yz",)}
+        out = []
+        for p in self.symmetry_planes:
+            p = str(p).lower()
+            if any(_mesh_has_marker(mesh_path, t) for t in tags.get(p, ())):
+                out.append(p)
+        return out
+
+    # ------------------------------------------------------------------
     def _evaluate(self, cand: dict) -> dict:
         cl_w = cd_w = w_sum = 0.0
         results = []
@@ -832,10 +989,17 @@ class OptimizationWorker(QThread):
                 WORK_DIR_BASE, f"OPT_P{id(cand) % 1000}_{p_i}")
             os.makedirs(case_dir, exist_ok=True)
             try:
+                mesh_dst = os.path.join(case_dir, "mesh.su2")
                 if os.path.exists(MESH_FILE):
-                    shutil.copy2(MESH_FILE, os.path.join(case_dir, "mesh.su2"))
+                    shutil.copy2(MESH_FILE, mesh_dst)
                 from solver.config_builder import build_su2_config
-                text = build_su2_config(fp.aoa, self.physics, self.solver, self.ref_data)
+                planes = self._enabled_symmetry_planes(mesh_dst)
+                text = build_su2_config(
+                    fp.aoa, self.physics, self.solver, self.ref_data,
+                    mesh_quality=getattr(self, "mesh_quality", None),
+                    use_symmetry=bool(planes),
+                    symmetry_planes=planes,
+                )
                 with open(os.path.join(case_dir, "config.cfg"), "w",
                           encoding="utf-8") as f:
                     f.write(text)
@@ -845,7 +1009,7 @@ class OptimizationWorker(QThread):
             # === ПАТЧ: пробрасываем compute_device/gpu_percent в оценку ===
             compute_device = getattr(self, "compute_device", "cpu")
             gpu_percent = int(getattr(self, "gpu_percent", 0) or 0)
-            worker = SU2Worker(case_dir, 1, None, None,
+            worker = SU2Worker(case_dir, self.cpu_cores, None, None,
                                compute_device=compute_device,
                                gpu_percent=gpu_percent)
             # =============================================================
@@ -869,12 +1033,18 @@ class OptimizationWorker(QThread):
         best = {"cl_weighted": 0.0, "k_weighted": 0.0}
         best_score = -1e18
         t0 = _time.time()
-        self.log_signal.emit(f"🧬 Старт оптимизации: {self.n_iterations} кандидатов, "
+        if self.candidates is not None:
+            cands = self.candidates
+            mode = "табличный перебор"
+        else:
+            cands = [self._candidate(it) for it in range(self.n_iterations)]
+            mode = "случайный поиск"
+        n_total = max(1, len(cands))
+        self.log_signal.emit(f"🧬 Старт оптимизации ({mode}): {n_total} кандидатов, "
                              f"точек на кандидата: {len(self.flight_points)}")
-        for it in range(self.n_iterations):
+        for it, cand in enumerate(cands):
             if self._stop:
                 break
-            cand = self._candidate(it)
             self.log_signal.emit(f"→ Кандидат #{it + 1}: span={cand.get('span')}, "
                                  f"cr={cand.get('chord_root')}, ct={cand.get('chord_tip')}, "
                                  f"sweep={cand.get('sweep')}")
@@ -919,7 +1089,20 @@ class OptimizationWorker(QThread):
                 reason = "жёсткое правило" if hard_block else "нет расчёта"
                 self.log_signal.emit(f"  кандидат #{it + 1} отклонён: {reason}.")
 
-            pct = int(100.0 * (it + 1) / self.n_iterations)
+            # Результат варианта — для таблицы DOE в GUI
+            try:
+                self.variant_ready.emit({
+                    "index": it,
+                    "params": dict(cand),
+                    "ok": bool(ev.get("ok")) and not hard_block,
+                    "cl_weighted": ev.get("cl_weighted", 0.0),
+                    "k_weighted": ev.get("k_weighted", 0.0),
+                    "rejected_reason": reason if (not ev.get("ok") or hard_block) else "",
+                })
+            except Exception:
+                pass
+
+            pct = int(100.0 * (it + 1) / n_total)
             self.progress_signal.emit(pct)
 
         if self._stop:

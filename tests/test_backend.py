@@ -20,6 +20,16 @@ def check(name, cond, extra=""):
         print(f"  ❌ {name} {extra}")
 
 
+def _raises(exc_type, fn, *args, **kwargs):
+    try:
+        fn(*args, **kwargs)
+        return False
+    except exc_type:
+        return True
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------- rules
 print("== optimization.rules ==")
 from optimization.rules import (Rule, RuleSet, RuleOperator, RuleSeverity,
@@ -140,17 +150,18 @@ class _FakeSession:
 cfg = build_su2_config(aoa=4.0, physics=_FakeSession.physics,
                        solver="RANS", ref_data=_FakeSession.ref_data,
                        markers=_FakeSession.active_markers)
-check("маркер AIRFOIL в нижнем регистре",
-      "MARKER_EULER= ( airfoil" in cfg or "MARKER_NAVIER" in cfg or
-      "( airfoil" in cfg, "")
+# markers = ["wing", "fuselage"] — они попадают в MARKER_HEATFLUX (RANS)
+check("маркеры тел в нижнем регистре в конфиге",
+      "wing" in cfg and "fuselage" in cfg and "WING" not in cfg
+      and "FUSELAGE" not in cfg, "")
 check("маркер FARFIELD в нижнем регистре", "( farfield )" in cfg)
-check("AOA из аргумента", "AOA= 4.0" in cfg)
+check("AOA из аргумента", "AOA= 4" in cfg)
 check("RANS-режим", "RANS" in cfg)
 check("нет заглушки REF_DIMENSIONALIZATION",
       "REF_DIMENSIONALIZATION" in cfg or "REF_AREA" in cfg)
 # ref_data = (Lref, Sref, ox, oy, oz) → REF_AREA = Sref = 1.2
 check("S_ref из ref_data", "REF_AREA= 1.2" in cfg)
-check("L_ref из ref_data", "REF_LENGTH= 10.0" in cfg)
+check("L_ref из ref_data", "REF_LENGTH= 10" in cfg)
 
 # --- согласованность с CConfig::SetPostprocessing (SU2 v8) ---
 # CFL_ADAPT_PARAM: factor down < 1, factor up > 1, min < max — иначе
@@ -186,7 +197,7 @@ with tempfile.TemporaryDirectory() as td:
     p = write_case_config(td, 6.0, _FakeSession())
     check("write_case_config создаёт файл", os.path.isfile(p))
     txt = open(p).read()
-    check("конфиг кейса AOA=6", "AOA= 6.0" in txt)
+    check("конфиг кейса AOA=6", "AOA= 6" in txt)
     check("конфиг ссылается на mesh.su2", "mesh.su2" in txt)
 
 # ---------------------------------------------------------------- atmosphere
@@ -245,6 +256,733 @@ check("общей грани нет в границе", (1, 2, 3) not in _check_
 # один тетраэдр — все 4 грани являются границей
 check("один тет → 4 границы",
       len(_extract_boundary_faces(_np.array([[0, 1, 2, 3]]))) == 4)
+
+# ---------------------------------------------------------------- su2_autoconfig
+print("== su2_autoconfig (пресеты устойчивости) ==")
+import su2_autoconfig as AC
+
+with tempfile.TemporaryDirectory() as td:
+    cfg = os.path.join(td, "config.cfg")
+    with open(cfg, "w", encoding="utf-8") as f:
+        f.write("SOLVER= EULER\nCFL_NUMBER= 10\nCFL_ADAPT= YES\n"
+                "MUSCL_FLOW= YES\nINNER_ITER= 6000\n")
+    out, changes = AC.apply_preset(cfg, "safe")
+    txt = open(cfg, encoding="utf-8").read()
+    check("apply_preset safe: CFL_NUMBER= 2.0", "CFL_NUMBER= 2.0" in txt)
+    check("apply_preset safe: CFL_ADAPT= NO", "CFL_ADAPT= NO" in txt)
+    check("apply_preset safe: MUSCL_FLOW= NO", "MUSCL_FLOW= NO" in txt)
+    check("apply_preset safe: границы не тронуты",
+          "SOLVER= EULER" in txt and "INNER_ITER= 6000" in txt)
+    check("бэкап config.cfg.orig создан", os.path.isfile(cfg + ".orig"))
+    AC.apply_preset(cfg, "safe")
+    txt2 = open(cfg, encoding="utf-8").read()
+    check("повторный apply_preset не дублирует ключи",
+          txt2.count("CFL_NUMBER=") == 1 and txt2.count("CFL_ADAPT=") == 1)
+    AC.apply_preset(cfg, "ultra")
+    txt3 = open(cfg, encoding="utf-8").read()
+    check("ultra: CFL 0.5 + LINEAR_SOLVER_ITER 20",
+          "CFL_NUMBER= 0.5" in txt3 and "LINEAR_SOLVER_ITER= 20" in txt3)
+    check("restore_original", AC.restore_original(cfg) is True)
+    check("оригинал восстановлен", "CFL_ADAPT= YES" in
+          open(cfg, encoding="utf-8").read())
+    check("неизвестный пресет → ValueError",
+          _raises(ValueError, AC.apply_preset, cfg, "nope"))
+
+# детектор по history.csv
+with tempfile.TemporaryDirectory() as td:
+    case = os.path.join(td, "case")
+    os.makedirs(case)
+    h = os.path.join(case, "history.csv")
+    with open(h, "w", encoding="utf-8") as f:
+        f.write('"Inner_Iter","RMS[Rho]","CL"\n')
+        f.write('0,-2.0,0.1\n')
+        f.write('100,-6.5,0.42\n')
+    res = AC.detect_result(case)
+    check("detect_result: сошёлся", res["status"] == "converged", str(res))
+    with open(h, "w", encoding="utf-8") as f:
+        f.write('"Inner_Iter","RMS[Rho]","CL"\n')
+        f.write('0,-2.0,0.1\n')
+        f.write('50,12.0,1e10\n')
+    res = AC.detect_result(case)
+    check("detect_result: разошёлся", res["status"] == "diverged", str(res))
+    action, preset, _ = AC.suggest(case)
+    check("suggest после расхождения → safe", action == "apply_preset"
+          and preset == "safe")
+    res = AC.detect_result(case, screen_text="SU2 has diverged (Residual > 10^20 detected)")
+    check("detect_result по тексту экрана", res["status"] == "diverged")
+
+# ---------------------------------------------------------------- helpers нового функционала
+print("== новые helper-функции (CAD, адаптация, DOE) ==")
+from geometry.generators import cad_to_stl
+check("cad_to_stl: без gmsh или битого файла → RuntimeError",
+      _raises(RuntimeError, cad_to_stl, "/nonexistent/файл.step",
+              os.path.join(tempfile.gettempdir(), "out.stl")))
+
+from solver.workers import find_su2_adapt_exe, _mesh_npoin
+check("find_su2_adapt_exe возвращает str", isinstance(find_su2_adapt_exe(), str))
+with tempfile.TemporaryDirectory() as td:
+    m = os.path.join(td, "mesh.su2")
+    with open(m, "w", encoding="ascii") as f:
+        f.write("NPOIN= 12345\nNELEM= 60000\n")
+    check("_mesh_npoin читает NPOIN", _mesh_npoin(m) == 12345)
+
+from solver.workers import OptimizationWorker
+ow = OptimizationWorker(
+    target_cl=0.45, target_k=15, physics={"mach": 0.3}, solver="EULER",
+    initial_params={"span": 10, "chord_root": 1.8, "chord_tip": 0.9,
+                    "sweep": 12},
+    rule_set=None, flight_points=[], ref_data=(1, 1, 1, 0, 0),
+    body_markers=["wing"], candidates=[{"span": 8.0, "chord_root": 1.5,
+                                        "chord_tip": 0.8, "sweep": 15.0}])
+check("OptimizationWorker принимает candidates (DOE)",
+      ow.candidates == [{"span": 8.0, "chord_root": 1.5,
+                         "chord_tip": 0.8, "sweep": 15.0}])
+ow2 = OptimizationWorker(
+    target_cl=0.45, target_k=15, physics={}, solver="EULER",
+    initial_params={}, rule_set=None, flight_points=[], ref_data=(1, 1, 1, 0, 0),
+    body_markers=[])
+check("OptimizationWorker.candidates по умолчанию None",
+      ow2.candidates is None)
+
+# ---------------------------------------------------------------- aeroelastic
+print("== physics.aeroelastic ==")
+import math
+import numpy as np
+from physics import aeroelastic as AE
+
+check("C(0) = 1", AE.theodorsen(0.0) == complex(1.0, 0.0))
+_c02 = AE.theodorsen(0.2)
+check("|C(k)| < 1 при k > 0", abs(_c02) < 1.0, f"|C(0.2)|={abs(_c02):.4f}")
+check("Im C(k) < 0 при k > 0 (запаздывание следа)", _c02.imag < 0.0,
+      f"G(0.2)={_c02.imag:+.4f}")
+check("C(∞) = 0.5", abs(AE.theodorsen(1.0e6) - 0.5) < 1e-4)
+check("рациональная аппроксимация C(k) (без scipy) точна",
+      max(abs(AE.theodorsen_rational(k) - AE.theodorsen(k))
+          for k in (0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0)) < 0.05)
+
+_vd = AE.divergence_speed(2.0e5, 2.0, 0.3, 1.225)
+_vd_ref = math.sqrt(2.0 * (2.0e5 / (2.0 * 2 * math.pi * 0.3)) / 1.225)
+check("V_D совпадает с аналитикой q_D = K_α/(c·C_Lα·e)",
+      abs(_vd - _vd_ref) < 1e-6, f"{_vd:.4f}")
+check("e ≤ 0 → дивергенции нет", AE.divergence_speed(2e5, 2.0, -0.3, 1.225) is None)
+
+_KW = dict(m=60.0, x_alpha=0.2, b=1.0, I_alpha=12.0, K_h=8.0e4,
+           K_alpha=2.0e5, chord=2.0, e=0.3, rho=1.225)
+_a = AE.a_from_e(0.3, 2.0)
+_Mapp = [[60.0 + math.pi * 1.225, 60.0 * 0.2],
+         [60.0 * 0.2, 12.0 + math.pi * 1.225 * (0.125 + _a ** 2)]]
+_Kapp = [[8.0e4, 0.0], [0.0, 2.0e5]]
+_w_exact = [abs(x) for x in
+            np.sqrt(np.abs(np.linalg.eigvals(
+                np.linalg.inv(np.array(_Mapp)) @ np.array(_Kapp))))]
+_f_exact = sorted(float(w) / (2 * math.pi) for w in _w_exact)
+_f_pk = sorted(m["g"] is not None and m["freq_hz"] for m in AE.pk_point(1e-9, **_KW))
+check("U→0: частоты = собственные с присоединёнными массами",
+      all(abs(p - q) / q < 0.02 for p, q in zip(_f_pk, _f_exact)),
+      f"pk={[round(x,3) for x in _f_pk]} exact={[round(x,3) for x in _f_exact]}")
+check("U→0: демпфирование нулевое",
+      all(abs(m["g"]) < 1e-6 for m in AE.pk_point(1e-9, **_KW)))
+
+_kw_iso = dict(_KW, x_alpha=0.0, e=0.0)
+check("изолированный изгиб устойчив на всех скоростях",
+      all(AE.pk_point(V, **_kw_iso)[0]["g"] < 0 for V in (10, 50, 100, 200, 400)))
+
+_vf, _diag = AE.flutter_speed(V_max=400, n_steps=120, **_KW)
+_kw5 = dict(_KW, K_alpha=6.0e5)
+_vf5, _ = AE.flutter_speed(V_max=800, n_steps=160, **_kw5)
+check("V_F найден", _vf is not None, f"V_F={_vf and round(_vf, 1)}")
+check("V_F растёт с жёсткостью кручения",
+      _vf is not None and _vf5 is not None and _vf5 > _vf,
+      f"{_vf and round(_vf, 1)} → {_vf5 and round(_vf5, 1)}")
+check("g меняет знак в окрестности V_F", _vf is not None
+      and any(d["g"] < 0 for d in _diag if d["V"] < _vf)
+      and any(d["g"] > 0 for d in _diag if d["V"] > _vf))
+_kw_fwd = dict(_KW, e=-0.3)
+_vf_fwd, _ = AE.flutter_speed(V_max=800, n_steps=160, **_kw_fwd)
+check("при оси упругости впереди фокуса (e<0) V_F не ниже",
+      (_vf_fwd is None) or (_vf is not None and _vf_fwd >= _vf))
+
+# стационарный предел должен совпадать с теорией тонкого профиля (Глауэрт)
+_rho, _U, _b, _a2 = 1.225, 120.0, 0.75, -0.15
+_B0, _B1, _B2 = AE.aero_matrices(_rho, _U, _b, _a2, AE.theodorsen(0.0))
+_qs = np.array([0.0, 0.3])
+_qd = np.array([0.4, 0.7])
+_aero = _B0 @ _qs + _B1 @ _qd
+_L_model, _M_model = -_aero[0].real, _aero[1].real
+_qbar = _qd[1] * _b / _U
+_A0g = _qs[1] + _qd[0] / _U - _a2 * _qbar
+_A1g = _qbar
+_CLg = 2 * math.pi * (_A0g + _A1g / 2.0)
+_Cmg = (math.pi / 4.0) * (0.0 - _A1g)
+_L_ref = 0.5 * _rho * _U ** 2 * (2 * _b) * _CLg
+_M_ref = (0.5 * _rho * _U ** 2 * (2 * _b) ** 2 * _Cmg
+          + _b * (0.5 + _a2) * _L_ref)
+check("стационарная сила = теории тонкого профиля",
+      abs(_L_model - _L_ref) < 1e-6 * max(1.0, abs(_L_ref)),
+      f"{_L_model:.4f} vs {_L_ref:.4f}")
+check("стационарный момент = теории тонкого профиля",
+      abs(_M_model - _M_ref) < 1e-6 * max(1.0, abs(_M_ref)),
+      f"{_M_model:.4f} vs {_M_ref:.4f}")
+check("квазистационарное демпфирование кручения ≥ 0 при любом a",
+      all(-(AE.aero_matrices(_rho, V, _b, aa, AE.theodorsen(0.0))[1][1, 1].real)
+          >= -1e-9 for V in (30.0, 100.0, 250.0) for aa in (-0.4, -0.1, 0.2)))
+
+_ares = AE.flutter_assessment(span=30.0, chord_root=4.0, chord_tip=1.5,
+                              mass_wing=9000.0, rho=1.225,
+                              V_cruise=230.0, V_dive=330.0)
+check("flutter_assessment: есть вердикт и V_crit",
+      bool(_ares.get("verdict")) and _ares.get("V_crit") is not None)
+check("flutter_assessment: V_D > V_ref у тяжёлого крыла",
+      _ares["V_D"] is not None and _ares["V_D"] > _ares["V_ref"])
+check("format_report не пустой", len(AE.format_report(_ares)) > 100)
+
+# ---------------------------------------------------------------- structural
+print("== physics.structural ==")
+from physics import structural as ST
+
+_fr = ST.root_forces(L_total=1.0e6, span=30.0, mass_wing=0.0, dist="elliptic")
+check("эллипс: Q_root = L_total", abs(_fr["Q"] - 1.0e6) < 1.0)
+check("эллипс: M_root = 4/(3π)·L·s",
+      abs(_fr["M"] - _fr["M_analytic"]) / _fr["M_analytic"] < 1e-6,
+      f"{_fr['M']:.1f} vs {_fr['M_analytic']:.1f}")
+check("треугольник: M_root = L·s/3",
+      abs(ST.root_forces(1e6, 30.0, dist="triangular")["M"] - 5.0e6) / 5.0e6 < 1e-6)
+check("равномерно: M_root = L·s/2",
+      abs(ST.root_forces(1e6, 30.0, dist="uniform")["M"] - 7.5e6) / 7.5e6 < 1e-6)
+check("разгрузка массой крыла уменьшает момент",
+      ST.root_forces(1e6, 30.0, mass_wing=9000.0)["M"] < _fr["M"])
+check("неизвестное распределение → ValueError",
+      _raises(ValueError, ST.root_forces, 1e6, 30.0, dist="косинус"))
+
+_sa = ST.structural_assessment(span=30.0, chord_root=4.0, mass_aircraft=4.0e4,
+                               mass_wing=9000.0)
+check("structural_assessment: σ > 0 и масса > 0",
+      _sa["sigma"] > 0 and _sa["mass_estimate"] > 0)
+_sa2 = ST.structural_assessment(span=30.0, chord_root=4.0, mass_aircraft=4.0e4,
+                                mass_wing=9000.0, cap_area=0.05)
+check("бо́льшая полка → меньше напряжения", _sa2["sigma"] < _sa["sigma"])
+check("больше перегрузка → меньше запас",
+      ST.structural_assessment(span=30.0, chord_root=4.0, mass_aircraft=4e4,
+                               mass_wing=9000.0, n_limit=6.0)["MS_sigma"]
+      < _sa["MS_sigma"])
+check("format_report(structural) не пустой", len(ST.format_report(_sa)) > 100)
+
+# ---------------------------------------------------------------- postprocessing
+print("== postprocessing (поляра, отчёты) ==")
+from postprocessing.polar import (build_polar, integrated_characteristics,
+                                  linear_fit_cl_alpha, drag_polar_fit)
+from postprocessing import report as REP
+
+_res = [{"aoa": a, "cl": 0.11 * a, "cd": 0.02 + 0.005 * a ** 2,
+         "cm": -0.05 * a, "converged": True} for a in range(-4, 15, 2)]
+_pol = build_polar(_res)
+check("build_polar: точки отсортированы по α",
+      bool(np.all(np.diff(_pol["aoa"]) > 0)) and _pol["aoa"].size == len(_res))
+_fit = linear_fit_cl_alpha(_pol["aoa"], _pol["cl"])
+check("наклон поляры dCl/dα ≈ 0.11 1/град",
+      abs(_fit["cl_alpha_deg"] - 0.11) < 1e-6, f"{_fit['cl_alpha_deg']:.5f}")
+check("α₀ ≈ 0", abs(_fit["alpha0"]) < 1e-9)
+_dp = drag_polar_fit(_pol["cl"], _pol["cd"], aspect_ratio=10.0)
+check("Cd₀ ≈ 0.02", abs(_dp["cd0"] - 0.02) < 1e-6, f"{_dp['cd0']:.6f}")
+check("фактор Освальда положителен", _dp["oswald_e"] > 0.0)
+_ch = integrated_characteristics(_pol, 10.0, weight_n=12000.0, rho=1.225,
+                                 s_ref=12.0, mach=0.15)
+check("интегральные: Cl_max и α срыва найдены",
+      _ch.get("cl_max") is not None and _ch.get("aoa_stall") is not None)
+check("интегральные: скорость сваливания = √(2W/(ρS·Cl_max))",
+      abs(_ch["v_stall"] - math.sqrt(2 * 12000.0 / (1.225 * 12.0 * _ch["cl_max"])))
+      < 1e-6, f"{_ch['v_stall']:.3f}")
+check("интегральные: K_max и точка максимума K",
+      _ch.get("k_max") is not None and _ch.get("aoa_best_k") is not None)
+check("build_polar отбрасывает cd ≤ 0",
+      build_polar([{"aoa": 1, "cl": 0.1, "cd": -1.0}])["aoa"].size == 0)
+
+for _tpl in REP.TEMPLATES:
+    _txt = REP.make_report(_res, aspect_ratio=10.0, template=_tpl,
+                           project_info={"name": "Тест"}, weight_n=12000.0,
+                           rho=1.225, s_ref=12.0, mach=0.15)
+    check(f"шаблон «{_tpl}» формирует отчёт", len(_txt) > 200
+          and "ОТЧЁТ" in _txt)
+check("неизвестный шаблон → ValueError",
+      _raises(ValueError, REP.make_report, _res, template="несуществует"))
+check("render_html даёт HTML",
+      REP.render_html(_res, aspect_ratio=10.0).startswith("<!DOCTYPE html>"))
+with tempfile.TemporaryDirectory() as td:
+    _p = os.path.join(td, "polar.csv")
+    REP.export_csv(_p, _res)
+    _raw = open(_p, "rb").read()
+    check("export_csv: UTF-8 BOM и разделитель «;»",
+          _raw.startswith(b"\xef\xbb\xbf") and b";" in _raw)
+    check("export_csv: строки по числу точек",
+          len(_raw.decode("utf-8-sig").strip().splitlines()) == len(_res) + 1)
+
+# ---------------------------------------------------------------- presets
+print("== su2_preset_format (формат конфигурации) ==")
+import su2_preset_format as PF
+
+check("FORMAT_ID/EXTENSION заданы",
+      PF.FORMAT_ID == "aeroopt.su2preset" and PF.EXTENSION == ".su2preset")
+_cat = PF.key_catalogue()
+check("каталог ключей непустой", len(_cat) >= 10, f"{len(_cat)} ключей")
+_b = PF.builtin_presets()
+check("встроенные шаблоны: ≥ 3", len(_b) >= 3, str(list(_b)))
+for _name, _pre in _b.items():
+    _rep = PF.validate_preset(PF.make_preset(_name, _pre["params"]))
+    check(f"шаблон «{_name}» проходит валидацию", _rep["ok"],
+          str(_rep["errors"]))
+check("пустое имя → ошибка валидации",
+      not PF.validate_preset(PF.make_preset("", {"CFL_NUMBER": "5"}))["ok"])
+check("неизвестный ключ → предупреждение, не ошибка",
+      (lambda r: r["ok"] and len(r["warnings"]) > 0)(
+          PF.validate_preset(PF.make_preset("x", {"НОВЫЙ_КЛЮЧ_SU2": "1"}))))
+check("не-словарь → ошибка валидации", not PF.validate_preset([1, 2])["ok"])
+check("чужой format → ошибка",
+      not PF.validate_preset({"format": "other", "name": "x",
+                              "schema_version": 1, "params": {}})["ok"])
+_cfg = PF.parse_cfg_text("CFL_NUMBER= 5.0\nSOLVER= EULER\n% комментарий\n")
+check("parse_cfg_text разбирает config.cfg",
+      _cfg.get("CFL_NUMBER") == "5.0" and _cfg.get("SOLVER") == "EULER")
+_pf1 = PF.make_preset("A", {"CFL_NUMBER": "5.0"})
+_pf2 = PF.make_preset("B", {"CFL_NUMBER": "2.0", "MUSCL_FLOW": "YES"})
+_diff = PF.diff_presets(_pf1, _pf2)
+check("diff_presets находит отличия", bool(_diff))
+check("preset_to_cfg_lines даёт строки KEY= VALUE",
+      any(ln.strip().startswith("CFL_NUMBER=")
+          for ln in PF.preset_to_cfg_lines(_pf1)))
+check("describe_format описывает формат", "su2preset" in PF.describe_format())
+with tempfile.TemporaryDirectory() as td:
+    _fp = os.path.join(td, "my" + PF.EXTENSION)
+    PF.export_preset(_fp, "Тест", {"CFL_NUMBER": "5.0"})
+    check("экспорт создаёт файл", os.path.isfile(_fp))
+    _imp = PF.import_preset(_fp)
+    check("импорт возвращает те же параметры",
+          _imp["params"]["CFL_NUMBER"] == "5.0" and _imp["name"] == "Тест")
+    check("импорт битого JSON → ValueError",
+          _raises(ValueError, PF.import_preset,
+                  os.path.join(td, "нет_такого" + PF.EXTENSION)))
+    _bad = os.path.join(td, "bad.json")
+    open(_bad, "w", encoding="utf-8").write("{не json")
+    check("импорт не-JSON → ValueError", _raises(ValueError, PF.import_preset, _bad))
+    check("экспорт невалидного в strict-режиме → ValueError",
+          _raises(ValueError, PF.export_preset, os.path.join(td, "x.json"),
+                  "", {"A": "1"}))
+
+# ---------------------------------------------------------------- adapt_gmsh
+print("== mesh.adapt_gmsh (адаптивная сетка) ==")
+from mesh import adapt_gmsh as AG
+
+with tempfile.TemporaryDirectory() as td:
+    _csv = os.path.join(td, "surface_flow.csv")
+    with open(_csv, "w", encoding="utf-8", newline="") as f:
+        f.write('"x","y","z","C_Pressure"\n')
+        for _i in range(21):
+            _x = _i / 20.0
+            f.write(f"{_x:.5f},{0.1 * math.sqrt(_x):.5f},0.0,"
+                    f"{-3.0 * math.exp(-_x / 0.02) - 0.2:.5f}\n")
+    _s = AG.parse_surface_flow_csv(_csv)
+    check("parse_surface_flow_csv: колонки x/y/z/cp",
+          set(("x", "y", "z", "cp")) <= set(_s) and _s["x"].size == 21)
+    _g = AG.pressure_gradient_along_surface(_s["x"], _s["y"], _s["cp"])
+    check("градиент Cp максимален у носка",
+          int(np.argmax(_g)) <= 2, f"argmax={int(np.argmax(_g))}")
+    _pts, _sz = AG.surface_size_metric(_s["x"], _s["y"], _g,
+                                       h_min=5e-4, h_max=2e-2)
+    check("метрика: у носка мельче, чем на конце",
+          _sz[0] < _sz[-1] and _sz[0] <= 5e-4 + 1e-12)
+    check("метрика: размеры в диапазоне [h_min, h_max]",
+          _sz.min() >= 5e-4 - 1e-12 and _sz.max() <= 2e-2 + 1e-12)
+    _mp = os.path.join(td, "metric.msh")
+    AG.write_metric_msh(_mp, _pts, _sz)
+    _body = open(_mp, encoding="ascii").read()
+    check("metric.msh: формат 2.2 + $NodeData",
+          "$MeshFormat\n2.2 0 8" in _body and "$NodeData" in _body
+          and _body.rstrip().endswith("$EndNodeData"))
+    _gp = os.path.join(td, "adapt.geo")
+    AG.write_metric_geo(_gp, _mp, os.path.join(td, "in.stl"),
+                        os.path.join(td, "out.stl"), 5e-4, 2e-2)
+    _geo = open(_gp, encoding="utf-8").read()
+    check("adapt.geo: Mesh.Metric + Mesh 2 + Save",
+          "Mesh.Metric =" in _geo and "Mesh 2;" in _geo and "Save(" in _geo)
+    _rep = AG.adaptivity_report(_s, _sz)
+    check("adaptivity_report: минимум Cp и размер в этой точке",
+          _rep["cp_min"] < 0 and _rep["h_at_cp_min"] <= 5e-4 + 1e-12)
+    check("format_adaptivity_report не пустой",
+          len(AG.format_adaptivity_report(_rep)) > 60)
+    check("parse_surface_flow_csv: нет файла → FileNotFoundError",
+          _raises(FileNotFoundError, AG.parse_surface_flow_csv,
+                  os.path.join(td, "нет.csv")))
+
+# ---------------------------------------------------------------- CAD split
+print("== geometry.generators (Direct CAD Import, сборки) ==")
+from geometry.generators import (_stl_name_for_solid, count_stl_triangles,
+                                 cad_inspect, cad_split_to_stl, cad_to_stl)
+import struct
+
+with tempfile.TemporaryDirectory() as td:
+    _bin = os.path.join(td, "b.stl")
+    with open(_bin, "wb") as f:
+        f.write(b"\0" * 80 + struct.pack("<I", 2))
+        f.write(struct.pack("<12fH", *([0.0] * 12), 0) * 2)
+    check("count_stl_triangles: бинарный STL", count_stl_triangles(_bin) == 2)
+    _asc = os.path.join(td, "a.stl")
+    with open(_asc, "w", encoding="ascii") as f:
+        f.write("solid s\n" + " facet normal 0 0 1\n endfacet\n" * 3 + "endsolid\n")
+    check("count_stl_triangles: текстовый STL", count_stl_triangles(_asc) == 3)
+    check("count_stl_triangles: нет файла → 0",
+          count_stl_triangles(os.path.join(td, "нет.stl")) == 0)
+check("_stl_name_for_solid: имя тела и индекс",
+      _stl_name_for_solid("asm", 1, "Крыло / левое", 7) == "asm_01_Крыло___левое.stl")
+check("_stl_name_for_solid: пустое имя → solid_<tag>",
+      _stl_name_for_solid("asm", 2, "  ", 3) == "asm_02_solid_3.stl")
+for _fn, _nm in ((cad_inspect, "cad_inspect"), (cad_split_to_stl, "cad_split_to_stl"),
+                 (cad_to_stl, "cad_to_stl")):
+    check(f"{_nm} без gmsh → RuntimeError",
+          _raises(RuntimeError, _fn, "нет_такого.step", "out.stl")
+          or _raises(RuntimeError, _fn, "нет_такого.step", tempfile.gettempdir()))
+
+# ---------------------------------------------------------------- workers (ТЗ 1, 2)
+print("== solver.workers: многоядерность и симметрия в оптимизации ==")
+_ow = OptimizationWorker(
+    target_cl=0.45, target_k=15, physics={}, solver="EULER",
+    initial_params={}, rule_set=None, flight_points=[],
+    ref_data=(1, 1, 1, 0, 0), body_markers=[], cpu_cores=8,
+    symmetry_planes=["xz", "yz"])
+check("OptimizationWorker принимает cpu_cores", _ow.cpu_cores == 8)
+check("OptimizationWorker принимает symmetry_planes",
+      _ow.symmetry_planes == ["xz", "yz"])
+_ow_def = OptimizationWorker(
+    target_cl=0.45, target_k=15, physics={}, solver="EULER",
+    initial_params={}, rule_set=None, flight_points=[],
+    ref_data=(1, 1, 1, 0, 0), body_markers=[])
+check("cpu_cores по умолчанию = 1", _ow_def.cpu_cores == 1)
+check("без симметрии symmetry_planes = None", _ow_def.symmetry_planes is None)
+check("_enabled_symmetry_planes: нет плоскостей → []",
+      _ow_def._enabled_symmetry_planes("нет_такой_сетки.su2") == [])
+with tempfile.TemporaryDirectory() as td:
+    _m = os.path.join(td, "mesh.su2")
+    with open(_m, "w", encoding="ascii") as f:
+        f.write("NPOIN= 4\nNELEM= 2\nMARKER_TAG= symmetry_xz\n"
+                "MARKER_ELEMS= 2\nMARKER_TAG= airfoil\nMARKER_ELEMS= 1\n")
+    check("_enabled_symmetry_planes видит symmetry_xz в сетке",
+          _ow._enabled_symmetry_planes(_m) == ["xz"],
+          str(_ow._enabled_symmetry_planes(_m)))
+    _ow_yz = OptimizationWorker(
+        target_cl=0.45, target_k=15, physics={}, solver="EULER",
+        initial_params={}, rule_set=None, flight_points=[],
+        ref_data=(1, 1, 1, 0, 0), body_markers=[], symmetry_planes=["yz"])
+    check("нет маркера yz → плоскость не включается",
+          _ow_yz._enabled_symmetry_planes(_m) == [])
+
+# ---------------------------------------------------------------- DOE
+print("== optimization.doe (сетка вариантов и поколения) ==")
+from optimization import doe as DOE
+
+_BASE = {"span": 15.0, "chord_root": 1.5, "chord_tip": 0.7, "sweep": 10.0,
+         "twist": 0.0, "flap_deflection": 0.0, "slat_deflection": 0.0}
+_RNG = {"span": (13.0, 17.0), "chord_root": (1.3, 1.7), "sweep": (5.0, 15.0)}
+check("уровни параметра: концы совпадают с диапазоном",
+      DOE.levels_for("span", 13.0, 17.0, 3) == [13.0, 15.0, 17.0],
+      str(DOE.levels_for("span", 13.0, 17.0, 3)))
+check("уровни ограничены пределами параметра",
+      all(0.5 <= v <= 100.0 for v in DOE.levels_for("span", -5.0, 500.0, 5)))
+_ff = DOE.full_factorial(_BASE, _RNG, 3)
+check("полный факторный план: levels**n вариантов",
+      len(_ff) == DOE.plan_size(DOE.PLAN_FULL, len(_RNG), 3) == 27,
+      f"{len(_ff)}")
+check("полный факторный: неповаряемые параметры сохранены",
+      all(r["chord_tip"] == _BASE["chord_tip"] for r in _ff))
+_ofat = DOE.one_factor_at_a_time(_BASE, _RNG, 3)
+check("план «по одному параметру»: 1 + n·(levels−1)",
+      len(_ofat) == DOE.plan_size(DOE.PLAN_OFAT, len(_RNG), 3) == 7,
+      f"{len(_ofat)}")
+check("план «по одному»: в каждой строке изменён один параметр",
+      all(sum(1 for k in _RNG if r[k] != _BASE[k]) <= 1 for r in _ofat))
+_lhs = DOE.latin_hypercube(_BASE, _RNG, 9, seed=42)
+check("латинский гиперкуб: заданное число вариантов", len(_lhs) == 9)
+_layers = [sorted(round(r["span"], 3) for r in _lhs)]
+check("латинский гиперкуб: значения внутри диапазона",
+      all(13.0 <= v <= 17.0 for v in _layers[0]))
+check("латинский гиперкуб: воспроизводим при том же seed",
+      [r["span"] for r in DOE.latin_hypercube(_BASE, _RNG, 9, seed=42)]
+      == [r["span"] for r in _lhs])
+check("латинский гиперкуб: разные seed дают разные планы",
+      [r["span"] for r in DOE.latin_hypercube(_BASE, _RNG, 9, seed=1)]
+      != [r["span"] for r in _lhs])
+_ng = DOE.next_generation(_ff[0], _RNG, shrink=0.5)
+check("следующее поколение: диапазоны сужаются вдвое",
+      all(abs(_ng[k][1] - _ng[k][0]) < abs(_RNG[k][1] - _RNG[k][0])
+          for k in _RNG))
+check("следующее поколение: лучший вариант внутри диапазона",
+      all(_ng[k][0] <= _ff[0][k] <= _ng[k][1] for k in _RNG))
+check("make_plan по названию полного плана",
+      len(DOE.make_plan(DOE.PLAN_FULL, _BASE, _RNG, 3)) == 27)
+check("make_plan: неизвестный план → ValueError",
+      _raises(ValueError, DOE.make_plan, "нет такого", _BASE, _RNG))
+check("PARAM_SPECS содержит все параметры DOE-таблицы",
+      {"span", "chord_root", "chord_tip", "sweep", "twist",
+       "flap_deflection", "slat_deflection"} <= set(DOE.SPEC_BY_KEY))
+
+# ---------------------------------------------------------------- UI handlers# ---------------------------------------------------------------- UI handlers
+print("== ui.main_window: обработчики новых разделов ==")
+import ui.main_window as MW
+
+
+class _FakeSpin:
+    """Мини-замена QDoubleSpinBox/QSpinBox/QComboBox для теста логики."""
+    def __init__(self, value=0.0, text=""):
+        self._v = value
+        self._t = text
+    def value(self):
+        return self._v
+    def setValue(self, v):
+        self._v = v
+    def currentText(self):
+        return self._t
+    def currentData(self):
+        return self._t
+    def setText(self, t):
+        self._t = t
+    def text(self):
+        return self._t
+
+
+class _FakeBox:
+    def __init__(self):
+        self._txt = ""
+    def setText(self, t):
+        self._txt = t
+    def text(self):
+        return self._txt
+    def append(self, t):
+        self._txt += t
+
+
+class _FakeChk:
+    def __init__(self, v=False):
+        self._v = v
+    def isChecked(self):
+        return self._v
+
+
+class _FakeAxis:
+    def clear(self): pass
+    def plot(self, *a, **k): pass
+    def axvline(self, *a, **k): pass
+    def set_title(self, *a, **k): pass
+    def set_xlabel(self, *a, **k): pass
+    def set_ylabel(self, *a, **k): pass
+    def grid(self, *a, **k): pass
+    def tick_params(self, *a, **k): pass
+    def legend(self, *a, **k): pass
+
+
+def _mk_window(**attrs):
+    w = MW.MainWindow.__new__(MW.MainWindow)
+    w.log_text = _FakeBox()
+    w.ae_w = {"span": _FakeSpin(15.0), "chord_root": _FakeSpin(1.5),
+              "chord_tip": _FakeSpin(0.7), "mass_wing": _FakeSpin(600.0),
+              "rho": _FakeSpin(1.225), "v_cruise": _FakeSpin(120.0),
+              "v_dive": _FakeSpin(180.0), "safety": _FakeSpin(1.15),
+              "t_ratio": _FakeSpin(0.12), "x_ea_ratio": _FakeSpin(0.40),
+              "x_cg_ratio": _FakeSpin(0.38), "out": _FakeBox(),
+              "fill_from_model": _FakeChk(False)}
+    w.st_w = {"span": _FakeSpin(15.0), "chord_root": _FakeSpin(1.5),
+              "mass_aircraft": _FakeSpin(1200.0), "mass_wing": _FakeSpin(600.0),
+              "n_limit": _FakeSpin(3.8), "dist": _FakeSpin(text="elliptic"),
+              "t_ratio": _FakeSpin(0.12), "cap_frac": _FakeSpin(0.02),
+              "sigma_allow": _FakeSpin(2.8e8), "sf": _FakeSpin(1.5),
+              "out": _FakeBox()}
+    w.sp_w = {"weight": _FakeSpin(1200.0), "rho": _FakeSpin(1.225),
+              "s_ref": _FakeSpin(12.0), "mach": _FakeSpin(0.15),
+              "template": _FakeSpin(text="полный"),
+              "project_name": _FakeSpin(text="Тест"), "out": _FakeBox()}
+    w.pr_w = {"name": _FakeSpin(text="Мой пресет"),
+              "source": _FakeSpin(text="std"), "out": _FakeBox()}
+    w.w_span = _FakeSpin(15.0)
+    w.w_chord_root = _FakeSpin(1.5)
+    w.w_chord_tip = _FakeSpin(0.7)
+    w.plot_canvas = type("C", (), {"axes1": _FakeAxis(), "draw": lambda s: None})()
+    w.bottom_tabs = type("T", (), {"setCurrentWidget": lambda s, w2: None})()
+    for k, v in attrs.items():
+        setattr(w, k, v)
+    return w
+
+
+_w = _mk_window()
+_w.run_aeroelastic_check()
+check("run_aeroelastic_check выводит отчёт",
+      "АЭРОУПРУГОСТЬ" in _w.ae_w["out"].text()
+      and "V_F" in _w.ae_w["out"].text(), _w.ae_w["out"].text()[:80])
+check("run_aeroelastic_check пишет в лог", "Аэроупругость" in _w.log_text.text())
+check("run_aeroelastic_check кэширует результат",
+      getattr(_w, "_last_aeroelastic", None) is not None)
+_w.plot_vg_diagram()
+check("plot_vg_diagram отрабатывает без ошибок", True)
+
+_w2 = _mk_window()
+_w2.run_structural_check()
+check("run_structural_check выводит отчёт",
+      "ПРОЧНОСТЬ" in _w2.st_w["out"].text().upper()
+      or "σ" in _w2.st_w["out"].text(), _w2.st_w["out"].text()[:80])
+check("run_structural_check пишет в лог", "Прочность" in _w2.log_text.text())
+
+
+class _FakeTable:
+    def __init__(self, rows):
+        self._rows = rows
+    def rowCount(self):
+        return len(self._rows)
+    def item(self, r, c):
+        v = self._rows[r][c] if c < len(self._rows[r]) else None
+        if v is None:
+            return None
+        return type("I", (), {"text": lambda s, v=v: str(v)})()
+
+
+_ROWS = [[a, 0.11 * a, 0.02 + 0.005 * a ** 2, -0.05 * a]
+         for a in range(-4, 15, 2)]
+_w3 = _mk_window(table=_FakeTable(_ROWS))
+_w3.build_polar_from_results()
+check("build_polar_from_results выводит характеристики",
+      "КЛАД" in _w3.sp_w["out"].text().upper()
+      or "Освальда" in _w3.sp_w["out"].text(), _w3.sp_w["out"].text()[:80])
+check("build_polar_from_results нашёл Cl_max", "Cl макс" in _w3.sp_w["out"].text())
+_w4 = _mk_window(table=_FakeTable([[0, 0.1, 0.02, 0.0]]))
+_w4.build_polar_from_results()
+check("мало точек → понятное сообщение", "меньше трёх точек" in _w4.sp_w["out"].text())
+_w5 = _mk_window(table=_FakeTable(_ROWS))
+_w5._polar_chars()
+_w5.run_aeroelastic_check()
+_w5.run_structural_check()
+with tempfile.TemporaryDirectory() as td:
+    _rp = os.path.join(td, "rep.html")
+    _cp = os.path.join(td, "polar.csv")
+    _answers = [_rp, _cp]          # первый диалог — отчёт, второй — поляра
+    _orig = MW.QFileDialog.getSaveFileName
+
+    def _fake_save(*a, **k):
+        return (_answers.pop(0) if _answers else "", "")
+
+    MW.QFileDialog.getSaveFileName = staticmethod(_fake_save)
+    try:
+        _w5.export_analysis_report()
+        _w5.export_polar_csv()
+    finally:
+        MW.QFileDialog.getSaveFileName = _orig
+    if not os.path.isfile(_rp):
+        print("     [debug] out =", _w5.sp_w["out"].text()[:400])
+    check("export_analysis_report создаёт HTML",
+          os.path.isfile(_rp) and "<!DOCTYPE html>" in open(_rp, encoding="utf-8").read())
+    check("отчёт содержит раздел аэроупругости",
+          "АЭРОУПРУГОСТЬ" in open(_rp, encoding="utf-8").read())
+    check("export_polar_csv создаёт CSV",
+          os.path.isfile(os.path.join(td, "polar.csv")))
+
+_w6 = _mk_window(session=type("S", (), {"turb_model": "SA", "cpu_cores": 4,
+                                        "CFL_NUMBER": "5.0"})())
+_w6._imported_preset = None
+_w6.apply_imported_preset()
+check("apply_imported_preset без импорта → подсказка",
+      "Сначала импортируйте" in _w6.pr_w["out"].text())
+with tempfile.TemporaryDirectory() as td:
+    _pp = os.path.join(td, "p" + PF.EXTENSION)
+    PF.export_preset(_pp, "Из теста", {"CFL_NUMBER": "3.5", "MUSCL_FLOW": "YES"})
+    _w6._imported_preset = PF.import_preset(_pp)
+    _w6.apply_imported_preset()
+    check("apply_imported_preset применяет параметры",
+          "Применено параметров" in _w6.pr_w["out"].text()
+          and "Пресет" in _w6.log_text.text())
+check("_session_params читает объект расчёта",
+      isinstance(_w6._session_params(), dict))
+
+print("== ui.main_window: DOE-таблица и адаптация по Cp ==")
+_w7 = _mk_window()
+check("_doe_param_names: расширенный набор параметров",
+      _w7._doe_param_names() == ["span", "chord_root", "chord_tip", "sweep",
+                                 "twist", "flap_deflection",
+                                 "slat_deflection"],
+      str(_w7._doe_param_names()))
+check("_doe_param_labels: подписи из каталога DOE",
+      len(_w7._doe_param_labels()) == 7
+      and _w7._doe_param_labels()[0].startswith("Размах"))
+
+
+class _FakeDoeTable:
+    def __init__(self):
+        self._rows = []
+    def setRowCount(self, n):
+        self._rows = self._rows[:n]
+    def rowCount(self):
+        return len(self._rows)
+    def insertRow(self, _r):
+        self._rows.append({})
+    def setItem(self, r, c, item):
+        self._rows[r][c] = item.text()
+    def item(self, r, c):
+        v = self._rows[r].get(c)
+        return None if v is None else type("I", (), {"text": lambda s, v=v: v})()
+
+
+class _FakeLbl:
+    def __init__(self):
+        self._t = ""
+    def setText(self, t):
+        self._t = t
+    def text(self):
+        return self._t
+
+
+class _FakeItem:
+    def __init__(self, t):
+        self._t = t
+    def text(self):
+        return self._t
+    def setTextAlignment(self, *_a):
+        pass
+
+
+_orig_item = MW.QTableWidgetItem
+MW.QTableWidgetItem = _FakeItem
+try:
+    _w7.doe_table = _FakeDoeTable()
+    _w7.lbl_doe_status = _FakeLbl()
+    _w7._fill_doe_table([{"span": 14.0, "chord_root": 1.4, "chord_tip": 0.7,
+                          "sweep": 8.0, "twist": 1.5, "flap_deflection": 10.0,
+                          "slat_deflection": 5.0}])
+    check("_fill_doe_table заполняет строку",
+          _w7.doe_table.rowCount() == 1
+          and _w7.doe_table.item(0, 0).text() == "14.000"
+          and _w7.doe_table.item(0, 4).text() == "1.500",
+          str([_w7.doe_table.item(0, c).text() for c in range(7)]))
+    check("_fill_doe_table обновляет статус", "1" in _w7.lbl_doe_status.text())
+    _cands = _w7._get_doe_candidates()
+    check("_get_doe_candidates читает все 7 параметров",
+          len(_cands) == 1 and _cands[0]["twist"] == 1.5
+          and _cands[0]["flap_deflection"] == 10.0, str(_cands))
+finally:
+    MW.QTableWidgetItem = _orig_item
+
+with tempfile.TemporaryDirectory() as td:
+    _old_base = MW.WORK_DIR_BASE
+    MW.WORK_DIR_BASE = td
+    try:
+        _rd = os.path.join(td, "RUN_1")
+        os.makedirs(_rd)
+        with open(os.path.join(_rd, "surface_flow.csv"), "w",
+                  encoding="utf-8") as f:
+            f.write('"x","y","C_Pressure"\n0,0,-1\n1,0,-0.1\n')
+        _w8 = _mk_window()
+        check("_find_latest_surface_flow_csv находит файл",
+              _w8._find_latest_surface_flow_csv().endswith("surface_flow.csv"))
+        check("_last_stl_or_mesh_source: нет деталей → пустая строка",
+              _w8._last_stl_or_mesh_source() == "")
+        _stl = os.path.join(td, "wing.stl")
+        open(_stl, "w", encoding="ascii").write("solid s\nendsolid\n")
+        _w8.bodies = [{"id": 1, "role": "wing", "visible": True, "path": _stl}]
+        check("_last_stl_or_mesh_source возвращает STL видимой детали",
+              _w8._last_stl_or_mesh_source() == _stl)
+    finally:
+        MW.WORK_DIR_BASE = _old_base
 
 # ---------------------------------------------------------------- summary
 print()

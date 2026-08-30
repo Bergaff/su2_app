@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import os
+
 import numpy as np
 import pyvista as pv
 
@@ -453,3 +455,229 @@ def generate_wing(params: WingParameters, airfoil_manager=None) -> pv.PolyData:
         kink_pos_ratio=params.kink_pos if params.flap_kink else None,
     )
     return mesh
+
+
+# ---------------------------------------------------------------------------
+# Direct CAD Import: STEP/IGES/BREP/… → STL через gmsh (OCC-ядро)
+# ---------------------------------------------------------------------------
+# gmsh уже есть в зависимостях приложения (используется для объёмной сетки),
+# поэтому новых тяжёлых библиотек не добавляется. Конвертация идёт через
+# OpenCascade: модель открывается, поверхности триангулируются и пишутся в STL.
+
+CAD_EXTENSIONS = (".step", ".stp", ".iges", ".igs", ".x_t", ".x_b", ".sat",
+                  ".brep", ".bdf", ".nas", ".ply", ".obj", ".off")
+
+def cad_to_stl(src_path: str, out_path: str, log=None) -> str:
+    """Конвертирует CAD-модель в STL триангуляцией поверхностей через gmsh.
+
+    Параметры:
+        src_path — исходный CAD-файл (STEP/IGES/BREP/…)
+        out_path — куда писать STL (расширение .stl)
+        log      — опциональный callable(msg) для лога
+
+    Возвращает out_path. При ошибке поднимает RuntimeError.
+    """
+    if log:
+        log(f"  🔄 Конвертация CAD → STL: {os.path.basename(src_path)}")
+    try:
+        import gmsh
+    except Exception as e:
+        raise RuntimeError(
+            "Модуль gmsh недоступен — Direct CAD Import требует gmsh. "
+            f"({e})") from e
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Verbosity", 2)
+        gmsh.open(src_path)            # OCC читает STEP/IGES/BREP/…
+        gmsh.model.occ.synchronize()
+        gmsh.model.mesh.generate(2)    # триангуляция поверхностей
+        gmsh.write(out_path)           # STL
+    except Exception as e:
+        raise RuntimeError(f"Не удалось импортировать CAD-модель: {e}") from e
+    finally:
+        try:
+            gmsh.finalize()
+        except Exception:
+            pass
+
+    if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+        raise RuntimeError("gmsh не создал STL-файл (пустой результат).")
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Direct CAD Import: многодетальные сборки (ТЗ, п. 4)
+# ---------------------------------------------------------------------------
+# STEP/IGES-сборка обычно содержит несколько тел (solid). Если триангулировать
+# файл целиком, все детали попадают в один STL и теряют индивидуальные имена —
+# их нельзя ни скрыть, ни назначить им разные граничные условия. Функции ниже
+# раскладывают сборку на отдельные STL: по одному на тело.
+
+def count_stl_triangles(path: str) -> int:
+    """Число треугольников в STL (бинарном или текстовом).
+
+    Чистый Python, без внешних зависимостей — используется и для контроля
+    результата конвертации CAD, и в тестах.
+    """
+    if not os.path.isfile(path):
+        return 0
+    size = os.path.getsize(path)
+    if size < 84:
+        # точно не бинарный STL — считаем как текстовый
+        n = 0
+        with open(path, "r", encoding="ascii", errors="ignore") as f:
+            for ln in f:
+                if ln.strip().lower().startswith("facet"):
+                    n += 1
+        return n
+    with open(path, "rb") as f:
+        head = f.read(84)
+        n_bin = int.from_bytes(head[80:84], "little")
+        # бинарный STL: 84 байта заголовка + 50 байт на треугольник
+        if size == 84 + 50 * n_bin:
+            return n_bin
+    n = 0
+    with open(path, "r", encoding="ascii", errors="ignore") as f:
+        for ln in f:
+            if ln.strip().lower().startswith("facet"):
+                n += 1
+    return n
+
+
+def _stl_name_for_solid(base: str, index: int, name: str, tag) -> str:
+    """Имя файла STL для отдельного тела сборки (без gmsh — тестируемо)."""
+    clean = "".join(ch if (ch.isalnum() or ch in "-_") else "_"
+                    for ch in str(name or "")).strip("_")
+    clean = clean[:48]
+    if not clean:
+        clean = f"solid_{tag}"
+    return f"{base}_{index:02d}_{clean}.stl"
+
+
+def cad_inspect(src_path: str, log=None) -> list:
+    """Состав CAD-сборки: список тел (твёрдых тел) с объёмами и габаритами.
+
+    Возвращает список словарей ``{"tag", "name", "volume", "bbox",
+    "n_surfaces"}``. Не требует триангуляции — только чтение геометрии,
+    поэтому работает быстро даже на больших сборках.
+    """
+    try:
+        import gmsh
+    except Exception as e:
+        raise RuntimeError(
+            "Модуль gmsh недоступен — разбор CAD-сборки требует gmsh. "
+            f"({e})") from e
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Verbosity", 1)
+        gmsh.open(src_path)
+        gmsh.model.occ.synchronize()
+        out = []
+        for dim, tag in gmsh.model.getEntities(3):
+            try:
+                volume = float(gmsh.model.occ.getMass(3, tag))
+            except Exception:
+                volume = 0.0
+            try:
+                bbox = [float(x) for x in gmsh.model.getBoundingBox(3, tag)]
+            except Exception:
+                bbox = [0.0] * 6
+            try:
+                n_surf = len(gmsh.model.getBoundary([(3, tag)], oriented=False))
+            except Exception:
+                n_surf = 0
+            out.append({"tag": int(tag),
+                        "name": gmsh.model.getEntityName(3, tag) or "",
+                        "volume": volume, "bbox": bbox,
+                        "n_surfaces": int(n_surf)})
+        if log:
+            log(f"  ℹ️ В сборке тел: {len(out)}")
+        return out
+    except Exception as e:
+        raise RuntimeError(f"Не удалось разобрать CAD-сборку: {e}") from e
+    finally:
+        try:
+            gmsh.finalize()
+        except Exception:
+            pass
+
+
+def cad_split_to_stl(src_path: str, out_dir: str, log=None,
+                     min_volume: float = 1e-9,
+                     lin_size: float = 0.0) -> list:
+    """Раскладывает многодетальную CAD-сборку на отдельные STL.
+
+    Для каждого твёрдого тела сборки пишется свой файл
+    ``<имя>_NN_<имя_тела>.stl``; тела объёмом меньше ``min_volume``
+    (крепёж, точки, мусор) пропускаются.
+
+    Возвращает список ``{"tag", "name", "stl", "triangles", "volume"}``.
+    Если тело в сборке одно, результат эквивалентен :func:`cad_to_stl`.
+    """
+    try:
+        import gmsh
+    except Exception as e:
+        raise RuntimeError(
+            "Модуль gmsh недоступен — Direct CAD Import требует gmsh. "
+            f"({e})") from e
+
+    solids = cad_inspect(src_path, log=log)
+    keep = [s for s in solids if s.get("volume", 0.0) > min_volume]
+    if not keep:
+        keep = list(solids)
+    if not keep:
+        raise RuntimeError("В CAD-файле не найдено ни одного твёрдого тела.")
+
+    os.makedirs(out_dir or ".", exist_ok=True)
+    base = os.path.splitext(os.path.basename(src_path))[0]
+    results = []
+    for i, info in enumerate(keep, start=1):
+        tag = info["tag"]
+        out_path = os.path.join(
+            out_dir, _stl_name_for_solid(base, i, info.get("name", ""), tag))
+        gmsh.initialize()
+        try:
+            gmsh.option.setNumber("General.Verbosity", 1)
+            gmsh.open(src_path)
+            gmsh.model.occ.synchronize()
+            # удаляем все тела, кроме нужного
+            others = [(3, t) for _d, t in gmsh.model.getEntities(3) if t != tag]
+            if others:
+                gmsh.model.removeEntities(others, deleteMesh=False)
+            gmsh.model.occ.synchronize()
+            if lin_size and lin_size > 0:
+                gmsh.option.setNumber("Mesh.CharacteristicLengthMax",
+                                      float(lin_size))
+            gmsh.model.mesh.generate(2)
+            gmsh.write(out_path)
+        except Exception as e:
+            try:
+                gmsh.finalize()
+            except Exception:
+                pass
+            if log:
+                log(f"  ⚠️ Тело #{tag} ({info.get('name') or 'без имени'}) "
+                    f"не конвертировано: {e}")
+            continue
+        finally:
+            try:
+                gmsh.finalize()
+            except Exception:
+                pass
+        n_tri = count_stl_triangles(out_path)
+        if n_tri == 0:
+            if log:
+                log(f"  ⚠️ Тело #{tag}: пустая триангуляция, пропущено")
+            continue
+        results.append({"tag": tag, "name": info.get("name", ""),
+                        "stl": out_path, "triangles": n_tri,
+                        "volume": info.get("volume", 0.0)})
+        if log:
+            log(f"  ✅ {os.path.basename(out_path)}: {n_tri} треугольников, "
+                f"V={info.get('volume', 0.0):.4g} м³")
+
+    if not results:
+        raise RuntimeError("Не удалось триангулировать ни одно тело сборки.")
+    return results

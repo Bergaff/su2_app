@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Сборка .exe (PyInstaller)
+build/
+dist/
+*.spec
+build_log.txt
+
+# Рабочие каталоги приложения
+work/
+results/
+cases/
+mesh.su2
+mesh_preview.vtk

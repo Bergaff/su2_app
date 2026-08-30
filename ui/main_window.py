@@ -75,13 +75,13 @@ from physics.airfoils import generate_naca4_section
 from geometry.stl_healer import heal_stl_mesh, HealReportDialog
 from geometry.generators import (
     create_primitive, generate_wing_mesh, generate_flaps_mesh,
-    generate_slats_mesh,
+    generate_slats_mesh, cad_to_stl, CAD_EXTENSIONS,
 )
 from mesh.gmsh_generator import generate_mesh_impl
-from mesh.mesh_worker import MeshWorker
+from mesh.mesh_worker import MeshWorker, MeshAdaptWorker
 from solver.workers import (
     SU2Worker, SweepWorker, OptimizationWorker, SessionRunner,
-    hidden_subprocess_kwargs,
+    hidden_subprocess_kwargs, _mesh_npoin,
 )
 from solver.session import CalculationSession
 # === T6: лицензирование (опционально — не падает, если модуль недоступен)
@@ -666,11 +666,21 @@ class MainWindow(QMainWindow):
         study = QTreeWidgetItem(root_item, ["Study 1"])
         self.item_solver = QTreeWidgetItem(study, ["Solver Settings"])
         self.item_opt = QTreeWidgetItem(study, ["Multipoint Optimization"])
+        # ТЗ: аэроупругость (средний приоритет) и прочность (низкий)
+        self.item_aeroelastic = QTreeWidgetItem(
+            study, ["Aeroelasticity (Флатер и дивергенция)"])
+        self.item_structural = QTreeWidgetItem(
+            study, ["Strength (Прочность корневого сечения)"])
         study.setExpanded(True)
         results_node = QTreeWidgetItem(root_item, ["Results"])
         self.item_trim = QTreeWidgetItem(results_node, ["Trim & Balancing (Балансировка)"])
         self.item_flow_viz = QTreeWidgetItem(results_node, ["Flow Visualization (Поле обтекания)"])
         self.item_history = QTreeWidgetItem(results_node, ["Generation History"])
+        # ТЗ: «Спецфункции» и «Формат конфигурации»
+        self.item_specials = QTreeWidgetItem(
+            results_node, ["Special Functions (Поляра и отчёты)"])
+        self.item_presets = QTreeWidgetItem(
+            results_node, ["Config Presets (Формат конфигурации)"])
         results_node.setExpanded(True)
 
         # 2. Панель настроек (посередине)
@@ -885,6 +895,23 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda checked, a=axis: self.rotate_selected(a, 90))
             tool_layout.addWidget(btn)
         lay3.addLayout(tool_layout)
+        cad_group = QGroupBox("Direct CAD Import (STEP/IGES/BREP…)")
+        cad_lay = QVBoxLayout(cad_group)
+        self.chk_cad_split = QCheckBox("Разбирать сборку на отдельные детали")
+        self.chk_cad_split.setChecked(True)
+        self.chk_cad_split.setToolTip(
+            "Многодетальная сборка (несколько тел в STEP/IGES) будет "
+            "импортирована как несколько компонентов с собственными "
+            "именами — их можно скрывать и назначать им разные роли.\n"
+            "Если выключить — вся сборка импортируется одной деталью "
+            "(«сборка как деталь»).")
+        self.lbl_cad_info = QLabel("Требует gmsh. Поддерживаются: STEP, "
+                                   "IGES, BREP, Parasolid, ACIS, PLY, OBJ.")
+        self.lbl_cad_info.setWordWrap(True)
+        self.lbl_cad_info.setStyleSheet("color:#666; font-size:10px;")
+        cad_lay.addWidget(self.chk_cad_split)
+        cad_lay.addWidget(self.lbl_cad_info)
+        lay3.addWidget(cad_group)
         self.settings_stack.addWidget(self.page_components)
 
         # Page 4: Fuselage
@@ -1131,6 +1158,44 @@ class MainWindow(QMainWindow):
         self.btn_make_mesh = QPushButton("🔧 Построить расчётную сетку")
         self.btn_make_mesh.clicked.connect(self.make_mesh_from_bodies)
         lay8.addWidget(self.btn_make_mesh)
+        self.btn_adapt_mesh = QPushButton("🧬 Адаптировать сетку (SU2_ADAPT)")
+        self.btn_adapt_mesh.setToolTip(
+            "Локально сгустить сетку по решению (restart.dat) из последнего "
+            "расчёта: точнее в областях высоких градиентов, чем при "
+            "глобальном сгущении. Требует SU2_ADAPT из дистрибутива SU2.")
+        self.btn_adapt_mesh.clicked.connect(self.adapt_current_mesh)
+        lay8.addWidget(self.btn_adapt_mesh)
+        adapt2 = QGroupBox("Адаптация по распределению Cp (gmsh)")
+        a2 = QFormLayout(adapt2)
+        self.adapt_h_min = QDoubleSpinBox()
+        self.adapt_h_min.setRange(1e-5, 1.0)
+        self.adapt_h_min.setDecimals(5)
+        self.adapt_h_min.setValue(0.002)
+        self.adapt_h_min.setSuffix(" м")
+        self.adapt_h_max = QDoubleSpinBox()
+        self.adapt_h_max.setRange(1e-4, 10.0)
+        self.adapt_h_max.setDecimals(4)
+        self.adapt_h_max.setValue(0.05)
+        self.adapt_h_max.setSuffix(" м")
+        self.adapt_power = QDoubleSpinBox()
+        self.adapt_power.setRange(0.2, 4.0)
+        self.adapt_power.setSingleStep(0.1)
+        self.adapt_power.setValue(1.0)
+        self.adapt_power.setToolTip(
+            "Показатель сгущения: 1 — линейно по градиенту Cp, "
+            "больше — резче контраст между носком и остальной поверхностью.")
+        self.btn_adapt_cp = QPushButton("🧲 Перестроить сетку по Cp")
+        self.btn_adapt_cp.setToolTip(
+            "Взять surface_flow.csv последнего расчёта, построить поле "
+            "целевых размеров (мельче там, где больше |dCp/ds|) и "
+            "перестроить поверхностную сетку через gmsh.\n"
+            "Не требует SU2_ADAPT, но требует gmsh.")
+        self.btn_adapt_cp.clicked.connect(self.adapt_mesh_by_cp)
+        a2.addRow("Мин. размер:", self.adapt_h_min)
+        a2.addRow("Макс. размер:", self.adapt_h_max)
+        a2.addRow("Показатель:", self.adapt_power)
+        a2.addRow(self.btn_adapt_cp)
+        lay8.addWidget(adapt2)
         self.settings_stack.addWidget(self.page_mesh)
 
         # Page 9: Solver — теперь с кнопкой «✅ Применить» для ядер
@@ -1405,6 +1470,74 @@ class MainWindow(QMainWindow):
         self.lbl_opt_status = QLabel("Ожидание...")
         self.lbl_opt_status.setStyleSheet("color: #666; font-style: italic;")
         lay10.addWidget(self.lbl_opt_status)
+
+        # ---- Табличная оптимизация (DOE): перебор вариантов по таблице ----
+        doe_group = QGroupBox("Табличная оптимизация (перебор вариантов)")
+        doe_lay = QVBoxLayout(doe_group)
+        self.doe_table = QTableWidget(0, len(self._doe_param_names()))
+        self.doe_table.setHorizontalHeaderLabels(self._doe_param_labels())
+        self.doe_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.doe_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        doe_lay.addWidget(self.doe_table)
+        doe_btns = QHBoxLayout()
+        btn_doe_from_current = QPushButton("➕ Из текущих параметров")
+        btn_doe_from_current.setToolTip(
+            "Добавить строку со значениями из генератора крыла.")
+        btn_doe_from_current.clicked.connect(self.add_doe_row_from_current)
+        btn_doe_add = QPushButton("➕ Ввести вручную…")
+        btn_doe_add.clicked.connect(self.add_doe_row_dialog)
+        btn_doe_del = QPushButton("🗑 Удалить выбранное")
+        btn_doe_del.clicked.connect(self.remove_doe_rows)
+        btn_doe_clear = QPushButton("🧹 Очистить")
+        btn_doe_clear.clicked.connect(self.clear_doe_table)
+        btn_doe_grid = QPushButton("🧮 Сетка вариантов…")
+        btn_doe_grid.setToolTip(
+            "Сгенерировать таблицу по диапазонам параметров: полный "
+            "факторный план, варьирование по одному параметру или "
+            "латинский гиперкуб.")
+        btn_doe_grid.clicked.connect(self.show_doe_grid_dialog)
+        doe_btns.addWidget(btn_doe_from_current)
+        doe_btns.addWidget(btn_doe_add)
+        doe_btns.addWidget(btn_doe_grid)
+        doe_btns.addWidget(btn_doe_del)
+        doe_btns.addWidget(btn_doe_clear)
+        doe_btns.addStretch()
+        doe_lay.addLayout(doe_btns)
+        gen_lay = QHBoxLayout()
+        gen_lay.addWidget(QLabel("Поколений:"))
+        self.doe_generations = QSpinBox()
+        self.doe_generations.setRange(1, 10)
+        self.doe_generations.setValue(1)
+        self.doe_generations.setToolTip(
+            "Сколько поколений перебора выполнить. Со 2-го поколения "
+            "диапазоны сужаются вдвое вокруг лучшего варианта "
+            "предыдущего поколения.")
+        gen_lay.addWidget(self.doe_generations)
+        gen_lay.addWidget(QLabel("Сужение диапазона:"))
+        self.doe_shrink = QDoubleSpinBox()
+        self.doe_shrink.setRange(0.1, 1.0)
+        self.doe_shrink.setSingleStep(0.1)
+        self.doe_shrink.setValue(0.5)
+        gen_lay.addWidget(self.doe_shrink)
+        gen_lay.addStretch()
+        doe_lay.addLayout(gen_lay)
+        self.doe_results = QTableWidget(0, 4)
+        self.doe_results.setHorizontalHeaderLabels(
+            ["Вариант", "Cl", "K", "Статус"])
+        self.doe_results.horizontalHeader().setStretchLastSection(True)
+        doe_lay.addWidget(self.doe_results)
+        doe_run_lay = QHBoxLayout()
+        self.btn_start_doe = QPushButton("🔁 ЗАПУСТИТЬ ПЕРЕБОР")
+        self.btn_start_doe.setToolTip(
+            "Прогнать все строки таблицы: каждая строка = один расчёт "
+            "(геометрия перестраивается, сетка перегенерируется).")
+        self.btn_start_doe.clicked.connect(self.run_doe_optimization)
+        self.lbl_doe_status = QLabel("—")
+        self.lbl_doe_status.setStyleSheet("color: #666; font-style: italic;")
+        doe_run_lay.addWidget(self.btn_start_doe)
+        doe_run_lay.addWidget(self.lbl_doe_status, 1)
+        doe_lay.addLayout(doe_run_lay)
+        lay10.addWidget(doe_group)
         self.settings_stack.addWidget(self.page_opt)
 
         # Page 11: Trim & Balancing
@@ -1463,6 +1596,29 @@ class MainWindow(QMainWindow):
         btn_clear_history.clicked.connect(self.clear_generation_history)
         lay12.addWidget(btn_clear_history)
         self.settings_stack.addWidget(self.page_history)
+
+        # Page 14-17: аэроупругость, прочность, спецфункции, пресеты (ТЗ)
+        from ui.analysis_pages import (
+            build_aeroelastic_page, build_presets_page,
+            build_specials_page, build_structural_page)
+        self.page_aeroelastic, self.ae_w = build_aeroelastic_page(
+            on_check=self.run_aeroelastic_check,
+            on_plot=self.plot_vg_diagram)
+        self.settings_stack.addWidget(self.page_aeroelastic)
+        self.page_structural, self.st_w = build_structural_page(
+            on_calc=self.run_structural_check)
+        self.settings_stack.addWidget(self.page_structural)
+        self.page_specials, self.sp_w = build_specials_page(
+            on_polar=self.build_polar_from_results,
+            on_report=self.export_analysis_report,
+            on_csv=self.export_polar_csv)
+        self.settings_stack.addWidget(self.page_specials)
+        self.page_presets, self.pr_w = build_presets_page(
+            on_export=self.export_config_preset,
+            on_import=self.import_config_preset,
+            on_apply=self.apply_imported_preset)
+        self.settings_stack.addWidget(self.page_presets)
+        self._imported_preset = None
 
         self.tree.itemSelectionChanged.connect(self.on_tree_selection_changed)
 
@@ -2211,6 +2367,21 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def get_symmetry_plane_axes(self) -> list:
+        """Плоскости симметрии без смещения: только оси ``xy/xz/yz``.
+
+        :meth:`get_symmetry_planes` может вернуть ``"xz:0.5"`` (плоскость
+        со смещением) — такой формат понимают генератор сетки и GUI, но
+        ``MARKER_SYM`` в ``config.cfg`` пишется по имени маркера, поэтому
+        оптимизации нужны чистые имена осей.
+        """
+        out = []
+        for spec in self.get_symmetry_planes():
+            axis = str(spec).split(":", 1)[0].strip().lower()
+            if axis in ("xy", "xz", "yz") and axis not in out:
+                out.append(axis)
+        return out
+
     def get_symmetry_planes(self) -> list:
         """Возвращает список плоскостей с учётом смещения."""
         result = []
@@ -2360,6 +2531,14 @@ class MainWindow(QMainWindow):
              "Settings - Flow Visualization"),
             (self.item_history, self.page_history,
              "Settings - Generation History"),
+            (self.item_aeroelastic, self.page_aeroelastic,
+             "Settings - Aeroelasticity"),
+            (self.item_structural, self.page_structural,
+             "Settings - Strength"),
+            (self.item_specials, self.page_specials,
+             "Settings - Special Functions"),
+            (self.item_presets, self.page_presets,
+             "Settings - Config Presets"),
         ]
         for node, page, title in mapping:
             if item == node:
@@ -2424,6 +2603,7 @@ class MainWindow(QMainWindow):
             },
             "rule_set": self.rule_set.to_dict(),
             "opt_points": opt_points,
+            "doe_rows": self._get_doe_candidates(),
             # Полётные условия — сериализуем как часть проекта
             "flight": self.flight.to_dict(),
             # Настройки нагрузки (слайдеры)
@@ -2502,6 +2682,17 @@ class MainWindow(QMainWindow):
                 self.points_table.setItem(row, 0, QTableWidgetItem(pt.get("name", "")))
                 self.points_table.setItem(row, 1, QTableWidgetItem(f"{pt.get('aoa', 3.0):.2f}"))
                 self.points_table.setItem(row, 2, QTableWidgetItem(f"{pt.get('weight', 1.0):.2f}"))
+        # Таблица DOE (перебор вариантов)
+        if hasattr(self, 'doe_table'):
+            self.doe_table.setRowCount(0)
+            for drow in data.get("doe_rows", []):
+                row = self.doe_table.rowCount()
+                self.doe_table.insertRow(row)
+                for col, key in enumerate(self._doe_param_names()):
+                    val = drow.get(key, self._doe_current_values().get(key, 0.0))
+                    item = QTableWidgetItem(f"{float(val):.3f}")
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    self.doe_table.setItem(row, col, item)
         # Полётные условия
         fc_data = data.get("flight")
         if fc_data:
@@ -2780,6 +2971,47 @@ class MainWindow(QMainWindow):
         # КАМЕРУ НЕ СБРАСЫВАЕМ
         self.update_flow_arrow()
 
+    def _cad_try_split(self, path: str, role: str) -> bool:
+        """Импорт CAD-сборки по телам. True — если импорт выполнен.
+
+        Возвращает False, если в файле одно тело или gmsh недоступен:
+        тогда вызывающий код идёт обычным путём (одна триангуляция).
+        """
+        from geometry.generators import cad_inspect, cad_split_to_stl
+        try:
+            solids = cad_inspect(path, log=lambda m: self.log_text.append(m))
+        except Exception as e:
+            self.log_text.append(f"  ℹ️ Разбор сборки недоступен: {e}")
+            return False
+        if len(solids) <= 1:
+            self.log_text.append("  ℹ️ В файле одно тело — импорт без разбора")
+            return False
+        vols = "; ".join(f"{s_.get('name') or ('тело ' + str(s_['tag']))}"
+                         f" V={s_.get('volume', 0.0):.4g}" for s_ in solids[:6])
+        self.log_text.append(f"  🧩 Сборка из {len(solids)} тел: {vols}")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            parts = cad_split_to_stl(
+                path, WORK_DIR_BASE,
+                log=lambda m: self.log_text.append(m))
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            self.log_text.append(f"  ⚠️ Не удалось разобрать сборку: {e}")
+            return False
+        QApplication.restoreOverrideCursor()
+        if not parts:
+            return False
+        for part in parts:
+            self._add_body(part["stl"], role)
+            if self.bodies:
+                self.bodies[-1]["name"] = (
+                    f"{part.get('name') or os.path.basename(part['stl'])}"
+                    f" ({part['triangles']} тр.)")
+        self.update_bodies_table()
+        self.update_flow_arrow()
+        self.log_text.append(f"✅ Сборка импортирована по телам: {len(parts)}")
+        return True
+
     def add_bodies(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Добавить компоненты", "",
                                                 "STL (*.stl)")
@@ -2790,13 +3022,34 @@ class MainWindow(QMainWindow):
 
     def _add_body(self, path, role):
         ext = os.path.splitext(path)[1].lower()
-        if ext in (".step", ".stp", ".iges", ".igs", ".x_t", ".x_b", ".sat"):
-            msg = (f"📎 Файл {os.path.basename(path)} является CAD-моделью.\n\n"
-                   "Рекомендуемый рабочий процесс в AeroOpt:\n"
-                   "Экспортируйте ваши тела в формат STL из вашей CAD-системы "
-                   "(КОМПАС, SolidWorks, Inventor, Fusion 360, CATIA) перед импортом "
-                   "для стабильной триангуляции.")
-            QMessageBox.information(self, "Импорт CAD-модели", msg)
+        source_path = path
+        if ext in CAD_EXTENSIONS:
+            # Direct CAD Import: конвертируем модель в STL через gmsh.
+            # ТЗ п.4: многодетальная сборка раскладывается на отдельные
+            # тела — иначе детали сливаются в одну и теряют имена.
+            self.log_text.append(
+                f"🔄 Direct CAD Import: {os.path.basename(path)} ({ext})")
+            os.makedirs(WORK_DIR_BASE, exist_ok=True)
+            if self.chk_cad_split.isChecked() and self._cad_try_split(path, role):
+                return
+            stl_name = f"_cad_{self.next_body_id}_{os.path.splitext(os.path.basename(path))[0]}.stl"
+            stl_path = os.path.join(WORK_DIR_BASE, stl_name)
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                cad_to_stl(path, stl_path,
+                           log=lambda m: self.log_text.append(m))
+                self.log_text.append(f"  ✅ CAD → STL: {stl_path}")
+                path = stl_path
+            except Exception as e:
+                QApplication.restoreOverrideCursor()
+                self.log_text.append(f"❌ Ошибка импорта CAD: {e}")
+                QMessageBox.critical(
+                    self, "Ошибка чтения CAD-формата",
+                    f"Не удалось импортировать {ext}-файл: {e}\n\n"
+                    "Проверьте, что файл не повреждён. Как запасной вариант "
+                    "экспортируйте модель в STL из CAD-системы.")
+                return
+            QApplication.restoreOverrideCursor()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             mesh = pv.read(path).triangulate().clean(tolerance=1e-6)
@@ -2804,17 +3057,17 @@ class MainWindow(QMainWindow):
             actor = self.plotter.add_mesh(mesh, color=color, opacity=0.8,
                                           show_edges=True)
             self.bodies.append({
-                "id": self.next_body_id, "name": os.path.basename(path),
+                "id": self.next_body_id, "name": os.path.basename(source_path),
                 "path": path, "role": role, "visible": True, "color": color,
                 "mesh": mesh, "actor": actor,
             })
             self.next_body_id += 1
             self.update_bodies_table()
-            self.log_text.append(f"✅ Загружен: {os.path.basename(path)}")
+            self.log_text.append(f"✅ Загружен: {os.path.basename(source_path)}")
             self.invalidate_mesh("загружен новый STL")
         except Exception as e:
             self.log_text.append(f"❌ Ошибка загрузки: {e}")
-            if ext in (".step", ".stp", ".iges", ".igs", ".x_t", ".x_b"):
+            if ext in CAD_EXTENSIONS:
                 QMessageBox.critical(self, "Ошибка чтения CAD-формата",
                                      f"Не удалось импортировать {ext}-файл напрямую. "
                                      "Экспортируйте его в STL из CAD-системы.")
@@ -3741,6 +3994,195 @@ class MainWindow(QMainWindow):
         self.ribbon_btn_mesh.setEnabled(True)
 
     # =============================================================
+    # АДАПТИВНАЯ СЕТКА (SU2_ADAPT по решению)
+    # =============================================================
+    def adapt_mesh_by_cp(self):
+        """Перестройка поверхностной сетки по градиенту Cp (gmsh)."""
+        from mesh.adapt_gmsh import (adaptivity_report, format_adaptivity_report,
+                                     parse_surface_flow_csv,
+                                     pressure_gradient_along_surface,
+                                     rebuild_with_metric, surface_size_metric,
+                                     write_metric_msh)
+        csv_path = self._find_latest_surface_flow_csv()
+        if not csv_path:
+            QMessageBox.information(
+                self, "Адаптация по Cp",
+                "Не найден surface_flow.csv — нужен завершённый расчёт с "
+                "записью распределения по поверхности.\n\n"
+                "В config.cfg должно быть SURFACE_CSV... / OUTPUT_FILES, "
+                "либо выполните расчёт штатной кнопкой: приложение пишет "
+                "surface_flow.csv в каталог расчёта.")
+            return
+        src_mesh = self._last_stl_or_mesh_source()
+        if not src_mesh:
+            QMessageBox.warning(self, "Адаптация по Cp",
+                                "Нет исходной геометрии (STL) для "
+                                "перестроения сетки. Сначала импортируйте "
+                                "или сгенерируйте геометрию.")
+            return
+        try:
+            samples = parse_surface_flow_csv(csv_path)
+            grad = pressure_gradient_along_surface(
+                samples["x"], samples["y"], samples["cp"],
+                samples.get("z"))
+            pts, sizes = surface_size_metric(
+                samples["x"], samples["y"], grad,
+                h_min=self.adapt_h_min.value(),
+                h_max=self.adapt_h_max.value(),
+                power=self.adapt_power.value(), z=samples.get("z"))
+            os.makedirs(WORK_DIR_BASE, exist_ok=True)
+            metric = os.path.join(WORK_DIR_BASE, "_adapt_metric.msh")
+            write_metric_msh(metric, pts, sizes)
+            out_stl = os.path.join(WORK_DIR_BASE, "_adapted_surface.stl")
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                rebuild_with_metric(src_mesh, metric, out_stl,
+                                    h_min=self.adapt_h_min.value(),
+                                    h_max=self.adapt_h_max.value(),
+                                    log=lambda m: self.log_text.append(m))
+            finally:
+                QApplication.restoreOverrideCursor()
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            self.log_text.append(f"❌ Адаптация по Cp не выполнена: {e}")
+            QMessageBox.critical(self, "Адаптация по Cp", str(e))
+            return
+        rep = adaptivity_report(samples, sizes)
+        text = format_adaptivity_report(rep)
+        self.log_text.append("🧲 " + text.replace("\n", " | "))
+        self.log_text.append(f"  ✅ Адаптивная геометрия: {out_stl}")
+        self._add_body(out_stl, "other")
+        self.update_flow_arrow()
+        QMessageBox.information(
+            self, "Адаптация по Cp",
+            text + "\n\nАдаптивная поверхность добавлена как новый "
+            "компонент. Удалите исходную деталь, если она больше не нужна, "
+            "и перестройте расчётную сетку.")
+
+    def _find_latest_surface_flow_csv(self) -> str:
+        """Ищет свежайший surface_flow.csv в каталогах расчётов."""
+        cands = []
+        for root, _dirs, files in os.walk(WORK_DIR_BASE):
+            for fn in files:
+                if fn.lower() == "surface_flow.csv":
+                    p = os.path.join(root, fn)
+                    try:
+                        cands.append((os.path.getmtime(p), p))
+                    except OSError:
+                        continue
+        if not cands:
+            return ""
+        return max(cands)[1]
+
+    def _last_stl_or_mesh_source(self) -> str:
+        """Путь к STL первой видимой детали — источник для перестроения."""
+        for b in getattr(self, "bodies", []):
+            if b.get("visible", True) and str(b.get("path", "")).lower().endswith(".stl"):
+                p = b["path"]
+                if os.path.isfile(p):
+                    return p
+        return ""
+
+    def adapt_current_mesh(self):
+        if getattr(self, "_adapting", False):
+            return
+        if not os.path.isfile(MESH_FILE):
+            QMessageBox.warning(self, "Адаптивная сетка",
+                                "Сначала постройте сетку (кнопка «🔧 Построить сетку»).")
+            return
+        # Нужно решение (restart.dat) из завершённого расчёта
+        restart = self._find_latest_restart()
+        if not restart:
+            QMessageBox.information(
+                self, "Адаптивная сетка",
+                "Для адаптации нужно решение (restart.dat) из завершённого "
+                "расчёта.\n\n1. Постройте сетку и выполните расчёт.\n"
+                "2. Затем нажмите «Адаптировать сетку» — сетка локально "
+                "сгустится в областях высоких градиентов, и её можно "
+                "считать ещё раз (точнее и с меньшим числом ячеек, чем "
+                "при глобальном сгущении).")
+            return
+        case_dir = os.path.dirname(restart)
+        npoin_before = _mesh_npoin(MESH_FILE) or 0
+        reply = QMessageBox.question(
+            self, "Адаптивная сетка",
+            f"Сетка сейчас: {npoin_before or '?'} точек.\n\n"
+            f"Адаптировать по решению из:\n{os.path.basename(case_dir)}\n\n"
+            "После адаптации рабочая сетка (mesh.su2) будет заменена "
+            "адаптированной. Продолжить?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        self._adapting = True
+        self.btn_adapt_mesh.setEnabled(False)
+        self.progress.setVisible(True)
+        self.progress.setValue(0)
+        self.lbl_su2_status.setText("🧬 Адаптация сетки (SU2_ADAPT)...")
+        self.lbl_su2_status.setStyleSheet("color: blue; font-style: italic;")
+        self.log_text.append("\n" + "=" * 50)
+        self.log_text.append("🧬 АДАПТИВНАЯ СЕТКА (SU2_ADAPT)")
+        self.log_text.append("=" * 50)
+        self._adapt_worker = MeshAdaptWorker(
+            case_dir=case_dir,
+            mesh_path=MESH_FILE,
+            restart_path=restart,
+            adapt_markers=("airfoil",),
+            parent=self,
+        )
+        self._adapt_worker.progress_signal.connect(
+            lambda p, s: self.statusBar().showMessage(f"Адаптация: {s}", 5000))
+        self._adapt_worker.finished_signal.connect(self.on_adapt_finished)
+        self._adapt_worker.start()
+
+    def _find_latest_restart(self):
+        """Ищет самый свежий restart.dat в work/case_*/aoa_*/."""
+        candidates = []
+        for root, _dirs, files in os.walk(WORK_DIR_BASE):
+            if "restart.dat" in files:
+                candidates.append(os.path.join(root, "restart.dat"))
+        if not candidates:
+            return None
+        try:
+            return max(candidates, key=os.path.getmtime)
+        except OSError:
+            return candidates[-1]
+
+    def on_adapt_finished(self, ok, msg):
+        self._adapting = False
+        self.btn_adapt_mesh.setEnabled(True)
+        self.progress.setVisible(False)
+        if getattr(self, "_adapt_worker", None):
+            self._adapt_worker.deleteLater()
+            self._adapt_worker = None
+        if not ok:
+            self.log_text.append(f"❌ {msg}")
+            self.lbl_su2_status.setText("❌ Ошибка адаптации")
+            self.lbl_su2_status.setStyleSheet("color: red; font-weight: bold;")
+            QMessageBox.critical(self, "Ошибка адаптации сетки", msg)
+            return
+        # Заменяем рабочую сетку адаптированной
+        try:
+            npoin_before = _mesh_npoin(MESH_FILE) or 0
+            shutil.copy2(msg, MESH_FILE)
+            npoin_after = _mesh_npoin(MESH_FILE) or 0
+            self.log_text.append(
+                f"✅ Адаптированная сетка: {msg}")
+            self.log_text.append(
+                f"   Точки: {npoin_before} → {npoin_after} "
+                f"({(npoin_after / max(npoin_before, 1)):.2f}×)")
+            self.lbl_su2_status.setText("✅ Сетка адаптирована")
+            self.lbl_su2_status.setStyleSheet("color: green; font-weight: bold;")
+            QMessageBox.information(
+                self, "Адаптация завершена",
+                f"Сетка адаптирована по решению.\n\n"
+                f"Точки: {npoin_before} → {npoin_after}\n\n"
+                "Теперь можно запустить расчёт заново — результат будет "
+                "точнее в областях высоких градиентов.")
+        except Exception as e:
+            self.log_text.append(f"❌ Не удалось применить адаптированную сетку: {e}")
+            QMessageBox.critical(self, "Ошибка", f"{e}")
+
+    # =============================================================
     # РАСЧЁТ
     # =============================================================
     def start_calculation(self):
@@ -3813,6 +4255,19 @@ class MainWindow(QMainWindow):
                 )
                 self._launch_session_runner()
                 return
+        # Подсказка по числу ядер: для крупных сеток — больше ядер
+        try:
+            npoin = _mesh_npoin(MESH_FILE) or 0
+            if npoin > 0:
+                phys = max(1, int(getattr(self, "_cpu_cores_max", 1) or 1))
+                rec = min(phys, max(1, int(round(npoin / 150000.0))))
+                cur = self._resolve_cores_for_level()
+                self.log_text.append(
+                    f"💡 Сетка ~{npoin} точек: рекомендуется ≈{rec} ядер "
+                    f"(сейчас {cur}). Для ускорения увеличьте нагрузку CPU "
+                    f"в Solver Settings.")
+        except Exception:
+            pass
         physics = self.get_physics()
         solver = self.get_solver()
         ref_data = self.calculate_reference_data()
@@ -4130,6 +4585,20 @@ class MainWindow(QMainWindow):
         if res.get("stopped"):
             return
         self.all_results.append(res)
+        # Оценка времени до конца серии: среднее на точку × оставшиеся
+        try:
+            t0 = getattr(self, "calc_start_time", None)
+            if t0:
+                total = len(self.session_runner.session.aoa_list)
+                done = len(self.all_results)
+                if 0 < done < total:
+                    avg = (time.time() - t0) / done
+                    remain = avg * (total - done)
+                    self.log_text.append(
+                        f"⏱ Точка {done}/{total}: среднее {avg:.0f} с/точка, "
+                        f"осталось ~{int(remain // 60)}м {int(remain % 60)}с")
+        except Exception:
+            pass
         row = self.table.rowCount()
         self.table.insertRow(row)
         cl = res.get('cl', 0)
@@ -4219,7 +4688,10 @@ class MainWindow(QMainWindow):
             flight_points=flight_points,
             ref_data=ref_data,
             body_markers=active_markers,
+            cpu_cores=self._resolve_cores_for_level(),
+            symmetry_planes=self.get_symmetry_plane_axes(),
         )
+        self.opt_worker.mesh_quality = self.combo_mesh_quality.currentText()
         self.opt_worker.log_signal.connect(self.log_text.append)
         self.opt_worker.progress_signal.connect(self.progress.setValue)
         self.opt_worker.opt_finished.connect(self.optimization_completed)
@@ -4231,6 +4703,8 @@ class MainWindow(QMainWindow):
         self.w_chord_root.setValue(cand['chord_root'])
         self.w_chord_tip.setValue(cand['chord_tip'])
         self.w_sweep.setValue(cand['sweep'])
+        if 'twist' in cand:
+            self.w_twist.setValue(cand['twist'])
         if 'flap_deflection' in cand:
             self.flap_deflection.setValue(cand['flap_deflection'])
         if 'flap_slide' in cand:
@@ -4260,7 +4734,9 @@ class MainWindow(QMainWindow):
             return
         self._meshing = True
         self._mesh_worker = MeshWorker(stl_paths,
-                                       self.combo_mesh_quality.currentText(), parent=self)
+                                       self.combo_mesh_quality.currentText(),
+                                       parent=self,
+                                       symmetry_planes=self.get_symmetry_plane_axes())
         self._mesh_worker.progress_signal.connect(
             lambda p, s: self.statusBar().showMessage(f"Опт. сетка: {s} ({p}%)", 2000))
         self._mesh_worker.finished_signal.connect(
@@ -4324,22 +4800,389 @@ class MainWindow(QMainWindow):
                                  "Проверьте сетку и граничные условия.")
 
 
+    # =============================================================
+    # DOE: табличный перебор вариантов (ТЗ — параметрическая
+    # оптимизация по таблице параметров)
+    # =============================================================
+    def _doe_param_names(self):
+        """Параметры таблицы перебора (ТЗ п.5: расширенный набор)."""
+        return ["span", "chord_root", "chord_tip", "sweep", "twist",
+                "flap_deflection", "slat_deflection"]
+
+    def _doe_param_labels(self):
+        from optimization.doe import SPEC_BY_KEY
+        return [SPEC_BY_KEY.get(k, (k,))[0] for k in self._doe_param_names()]
+
+    def _doe_current_values(self):
+        return {
+            "span": self.w_span.value(),
+            "chord_root": self.w_chord_root.value(),
+            "chord_tip": self.w_chord_tip.value(),
+            "sweep": self.w_sweep.value(),
+            "twist": self.w_twist.value(),
+            "flap_deflection": self.flap_deflection.value(),
+            "slat_deflection": self.slat_deflection.value(),
+        }
+
+    def _fill_doe_table(self, rows):
+        """Заполняет таблицу перебора списком словарей параметров."""
+        names = self._doe_param_names()
+        defaults = self._doe_current_values()
+        self.doe_table.setRowCount(0)
+        for vals in rows:
+            row = self.doe_table.rowCount()
+            self.doe_table.insertRow(row)
+            for col, key in enumerate(names):
+                v = vals.get(key, defaults.get(key, 0.0))
+                item = QTableWidgetItem(f"{float(v):.3f}")
+                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.doe_table.setItem(row, col, item)
+        self.lbl_doe_status.setText(f"Вариантов в таблице: {len(rows)}")
+
+    def show_doe_grid_dialog(self):
+        """Диалог генерации сетки вариантов (DOE)."""
+        from optimization.doe import (PLAN_FULL, PLAN_LHS, PLAN_OFAT, PLANS,
+                                      SPEC_BY_KEY, make_plan, plan_size)
+        base = self._doe_current_values()
+        names = [k for k in self._doe_param_names() if k in SPEC_BY_KEY]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Генерация сетки вариантов (DOE)")
+        dialog.setMinimumWidth(520)
+        form = QFormLayout(dialog)
+        combo_plan = QComboBox()
+        combo_plan.addItems(list(PLANS))
+        form.addRow("План:", combo_plan)
+        spin_levels = QSpinBox()
+        spin_levels.setRange(2, 7)
+        spin_levels.setValue(3)
+        form.addRow("Уровней на параметр:", spin_levels)
+        spin_samples = QSpinBox()
+        spin_samples.setRange(2, 200)
+        spin_samples.setValue(9)
+        form.addRow("Вариантов (ЛГК):", spin_samples)
+
+        rows_ui = {}
+        for k in names:
+            label, lo, hi, _nd = SPEC_BY_KEY[k]
+            chk = QCheckBox("варьировать")
+            chk.setChecked(k in ("span", "chord_root", "sweep"))
+            sp_lo = QDoubleSpinBox()
+            sp_lo.setRange(lo, hi)
+            sp_lo.setDecimals(3)
+            sp_lo.setValue(float(base.get(k, lo)))
+            sp_hi = QDoubleSpinBox()
+            sp_hi.setRange(lo, hi)
+            sp_hi.setDecimals(3)
+            sp_hi.setValue(float(base.get(k, hi)))
+            holder = QWidget()
+            hl = QHBoxLayout(holder)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.addWidget(chk)
+            hl.addWidget(sp_lo)
+            hl.addWidget(QLabel("…"))
+            hl.addWidget(sp_hi)
+            rows_ui[k] = (chk, sp_lo, sp_hi)
+            form.addRow(label + ":", holder)
+
+        lbl_size = QLabel("—")
+
+        def _ranges():
+            out = {}
+            for k, (chk, sp_lo, sp_hi) in rows_ui.items():
+                if chk.isChecked():
+                    a, b = sp_lo.value(), sp_hi.value()
+                    out[k] = (min(a, b), max(a, b))
+            return out
+
+        def _refresh_size(*_a):
+            r = _ranges()
+            n = plan_size(combo_plan.currentText(), len(r),
+                          spin_levels.value(), spin_samples.value())
+            gens = int(self.doe_generations.value())
+            lbl_size.setText(f"Расчётов в поколении: {n}"
+                             + (f"; всего при {gens} пок.: ≈ {n * gens}"
+                                if gens > 1 else ""))
+
+        for k, (chk, sp_lo, sp_hi) in rows_ui.items():
+            chk.stateChanged.connect(_refresh_size)
+            sp_lo.valueChanged.connect(_refresh_size)
+            sp_hi.valueChanged.connect(_refresh_size)
+        combo_plan.currentIndexChanged.connect(_refresh_size)
+        spin_levels.valueChanged.connect(_refresh_size)
+        spin_samples.valueChanged.connect(_refresh_size)
+        _refresh_size()
+        form.addRow("Размер плана:", lbl_size)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(dialog.accept)
+        btns.rejected.connect(dialog.reject)
+        form.addRow(btns)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        r = _ranges()
+        if not r:
+            self.lbl_doe_status.setText("Не выбран ни один параметр для "
+                                        "варьирования")
+            return
+        try:
+            rows = make_plan(combo_plan.currentText(), base, r,
+                             n_levels=spin_levels.value(),
+                             n_samples=spin_samples.value())
+        except Exception as e:
+            self.lbl_doe_status.setText(f"Не удалось построить план: {e}")
+            return
+        self._fill_doe_table(rows)
+        self._doe_ranges = r
+        self._doe_plan = combo_plan.currentText()
+        self._doe_levels = int(spin_levels.value())
+        self._doe_samples = int(spin_samples.value())
+        self.log_text.append(f"🧮 Сетка DOE: план «{self._doe_plan}», "
+                             f"вариантов {len(rows)}")
+
+    def add_doe_row_from_current(self):
+        v = self._doe_current_values()
+        row = self.doe_table.rowCount()
+        self.doe_table.insertRow(row)
+        for col, key in enumerate(self._doe_param_names()):
+            item = QTableWidgetItem(f"{v[key]:.3f}")
+            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.doe_table.setItem(row, col, item)
+
+    def add_doe_row_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Вариант перебора (DOE)")
+        form = QFormLayout(dialog)
+        v = self._doe_current_values()
+        spins = {}
+        from optimization.doe import SPEC_BY_KEY
+        cfg = [(k, SPEC_BY_KEY[k][0] + ":", SPEC_BY_KEY[k][1],
+                SPEC_BY_KEY[k][2], v.get(k, 0.0))
+               for k in self._doe_param_names() if k in SPEC_BY_KEY]
+        for key, label, lo, hi, val in cfg:
+            sp = QDoubleSpinBox()
+            sp.setRange(lo, hi)
+            sp.setDecimals(3)
+            sp.setValue(float(val))
+            form.addRow(label, sp)
+            spins[key] = sp
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(dialog.accept)
+        btns.rejected.connect(dialog.reject)
+        form.addRow(btns)
+        if dialog.exec_() == QDialog.Accepted:
+            row = self.doe_table.rowCount()
+            self.doe_table.insertRow(row)
+            for col, key in enumerate(self._doe_param_names()):
+                item = QTableWidgetItem(f"{spins[key].value():.3f}")
+                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.doe_table.setItem(row, col, item)
+
+    def remove_doe_rows(self):
+        rows = sorted({i.row() for i in self.doe_table.selectedIndexes()},
+                      reverse=True)
+        for r in rows:
+            self.doe_table.removeRow(r)
+
+    def clear_doe_table(self):
+        self.doe_table.setRowCount(0)
+        self.doe_results.setRowCount(0)
+        self.lbl_doe_status.setText("—")
+
+    def _get_doe_candidates(self):
+        cands = []
+        defaults = self._doe_current_values()
+        for row in range(self.doe_table.rowCount()):
+            vals = {}
+            ok = True
+            for col, key in enumerate(self._doe_param_names()):
+                it = self.doe_table.item(row, col)
+                try:
+                    vals[key] = float(it.text()) if it else defaults[key]
+                except (ValueError, TypeError):
+                    ok = False
+                    break
+            if ok:
+                cands.append(vals)
+        return cands
+
+    def run_doe_optimization(self):
+        """Старт перебора: инициализирует поколения и запускает первое."""
+        self._doe_gen_index = 1
+        self._doe_gen_total = max(1, int(self.doe_generations.value()))
+        self._doe_best_overall = None
+        self._doe_gen_results = []
+        self._launch_doe_generation(interactive=True)
+
+    def _launch_doe_generation(self, interactive: bool = False):
+        """Одно поколение перебора (ТЗ п.5: несколько поколений)."""
+        # === лицензия (та же проверка, что и у обычной оптимизации) ===
+        if self._license is not None:
+            allowed, reason = self._license.is_calculation_allowed()
+            if not allowed:
+                QMessageBox.warning(self, "Лицензия", reason)
+                self.log_text.append(f"⛔ {reason}")
+                return
+        cands = self._get_doe_candidates()
+        if not cands:
+            if interactive:
+                QMessageBox.warning(self, "Перебор вариантов",
+                                    "Таблица вариантов пуста или содержит "
+                                    "некорректные значения. Добавьте строки "
+                                    "кнопкой «➕ Из текущих параметров» или "
+                                    "сгенерируйте сетку «🧮 Сетка вариантов».")
+            else:
+                self.log_text.append("⚠️ Перебор остановлен: нет вариантов")
+                self._finish_doe()
+            return
+        if not self.bodies:
+            QMessageBox.warning(self, "Ошибка", "Загрузите геометрию.")
+            return
+        if not self.validate_rules_before_run():
+            return
+        ref_data = self.calculate_reference_data()
+        flight_points = self._get_opt_points()
+        self.btn_start_doe.setEnabled(False)
+        self.btn_start_opt.setEnabled(False)
+        if getattr(self, "_doe_gen_index", 1) <= 1:
+            self.doe_results.setRowCount(0)
+        gen = getattr(self, "_doe_gen_index", 1)
+        total = getattr(self, "_doe_gen_total", 1)
+        prefix = (f"Поколение {gen}/{total}: " if total > 1 else "")
+        self.lbl_doe_status.setText(f"🔄 {prefix}перебор {len(cands)} "
+                                    f"вариантов...")
+        self.log_text.append(f"🧬 {prefix}запуск {len(cands)} вариантов")
+        self.progress.setVisible(True)
+        self.progress.setValue(0)
+        active_markers = [b["role"] for b in self.bodies if b.get("visible", True)]
+        self.opt_worker = OptimizationWorker(
+            target_cl=self.opt_target_cl.value(),
+            target_k=self.opt_target_k.value(),
+            physics=self.get_physics(),
+            solver=self.get_solver(),
+            initial_params=self._doe_current_values(),
+            rule_set=self.rule_set,
+            flight_points=flight_points,
+            ref_data=ref_data,
+            body_markers=active_markers,
+            candidates=cands,
+            cpu_cores=self._resolve_cores_for_level(),
+            symmetry_planes=self.get_symmetry_plane_axes(),
+        )
+        self.opt_worker.log_signal.connect(self.log_text.append)
+        self.opt_worker.progress_signal.connect(self.progress.setValue)
+        self.opt_worker.opt_finished.connect(self.on_doe_finished)
+        self.opt_worker.update_geometry_signal.connect(self._update_geometry_from_opt)
+        self.opt_worker.variant_ready.connect(self._on_doe_variant_ready)
+        self.opt_worker.start()
+
+    def _on_doe_variant_ready(self, info):
+        try:
+            row = self.doe_results.rowCount()
+            self.doe_results.insertRow(row)
+            idx = int(info.get("index", row)) + 1
+            self.doe_results.setItem(row, 0, QTableWidgetItem(f"#{idx}"))
+            self.doe_results.setItem(
+                row, 1, QTableWidgetItem(f"{float(info.get('cl_weighted', 0.0)):.4f}"))
+            self.doe_results.setItem(
+                row, 2, QTableWidgetItem(f"{float(info.get('k_weighted', 0.0)):.2f}"))
+            item = QTableWidgetItem("OK" if info.get("ok") else "отклонено")
+            if info.get("ok"):
+                item.setBackground(QColor(200, 255, 200))
+            else:
+                item.setBackground(QColor(255, 220, 220))
+                item.setToolTip(str(info.get("rejected_reason", "")))
+            self.doe_results.setItem(row, 3, item)
+        except Exception:
+            pass
+
+    def on_doe_finished(self, best):
+        self.progress.setVisible(False)
+        gen = getattr(self, "_doe_gen_index", 1)
+        total = getattr(self, "_doe_gen_total", 1)
+        if best and best.get("k_weighted"):
+            prev = getattr(self, "_doe_best_overall", None)
+            if prev is None or float(best["k_weighted"]) > float(
+                    prev.get("k_weighted", 0.0)):
+                self._doe_best_overall = best
+            self._doe_gen_results.append(
+                {"gen": gen, "k": float(best["k_weighted"]),
+                 "cl": float(best.get("cl_weighted", 0.0)),
+                 "params": {k: best.get(k) for k in self._doe_param_names()}})
+        # есть ещё поколения и есть из чего стартовать — сужаем диапазон
+        if gen < total and getattr(self, "_doe_best_overall", None):
+            try:
+                from optimization.doe import make_plan, next_generation
+                ranges = next_generation(
+                    self._doe_best_overall,
+                    getattr(self, "_doe_ranges", None) or {},
+                    shrink=float(self.doe_shrink.value()))
+                rows = make_plan(getattr(self, "_doe_plan", None)
+                                 or "Полный факторный",
+                                 self._doe_best_overall, ranges,
+                                 n_levels=int(getattr(self, "_doe_levels", 3)),
+                                 n_samples=int(getattr(self, "_doe_samples", 9)))
+            except Exception as e:
+                self.log_text.append(f"⚠️ Не удалось построить следующее "
+                                     f"поколение: {e}")
+                rows = []
+            if rows:
+                self._doe_ranges = ranges
+                self._fill_doe_table(rows)
+                self._doe_gen_index = gen + 1
+                self.log_text.append(
+                    f"🧬 Поколение {gen + 1}: диапазоны сужены до "
+                    + ", ".join(f"{k} {v[0]:g}…{v[1]:g}"
+                                for k, v in ranges.items()))
+                self._launch_doe_generation(interactive=False)
+                return
+        self._finish_doe()
+
+    def _finish_doe(self):
+        """Завершение перебора: лучший вариант по всем поколениям."""
+        self.btn_start_doe.setEnabled(True)
+        self.btn_start_opt.setEnabled(True)
+        self.progress.setVisible(False)
+        best = getattr(self, "_doe_best_overall", None)
+        gens = getattr(self, "_doe_gen_results", [])
+        if len(gens) > 1:
+            self.log_text.append(
+                "📈 Поколения: " + " → ".join(f"{g['k']:.1f}" for g in gens))
+        if best and best.get("k_weighted"):
+            text = (f"✅ Лучший вариант: span={best.get('span', 0):.2f} м, "
+                    f"cr={best.get('chord_root', 0):.2f} м, "
+                    f"ct={best.get('chord_tip', 0):.2f} м, "
+                    f"sweep={best.get('sweep', 0):.1f}° → "
+                    f"Cl={best.get('cl_weighted', 0):.3f}, "
+                    f"K={best.get('k_weighted', 0):.1f}")
+            self.lbl_doe_status.setText(text)
+            self.log_text.append(f"🏆 {text}")
+            try:
+                self._update_geometry_from_opt(best)
+            except Exception as e:
+                self.log_text.append(f"⚠️ Не удалось применить лучший вариант: {e}")
+        else:
+            self.lbl_doe_status.setText("❌ Допустимых вариантов не найдено")
+        if self.opt_worker:
+            self.opt_worker.deleteLater()
+            self.opt_worker = None
+
     def _on_cpu_slider_changed(self, value):
         """При изменении слайдера — если анализ идёт, ставим в очередь."""
         cores = max(1, value)
         self.spin_cpu_cores.blockSignals(True)
         self.spin_cpu_cores.setValue(cores)
         self.spin_cpu_cores.blockSignals(False)
-        
-        if self._analysis_running and hasattr(self, '_worker'):
-            # Отложенное применение
-            self._worker.request_cores_change(cores)
-            self.lbl_load_status.setText(
-                f"⏳ {cores} ядер — применится при следующем этапе")
+        # Расчёт уже запущен — новое число ядер применится на следующем этапе
+        # (SessionRunner читает session.cpu_cores при подготовке каждого кейса).
+        runner = getattr(self, "session_runner", None)
+        running = runner is not None and getattr(runner, "isRunning", lambda: False)()
+        if running:
+            self.log_text.append(
+                f"ℹ️ Изменение числа ядер на {cores} применится при следующем этапе.")
         else:
-            # Применяем сразу
-            self._solver_cores = cores
-            self._refresh_load_status_label()
+            self.log_text.append(f"✅ Применено ядер CPU: {cores}")
+        self._refresh_load_status_label()
 
 
 
@@ -5126,9 +5969,426 @@ class MainWindow(QMainWindow):
                 and self._mesh_worker.isRunning():
             self._mesh_worker.cancel()
             self._mesh_worker.wait(5000)
+        if hasattr(self, '_adapt_worker') and self._adapt_worker \
+                and self._adapt_worker.isRunning():
+            self._adapt_worker.wait(5000)
         if hasattr(self, 'plotter'):
             self.plotter.close()
         event.accept()
+
+
+    # =============================================================
+    # АЭРОУПРУГОСТЬ (ТЗ, средний приоритет)
+    # =============================================================
+    def _aeroelastic_inputs(self) -> dict:
+        """Параметры для оценки аэроупругости; при флажке — из модели."""
+        w = self.ae_w
+        span = w["span"].value()
+        chord_root = w["chord_root"].value()
+        chord_tip = w["chord_tip"].value()
+        if w["fill_from_model"].isChecked():
+            try:
+                span = float(self.w_span.value())
+                chord_root = float(self.w_chord_root.value())
+                chord_tip = float(self.w_chord_tip.value())
+                w["span"].setValue(span)
+                w["chord_root"].setValue(chord_root)
+                w["chord_tip"].setValue(chord_tip)
+            except Exception:
+                pass
+        v_dive = w["v_dive"].value()
+        return {"span": span, "chord_root": chord_root,
+                "chord_tip": chord_tip, "mass_wing": w["mass_wing"].value(),
+                "rho": w["rho"].value(), "V_cruise": w["v_cruise"].value(),
+                "V_dive": (v_dive if v_dive > 0 else None),
+                "t_ratio": w["t_ratio"].value(),
+                "x_ea_ratio": w["x_ea_ratio"].value(),
+                "x_cg_ratio": w["x_cg_ratio"].value(),
+                "safety_factor": w["safety"].value()}
+
+    def _aeroelastic_result(self) -> dict:
+        from physics import aeroelastic as AE
+        return AE.flutter_assessment(**self._aeroelastic_inputs())
+
+    def run_aeroelastic_check(self):
+        """Оценка флатера и дивергенции; результат — в панель и лог."""
+        try:
+            from physics import aeroelastic as AE
+            res = self._aeroelastic_result()
+        except Exception as e:
+            self.ae_w["out"].setText(f"⚠️ Не удалось выполнить оценку: {e}")
+            self.log_text.append(f"⚠️ Аэроупругость: {e}")
+            return
+        p = res["props"]
+        text = AE.format_report(res) + (
+            "\n\nИсходные данные:\n"
+            f"  размах {p['span']:.2f} м, полу-хорда b = {p['b']:.3f} м, "
+            f"e = {p['e']:.3f} м\n"
+            f"  погонная масса {p['m']:.2f} кг/м, K_h = {p['K_h']:.4g} Н/м, "
+            f"K_alpha = {p['K_alpha']:.4g} Н·м/рад\n"
+            f"  x_alpha = {p['x_alpha']:+.3f}, I_alpha = {p['I_alpha']:.4g} "
+            f"кг·м²/м\n"
+            "\nМетод: типичное сечение (изгиб + кручение), аэродинамика "
+            "Теодорсена, p-k метод. Это предварительная оценка для ранней "
+            "стадии проектирования, а не замена сертифицированного расчёта "
+            "по КЭ-модели.")
+        self.ae_w["out"].setText(text)
+        self.log_text.append(
+            "📈 Аэроупругость: V_F="
+            f"{res['V_F'] and round(res['V_F'], 1)} м/с, V_D="
+            f"{res['V_D'] and round(res['V_D'], 1)} м/с, запас="
+            f"{res['margin'] and round(res['margin'], 2)}")
+        self._last_aeroelastic = res
+
+    def plot_vg_diagram(self):
+        """V-g диаграмма на вкладке «2D Аэро Графики» (левая ось)."""
+        res = getattr(self, "_last_aeroelastic", None)
+        if not res:
+            try:
+                res = self._aeroelastic_result()
+            except Exception as e:
+                self.ae_w["out"].setText(f"⚠️ {e}")
+                return
+            self._last_aeroelastic = res
+        diag = res.get("vg_diagram") or []
+        if not diag:
+            self.ae_w["out"].setText("⚠️ Нет данных V-g диаграммы")
+            return
+        ax = self.plot_canvas.axes1
+        ax.clear()
+        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.tick_params(labelsize=8)
+        for i, color in ((0, "#1f77b4"), (1, "#d62728")):
+            pts = [(d["modes"][i]["g"], d["V"], d["modes"][i]["freq_hz"])
+                   for d in diag if len(d["modes"]) > i]
+            if not pts:
+                continue
+            ax.plot([p[0] for p in pts], [p[1] for p in pts], "o-",
+                    color=color, lw=1.4, ms=3,
+                    label=f"мода {i + 1} (f₀={pts[0][2]:.1f} Гц)")
+        ax.axvline(0.0, color="k", lw=0.8, ls="--")
+        if res.get("V_F"):
+            ax.axvline(float(res["V_F"]), color="r", lw=1.3,
+                       label=f"V_F={float(res['V_F']):.1f} м/с")
+        ax.set_title("V-g диаграмма (g>0 — нарастание колебаний)", fontsize=9,
+                     fontweight="bold", color="#113366")
+        ax.set_xlabel("Структурное демпфирование g", fontsize=8)
+        ax.set_ylabel("Скорость, м/с", fontsize=8)
+        ax.legend(fontsize=7)
+        self.plot_canvas.draw()
+        self.bottom_tabs.setCurrentWidget(self.plot_canvas)
+        self.log_text.append("📉 V-g диаграмма построена")
+
+    # =============================================================
+    # ПРОЧНОСТЬ (ТЗ, низкий приоритет)
+    # =============================================================
+    def run_structural_check(self):
+        """Изгибающий момент и запас прочности корневого сечения."""
+        w = self.st_w
+        try:
+            from physics import structural as ST
+            chord = w["chord_root"].value()
+            cap_area = (w["cap_frac"].value() * chord
+                        * max(w["t_ratio"].value() * chord, 1e-6))
+            res = ST.structural_assessment(
+                span=w["span"].value(), chord_root=chord,
+                mass_aircraft=w["mass_aircraft"].value(),
+                mass_wing=w["mass_wing"].value(),
+                n_limit=w["n_limit"].value(), dist=w["dist"].currentText(),
+                t_ratio=w["t_ratio"].value(), cap_area=cap_area,
+                sigma_allow=w["sigma_allow"].value(),
+                safety_factor=w["sf"].value())
+            text = ST.format_report(res)
+        except Exception as e:
+            w["out"].setText(f"⚠️ Не удалось выполнить расчёт: {e}")
+            return
+        w["out"].setText(text)
+        self.log_text.append(
+            f"🔩 Прочность: σ = {res['sigma'] / 1e6:.1f} МПа, "
+            f"τ = {res['tau'] / 1e6:.1f} МПа, запас по σ "
+            f"{res['MS_sigma']:+.2f}")
+        self._last_structural = res
+
+    # =============================================================
+    # СПЕЦФУНКЦИИ: ПОЛЯРА И ОТЧЁТЫ (ТЗ)
+    # =============================================================
+    def _results_rows(self) -> list:
+        """Строки таблицы результатов → list[dict] для постобработки."""
+        rows = []
+        for r in range(self.table.rowCount()):
+            def _val(c, row=r):
+                it = self.table.item(row, c)
+                return it.text().strip() if it else ""
+            try:
+                rows.append({"aoa": float(_val(0)), "cl": float(_val(1)),
+                             "cd": float(_val(2)),
+                             "cm": float(_val(3) or 0.0), "converged": True})
+            except (TypeError, ValueError):
+                continue
+        return rows
+
+    def _aspect_ratio_from_ui(self) -> float:
+        """Удлинение крыла: размах² / площадь."""
+        span = float(self.sp_w["s_ref"].value() and self.ae_w["span"].value())
+        s_ref = float(self.sp_w["s_ref"].value())
+        if s_ref > 0 and span > 0:
+            return span * span / s_ref
+        return 10.0
+
+    def _polar_chars(self) -> dict:
+        """Интегральные характеристики по текущей таблице результатов."""
+        from postprocessing.polar import (build_polar,
+                                          integrated_characteristics)
+        rows = self._results_rows()
+        if len(rows) < 3:
+            raise ValueError(
+                "в таблице результатов меньше трёх точек — поляру не "
+                "построить. Сначала выполните расчёт по нескольким углам "
+                "атаки.")
+        polar = build_polar(rows)
+        chars = integrated_characteristics(
+            polar, self._aspect_ratio_from_ui(),
+            weight_n=self.sp_w["weight"].value() * 9.80665,
+            rho=self.sp_w["rho"].value(), s_ref=self.sp_w["s_ref"].value(),
+            mach=self.sp_w["mach"].value())
+        self._last_polar_rows = rows
+        self._last_polar_chars = chars
+        return chars
+
+    @staticmethod
+    def _format_polar_chars(ch: dict) -> str:
+        def f(key, unit="", nd=4):
+            v = ch.get(key)
+            return "—" if v is None else f"{float(v):.{nd}f} {unit}".strip()
+        return "\n".join([
+            "ИНТЕГРАЛЬНЫЕ ХАРАКТЕРИСТИКИ ПО ПОЛЯРЕ",
+            "=" * 44,
+            f"Точек в поляре        : {ch.get('n_points', 0)}",
+            f"Удлинение λ           : {f('aspect_ratio', '', 2)}",
+            f"Наклон поляры dCl/dα  : {f('cl_alpha_deg', '1/град')}",
+            f"Угол нулевой Cl (α₀)  : {f('alpha0', 'град')}",
+            f"Профильное Cd₀        : {f('cd0', '', 5)}",
+            f"Коэффициент Освальда e: {f('oswald_e', '', 3)}",
+            f"Cl макс                : {f('cl_max')}",
+            f"Угол сваливания       : {f('aoa_stall', 'град', 2)}",
+            f"K макс                 : {f('k_max', '', 2)}",
+            f"Угол при K макс        : {f('aoa_best_k', 'град', 2)}",
+            f"Скорость сваливания   : {f('v_stall', 'м/с', 1)}",
+            f"Число M               : {f('mach', '', 3)}",
+        ])
+
+    def build_polar_from_results(self):
+        """Поляра и интегральные характеристики по таблице результатов."""
+        try:
+            ch = self._polar_chars()
+        except Exception as e:
+            self.sp_w["out"].setText(f"⚠️ {e}")
+            return
+        self.sp_w["out"].setText(self._format_polar_chars(ch))
+        self.log_text.append(f"📊 Поляра: точек {ch.get('n_points')}, "
+                             f"e={ch.get('oswald_e') and round(ch['oswald_e'], 3)}, "
+                             f"Cl_max={ch.get('cl_max') and round(ch['cl_max'], 3)}")
+
+    def export_polar_csv(self):
+        """Экспорт поляры в CSV (разделитель «;», UTF-8 BOM для Excel)."""
+        rows = getattr(self, "_last_polar_rows", None) or self._results_rows()
+        if len(rows) < 1:
+            self.sp_w["out"].setText("⚠️ Нет данных для экспорта")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить поляру", "polar.csv", "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            from postprocessing.report import export_csv
+            export_csv(path, rows)
+            self.log_text.append(f"💾 Поляра сохранена: {path}")
+            self.sp_w["out"].append(f"\n💾 Сохранено: {path}")
+        except Exception as e:
+            self.sp_w["out"].append(f"\n⚠️ Не удалось сохранить: {e}")
+
+    def export_analysis_report(self):
+        """Отчёт по шаблону (HTML) + CSV с полярой."""
+        rows = self._results_rows()
+        if len(rows) < 3:
+            self.sp_w["out"].setText(
+                "⚠️ В таблице результатов меньше трёх точек — отчёт не "
+                "сформировать.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить отчёт", "report.html",
+            "HTML (*.html);;Текст (*.txt)")
+        if not path:
+            return
+        try:
+            from html import escape as html_escape
+            from postprocessing.report import export_csv, render_html
+            kw = dict(aspect_ratio=self._aspect_ratio_from_ui(),
+                      template=self.sp_w["template"].currentText(),
+                      project_info={"name": self.sp_w["project_name"].text()},
+                      weight_n=self.sp_w["weight"].value() * 9.80665,
+                      rho=self.sp_w["rho"].value(),
+                      s_ref=self.sp_w["s_ref"].value(),
+                      mach=self.sp_w["mach"].value())
+            text = render_html(rows, **kw)
+            ae = getattr(self, "_last_aeroelastic", None)
+            st = getattr(self, "_last_structural", None)
+            extra = ""
+            if ae:
+                from physics import aeroelastic as AE
+                extra += "<pre>" + html_escape(AE.format_report(ae)) + "</pre>"
+            if st:
+                from physics import structural as ST
+                extra += "<pre>" + html_escape(ST.format_report(st)) + "</pre>"
+            if extra:
+                text = text.replace("</body>", extra + "</body>")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            csv_path = os.path.splitext(path)[0] + "_polar.csv"
+            export_csv(csv_path, rows)
+            self.log_text.append(f"📄 Отчёт сохранён: {path}")
+            self.sp_w["out"].append(f"\n📄 Отчёт: {path}\n💾 Поляра: {csv_path}")
+        except Exception as e:
+            self.sp_w["out"].append(f"\n⚠️ Не удалось сформировать отчёт: {e}")
+
+    # =============================================================
+    # ФОРМАТ КОНФИГУРАЦИИ: ПРЕСЕТЫ (ТЗ)
+    # =============================================================
+    def _session_params(self) -> dict:
+        """Параметры SU2 текущего проекта (для экспорта пресета)."""
+        import su2_preset_format as PF
+        sess = getattr(self, "session", None)
+        if sess is None:
+            return {}
+        params = {}
+        try:
+            keys = list(PF.key_catalogue().keys())
+        except Exception:
+            keys = []
+        for k in keys:
+            v = getattr(sess, k, None)
+            if v is not None:
+                params[k] = v
+        if not params:
+            for attr in ("turb_model", "mesh_quality", "use_ramp_aoa",
+                         "cpu_cores", "compute_device"):
+                if hasattr(sess, attr):
+                    params[attr.upper() if attr.islower() else attr] = \
+                        getattr(sess, attr)
+        return params
+
+    def export_config_preset(self):
+        """Экспорт пресета настроек SU2 в файл .su2preset."""
+        import su2_preset_format as PF
+        w = self.pr_w
+        source = w["source"].currentData()
+        try:
+            name = w["name"].text().strip() or "Без имени"
+            if source == "session":
+                params = self._session_params()
+                if not params:
+                    w["out"].setText(
+                        "⚠️ Настройки проекта ещё не созданы — сначала "
+                        "подготовьте расчёт либо выберите встроенный шаблон.")
+                    return
+                description = "Экспорт текущих настроек проекта AeroOpt"
+                based_on = None
+            else:
+                preset = PF.builtin_presets().get(source)
+                if not preset:
+                    w["out"].setText("⚠️ Встроенный шаблон не найден")
+                    return
+                params = dict(preset.get("params") or {})
+                description = str(preset.get("description") or "")
+                based_on = source
+            check = PF.validate_preset(PF.make_preset(name, params))
+            if not check["ok"]:
+                w["out"].setText("⚠️ Пресет не прошёл проверку:\n"
+                                 + "\n".join("  • " + e
+                                              for e in check["errors"]))
+                return
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Экспорт пресета", f"{name}{PF.EXTENSION}",
+                f"Пресет AeroOpt (*{PF.EXTENSION});;JSON (*.json)")
+            if not path:
+                return
+            PF.export_preset(path, name, params, description=description,
+                             based_on=based_on)
+            w["out"].setText(
+                PF.describe_format() + "\n\n💾 Сохранено: " + path
+                + f"\nПараметров: {len(params)}\n\nСодержимое:\n"
+                + "\n".join(f"  {k} = {v}" for k, v in sorted(params.items())))
+            self.log_text.append(f"💾 Пресет сохранён: {path}")
+        except Exception as e:
+            w["out"].setText(f"⚠️ Ошибка экспорта: {e}")
+
+    def import_config_preset(self):
+        """Импорт и проверка пресета."""
+        import su2_preset_format as PF
+        w = self.pr_w
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Импорт пресета", "",
+            f"Пресет AeroOpt (*{PF.EXTENSION});;JSON (*.json);;Все файлы (*)")
+        if not path:
+            return
+        try:
+            preset = PF.import_preset(path)
+        except Exception as e:
+            w["out"].setText(f"⚠️ Не удалось прочитать пресет: {e}")
+            return
+        self._imported_preset = preset
+        w["name"].setText(preset.get("name") or "Импортированный")
+        params = preset.get("params") or {}
+        lines = [f"Импорт: {os.path.basename(path)}",
+                 f"Имя: {preset.get('name')}",
+                 f"Версия формата: {preset.get('schema_version')}",
+                 f"Параметров: {len(params)}"]
+        for wn in preset.get("_warnings", []):
+            lines.append(f"⚠️ {wn}")
+        lines.append("")
+        lines += [f"  {k} = {v}" for k, v in sorted(params.items())]
+        w["out"].setText("\n".join(lines))
+        self.log_text.append(f"⬇️ Пресет импортирован: {path}")
+
+    def apply_imported_preset(self):
+        """Применяет импортированный пресет к настройкам проекта."""
+        import su2_preset_format as PF
+        w = self.pr_w
+        preset = self._imported_preset
+        if not preset:
+            w["out"].setText("⚠️ Сначала импортируйте файл пресета")
+            return
+        params = dict(preset.get("params") or {})
+        try:
+            catalogue = PF.key_catalogue()
+        except Exception:
+            catalogue = {}
+        applied, skipped = [], []
+        for k, v in params.items():
+            if k in catalogue:
+                applied.append(f"{k} = {v}")
+            else:
+                skipped.append(f"{k} (нет в каталоге параметров)")
+        sess = getattr(self, "session", None)
+        if sess is not None:
+            for k, v in params.items():
+                if k in catalogue:
+                    try:
+                        setattr(sess, k, v)
+                    except Exception:
+                        pass
+        text = (f"Применено параметров: {len(applied)}\n"
+                + "\n".join("  ✔ " + a for a in applied))
+        if skipped:
+            text += (f"\n\nПропущено: {len(skipped)}\n"
+                     + "\n".join("  ⚠ " + s for s in skipped))
+        text += ("\n\nЗначения записаны в объект расчёта проекта. Перед "
+                 "запуском проверьте их в разделе Solver Settings и в меню "
+                 "«SU2»: часть ключей SU2 пишется в config.cfg только при "
+                 "подготовке нового расчёта.")
+        w["out"].setText(text)
+        self.log_text.append(f"✔️ Пресет «{preset.get('name')}» применён: "
+                             f"{len(applied)} параметров")
 
 
 # ---------------------------------------------------------------------------
@@ -5181,6 +6441,17 @@ def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
     window = MainWindow()
     window.show()
+    # Меню «SU2»: настройки config.cfg с подсказками, пресеты устойчивости,
+    # откат config.cfg.orig, справка по SU2_PARTITION.
+    try:
+        import su2_config_dialog
+        su2_config_dialog.install_menu(window)
+    except Exception as e:
+        try:
+            from app_logging import get_logger
+            get_logger().warning("Меню SU2 не подключено: %s", e)
+        except Exception:
+            pass
     return app.exec_()
 
 

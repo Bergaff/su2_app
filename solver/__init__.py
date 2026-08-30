@@ -1,7 +1,8 @@
 from .session import CalculationSession
 from .workers import (SU2Worker, SweepWorker, SessionRunner,
                       OptimizationWorker, hidden_subprocess_kwargs,
-                      parse_history, parse_iteration_line)
+                      parse_history, parse_iteration_line,
+                      find_su2_adapt_exe, run_su2_adapt, _mesh_npoin)
 from .config_builder import (build_su2_config, write_su2_config,
                              write_case_config)
 
@@ -14,6 +15,9 @@ __all__ = [
     "hidden_subprocess_kwargs",
     "parse_history",
     "parse_iteration_line",
+    "find_su2_adapt_exe",
+    "run_su2_adapt",
+    "_mesh_npoin",
     "build_su2_config",
     "write_su2_config",
     "write_case_config",
