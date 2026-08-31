@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import ctypes
 import os
+import shutil
 import subprocess
 import sys
+import time
 
 # ---------------------------------------------------------------------------
 # Чистая математика (проверяется тестами)
@@ -155,12 +157,20 @@ class GpuUtilization:
     PDH_CSTATUS_VALID_DATA = 0x0
     COUNTER = "\\GPU Engine(*)\\Utilization Percentage"
 
+    # Запускать nvidia-smi чаще нет смысла, а каждый запуск — это новый
+    # процесс. На Windows из GUI-приложения это показывало мигающее окно
+    # консоли раз в 2 секунды, поэтому опрос прорежен и окно подавлено.
+    NVIDIA_POLL_S = 5.0
+
     def __init__(self):
         self._query = None
         self._counter = None
         self._pdh = None
         self._mode = None
         self._last = None
+        self._nv_at = 0.0
+        self._nv_val = None
+        self._nv_broken = False
 
     # -- PDH --------------------------------------------------------------
     def _pdh_open(self):
@@ -236,10 +246,16 @@ class GpuUtilization:
     @staticmethod
     def _nvidia_read():
         try:
+            # Без CREATE_NO_WINDOW дочерний консольный процесс, запущенный
+            # из GUI-приложения, на мгновение показывает своё окно.
+            flags = 0
+            if sys.platform == "win32":
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             out = subprocess.run(
                 ["nvidia-smi", "--query-gpu=utilization.gpu",
                  "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=3)
+                capture_output=True, text=True, timeout=3,
+                creationflags=flags)
             if out.returncode != 0:
                 return None
             vals = []
@@ -261,7 +277,16 @@ class GpuUtilization:
                 return clamp_percent(value)
             self._pdh_close()
             self._mode = "nvidia"
-        return clamp_percent(self._nvidia_read())
+        if self._nv_broken:
+            return None
+        now = time.monotonic()
+        if now - self._nv_at >= self.NVIDIA_POLL_S:
+            self._nv_at = now
+            self._nv_val = self._nvidia_read()
+            # Если утилиты просто нет — не стучимся в неё каждые 2 секунды.
+            if self._nv_val is None and shutil.which("nvidia-smi") is None:
+                self._nv_broken = True
+        return clamp_percent(self._nv_val)
 
     def close(self):
         self._pdh_close()

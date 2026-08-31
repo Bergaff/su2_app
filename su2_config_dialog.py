@@ -9,7 +9,6 @@ su2_config_dialog.py - окно настроек расчёта SU2 для AeroO
   * Именные ПРЕСЕТЫ: встроенные ("Стандартный", "Устойчивый safe",
     "Ультра-устойчивый ultra") + свои пресеты, которые сохраняются в
     %APPDATA%\\AeroOpt\\su2_presets.json и доступны во всех проектах.
-  * Кнопка-справка про SU2_PARTITION.
   * Авто-предложение после расхождения (offer_recovery_after_failure) -
     вызывается из раннера SU2.
 
@@ -417,10 +416,6 @@ class Su2ConfigDialog(QDialog):
 
         # ---- кнопки ----
         btns = QHBoxLayout()
-        b_help = QPushButton("Что такое SU2_PARTITION?")
-        b_help.setToolTip("Объяснение предупреждения о партиционере.")
-        b_help.clicked.connect(show_partition_help)
-        btns.addWidget(b_help)
         btns.addStretch(1)
         b_cancel = QPushButton("Отмена")
         b_cancel.clicked.connect(self.reject)
@@ -592,52 +587,6 @@ class Su2ConfigDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
-# Справка
-# ---------------------------------------------------------------------------
-
-PARTITION_HELP = (
-    "<b>Коротко: отдельного файла SU2_PARTITION не существует.</b>\n\n"
-
-    "Проверено по дереву исходников SU2 версий 6.2.0, 7.0.0, 8.0.0 и "
-    "master: целей сборки там всего семь — SU2_CFD, SU2_DEF, SU2_DOT, "
-    "SU2_GEO, SU2_IDE, SU2_PY, SU2_SOL. Отдельного SU2_Partition среди "
-    "них нет.\n\n"
-
-    "Разметка сетки по процессам живёт как библиотечный компонент "
-    "<code>Common/src/toolboxes/CLinearPartitioner</code> и вкомпилирована "
-    "внутрь самого SU2_CFD. То есть SU2 делит сетку сам, при каждом "
-    "старте, и это штатный, а не запасной режим.\n\n"
-
-    "<b>Что это значит на практике.</b>\n"
-    "Скачивать или устанавливать отдельный партиционер некуда и незачем. "
-    "Прежняя кнопка «Mesh partition» и предупреждение «SU2_PARTITION не "
-    "найден» убраны: они описывали файл, которого нет ни в одном "
-    "дистрибутиве.\n\n"
-
-    "<b>Откуда тогда берётся параллелизм.</b>\n"
-    "Из MPI-сборки SU2 и запуска через <code>mpiexec -np N SU2_CFD.exe "
-    "config.cfg</code>. Разметку сетки SU2 сделает сам. Единственная "
-    "плата — разовая работа на старте, её стоимость растёт с размером "
-    "сетки. Для сетки порядка миллиона тетраэдров это единицы секунд "
-    "на фоне многотысячеитерационного расчёта.\n\n"
-
-    "<b>Если хочется убрать и эту разовую работу</b> — сетку можно "
-    "разметить один раз и переиспользовать между прогонами, но в "
-    "актуальных версиях SU2 отдельной утилиты для этого не "
-    "поставляется, так что выигрыш получается только на очень больших "
-    "сетках и при частых повторных запусках одной и той же геометрии."
-)
-
-
-def show_partition_help(parent=None):
-    box = QMessageBox(parent)
-    box.setWindowTitle("SU2_PARTITION — что это")
-    box.setText(PARTITION_HELP)
-    box.setTextFormat(Qt.RichText)
-    box.exec_()
-
-
-# ---------------------------------------------------------------------------
 # Поиск свежего config.cfg (work/case_*/aoa_*/config.cfg)
 # ---------------------------------------------------------------------------
 
@@ -786,11 +735,6 @@ def install_menu(main_window):
     act_restore = QAction("Восстановить исходный config.cfg", main_window)
     act_restore.triggered.connect(_restore)
     menu.addAction(act_restore)
-
-    menu.addSeparator()
-    act_help = QAction("Что такое SU2_PARTITION?", main_window)
-    act_help.triggered.connect(lambda: show_partition_help(main_window))
-    menu.addAction(act_help)
 
     menubar.addMenu(menu)
     return menu

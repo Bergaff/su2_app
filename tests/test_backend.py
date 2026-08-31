@@ -1441,15 +1441,57 @@ check("в workers нет find_su2_partition_exe",
 check("в workers нет partition_mesh", not hasattr(WK, "partition_mesh"))
 _src = open("ui/main_window.py", encoding="utf-8").read()
 check("в UI нет чекбокса Mesh partition", "chk_use_partition" not in _src)
-_wsrc = open("solver/workers.py", encoding="utf-8").read()
-# Пояснительный комментарий про CLinearPartitioner оставляем намеренно —
-# проверяем, что не осталось именно кода.
-_wcode = "\n".join(ln.split("#")[0] for ln in _wsrc.splitlines())
-check("в коде workers не осталось обращений к партиционеру",
-      "partition" not in _wcode.lower(), _wcode.lower().count("partition"))
-_help = open("su2_config_dialog.py", encoding="utf-8").read()
-check("справка больше не обещает файл SU2_PARTITION",
-      "не существует" in _help)
+import su2_config_dialog as SCD
+check("из диалога убрана справка про партиционер",
+      not hasattr(SCD, "show_partition_help")
+      and not hasattr(SCD, "PARTITION_HELP"))
+# Упоминаний не должно остаться нигде, включая комментарии.
+import re as _re
+for _f in ("solver/workers.py", "ui/main_window.py", "su2_config_dialog.py",
+           "mesh/mesh_worker.py", "mesh/gmsh_generator.py"):
+    _t = open(_f, encoding="utf-8").read()
+    # str.partition("=") — метод строки, к партиционеру отношения не имеет,
+    # поэтому исключаем вызовы через точку.
+    _hits = _re.findall(r"(?<!\.)partition", _t, _re.I)
+    check("в %s не осталось упоминания партиционера" % _f,
+          not _hits, "%s: найдено %d" % (_f, len(_hits)))
+
+print("== симметрия: режем только по явно заданной плоскости ==")
+import mesh.mesh_worker as MSW
+_w1 = MSW.MeshWorker.__new__(MSW.MeshWorker)
+MSW.MeshWorker.__init__(_w1, ["a.stl"], use_symmetry=True)
+check("MeshWorker не выдумывает плоскость, когда её не задали",
+      _w1.symmetry_planes is None, _w1.symmetry_planes)
+_w2 = MSW.MeshWorker.__new__(MSW.MeshWorker)
+MSW.MeshWorker.__init__(_w2, ["a.stl"], use_symmetry=True,
+                        symmetry_planes=["xz"])
+check("MeshWorker сохраняет явно заданную плоскость",
+      _w2.symmetry_planes == ["xz"], _w2.symmetry_planes)
+_w3 = MSW.MeshWorker.__new__(MSW.MeshWorker)
+MSW.MeshWorker.__init__(_w3, ["a.stl"])
+check("по умолчанию симметрия выключена",
+      _w3.use_symmetry is False and _w3.symmetry_planes is None)
+_mw_src = open("mesh/mesh_worker.py", encoding="utf-8").read()
+check("в MeshWorker не осталось подстановки xz по умолчанию",
+      'self.symmetry_planes = ["xz"]' not in _mw_src)
+_gg_src = open("mesh/gmsh_generator.py", encoding="utf-8").read()
+check("генератор не подставляет xz по умолчанию",
+      'symmetry_planes = ["xz"] if use_symmetry' not in _gg_src)
+check("галочка симметрии по умолчанию выключена",
+      "self.chk_use_symmetry.setChecked(False)" in _src)
+check("загрузчик проекта не подставляет плоскость задним числом",
+      'planes_to_restore = ["xz"]' not in _src)
+
+print("== панель состояния не плодит процессы ==")
+from ui.system_monitor import GpuUtilization
+_g = GpuUtilization()
+check("нет ГПУ-источника: повторный опрос помечен как нерабочий",
+      _g.read() is None and _g._nv_broken is True)
+_sm_src = open("ui/system_monitor.py", encoding="utf-8").read()
+check("вызов внешнего процесса подавляет окно консоли",
+      "CREATE_NO_WINDOW" in _sm_src and "creationflags=flags" in _sm_src)
+check("опрос внешнего процесса прорежен",
+      "NVIDIA_POLL_S" in _sm_src)
 
 # ---------------------------------------------------------------- summary
 print()

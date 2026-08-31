@@ -151,8 +151,10 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
     use_symmetry = bool(kwargs.get("use_symmetry", False))
     symmetry_planes = kwargs.get("symmetry_planes", None)  # list[str] | None
     if symmetry_planes is None:
-        # Обратная совместимость: старый флаг use_symmetry=True → только Y=0
-        symmetry_planes = ["xz"] if use_symmetry else []
+        # Раньше при use_symmetry=True подставлялся "xz" по умолчанию и
+        # сетка резалась пополам без явного указания плоскости. Теперь
+        # резка выполняется только по явно заданным плоскостям.
+        symmetry_planes = []
     # Нормализуем в нижний регистр
     symmetry_planes = [str(p).lower() for p in symmetry_planes if p]
     # Словари треугольников по маркерам

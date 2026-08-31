@@ -52,7 +52,7 @@ MPIEXEC_EXE = "mpiexec"
 
 
 # ---------------------------------------------------------------------------
-# T2: SU2_PARTITION — mesh-декомпозиция для многоядерных расчётов
+# Поиск вспомогательных исполняемых файлов SU2
 # ---------------------------------------------------------------------------
 def find_su2_adapt_exe() -> str:
     """Ищет исполняемый файл SU2_ADAPT (адаптация сетки по решению).
@@ -775,12 +775,6 @@ class SessionRunner(QThread):
             if os.path.exists(MESH_FILE):
                 shutil.copy2(MESH_FILE, os.path.join(case_dir, "mesh.su2"))
             write_case_config(case_dir, aoa, sess)
-            # Отдельного исполняемого файла SU2_PARTITION в дистрибутивах SU2
-            # нет (проверено по дереву исходников v6.2.0, v7.0.0, v8.0.0 и
-            # master: партиционер живёт как Common/src/toolboxes/
-            # CLinearPartitioner и вкомпилирован в SU2_CFD). Поэтому
-            # предварительную декомпозицию не делаем: SU2 размечает сетку
-            # сам при старте, это штатный и единственный режим.
             return True
         except Exception as e:
             log_cb(f"Ошибка: Подготовка каталога {case_dir}: {e}")

@@ -40,13 +40,14 @@ class MeshWorker(QThread):
         self.stl_paths = list(stl_paths) if stl_paths else []
         self.quality_text = quality_text
         self._cancel_requested = False
-        # === T1: плоскости симметрии (XY, XZ, YZ) ====================
-        # Список плоскостей. Для обратной совместимости: если передан
-        # старый флаг use_symmetry=True без списка — добавляем "xz".
+        # === Плоскости симметрии (XY, XZ, YZ) ========================
+        # Режем сетку только по тем плоскостям, которые заданы явно.
         self.use_symmetry = bool(use_symmetry)
         self.symmetry_planes = list(symmetry_planes) if symmetry_planes else None
-        if use_symmetry and not self.symmetry_planes:
-            self.symmetry_planes = ["xz"]
+        # Раньше здесь подставлялся "xz" по умолчанию, из-за чего сетка
+        # резалась пополам даже тогда, когда пользователь никакой
+        # плоскости не задавал. Больше не выдумываем: нет плоскостей —
+        # считаем полную модель.
         # ==============================================================
 
     def cancel(self):

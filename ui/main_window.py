@@ -1319,14 +1319,17 @@ class MainWindow(QMainWindow):
         self.lbl_gpu_load_row = QLabel("Нагрузка GPU:")
         perf_lay.addRow(self.lbl_gpu_load_row, gpu_load_lay)
 
-        # === T1+T2+T4: чекбоксы «Симметрия», «RAMP», «Partition» ========
+        # === Опции расчёта: симметрия и RAMP-разгон ======================
         opts_lay = QHBoxLayout()
         self.chk_use_symmetry = QCheckBox("Плоскость симметрии")
-        self.chk_use_symmetry.setChecked(True)
+        # По умолчанию выключено: сетка режется только тогда, когда
+        # плоскость реально задана ниже, а не по факту галочки.
+        self.chk_use_symmetry.setChecked(False)
         self.chk_use_symmetry.setToolTip(
             "Если геометрия симметрична (как почти все самолёты), SU2\n"
             "посчитает только половину модели — ускорение ~1.8x.\n"
-            "Требует маркер symmetry_plane в mesh.su2."
+            "Действует вместе с плоскостями симметрии ниже: сетка\n"
+            "обрезается только по тем плоскостям, которые добавлены."
         )
         self.chk_use_ramp_aoa = QCheckBox("RAMP-разгон AoA")
         self.chk_use_ramp_aoa.setChecked(False)
@@ -2690,7 +2693,7 @@ class MainWindow(QMainWindow):
             "cpu_cores_override": self._cpu_cores_override() if hasattr(self, "spin_cpu_cores") else 0,
             "compute_device": self._current_device() if hasattr(self, "combo_device") else "cpu",
             "cpu_cores": self._cpu_cores_pending,
-            # T1+T2+T4: чекбоксы симметрии, partition, RAMP и турбомодель
+            # Опции расчёта: симметрия, RAMP и турбомодель
             "use_symmetry": bool(getattr(self, "chk_use_symmetry", None) and
                                 self.chk_use_symmetry.isChecked()),
             # T1-визуал: список плоскостей симметрии (XY/XZ/YZ) из 3D-инструмента
@@ -2827,7 +2830,7 @@ class MainWindow(QMainWindow):
                 self.combo_device.setCurrentIndex(0 if device == "cpu" else 1)
             except Exception:
                 pass
-        # === T1+T2+T4: восстановление чекбоксов симметрии/partition/RAMP
+        # === Восстановление опций расчёта: симметрия / RAMP
         #               и выбор турбомодели (SA/SST) =====================
         if "use_symmetry" in data and hasattr(self, "chk_use_symmetry"):
             try:
@@ -2835,9 +2838,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         # T1-визуал: восстановление плоскостей симметрии (XY/XZ/YZ)
+        # Плоскости берём только из сохранённого списка: раньше при
+        # use_symmetry=True без списка подставлялся "xz", и проект
+        # открывался уже с разрезанной пополам моделью.
         planes_to_restore = data.get("symmetry_planes")
-        if planes_to_restore is None and data.get("use_symmetry"):
-            planes_to_restore = ["xz"]
         if planes_to_restore and hasattr(self, "_symmetry_planes"):
             self._symmetry_planes = []  # очищаем актёров
             for ax in planes_to_restore:
@@ -4366,7 +4370,7 @@ class MainWindow(QMainWindow):
         # Здесь просто пробрасываем текущее применённое состояние.
         compute_device_now = getattr(self, "_compute_device_pending", "cpu")
         gpu_percent_now = getattr(self, "_gpu_percent_pending", 0)
-        # === T1+T2+T4: флаги симметрии / partition / RAMP / турбомодель ===
+        # === Флаги симметрии / RAMP / турбомодель =========================
         # Источник истины для симметрии — список плоскостей из 3D-инструмента.
         # Старый чекбокс chk_use_symmetry используем как «добавить XZ по умолчанию».
         symmetry_planes_now = list(self.get_symmetry_planes())
@@ -5969,7 +5973,7 @@ class MainWindow(QMainWindow):
         self.combo_device.setCurrentIndex(0)
         self._refresh_load_status_label()
 
-        # Симметрия / RAMP / Partition
+        # Симметрия / RAMP
         self.chk_use_symmetry.setChecked(True)
         self.chk_use_ramp_aoa.setChecked(False)
 
@@ -6508,7 +6512,7 @@ def main():
     window = MainWindow()
     window.show()
     # Меню «SU2»: настройки config.cfg с подсказками, пресеты устойчивости,
-    # откат config.cfg.orig, справка по SU2_PARTITION.
+    # откат config.cfg.orig.
     try:
         import su2_config_dialog
         su2_config_dialog.install_menu(window)
