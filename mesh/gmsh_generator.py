@@ -565,6 +565,41 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
 
         print(f"   После вырезания: {grid.n_cells} тетраэдров")
 
+        # === Плоскость симметрии: реально режем модель пополам ============
+        # Без этого симметрия только писала маркер на полной сетке, то есть
+        # считался весь самолёт, а MARKER_SYM оставался пустым. Резка
+        # вдвое уменьшает число ячеек и даёт ровную грань на плоскости,
+        # из которой дальше собирается маркер симметрии.
+        _SYM_AXES = {"xz": ("y", (0.0, 1.0, 0.0)),
+                     "xy": ("z", (0.0, 0.0, 1.0)),
+                     "yz": ("x", (1.0, 0.0, 0.0))}
+        for plane in symmetry_planes:
+            spec = _SYM_AXES.get(plane)
+            if spec is None:
+                print(f"   Симметрия {plane!r}: плоскость со смещением, "
+                      "резка не выполняется")
+                continue
+            axis, normal = spec
+            n_before = grid.n_cells
+            try:
+                clipped = grid.clip(normal=normal, origin=(0.0, 0.0, 0.0),
+                                    invert=False)
+            except Exception as e:
+                print(f"   Симметрия {plane}: резка не удалась ({e}), "
+                      "сетка оставлена полной")
+                continue
+            if not isinstance(clipped, pv.UnstructuredGrid):
+                clipped = pv.UnstructuredGrid(clipped)
+            if clipped.n_cells < 10:
+                print(f"   Симметрия {plane}: после резки почти не осталось "
+                      "ячеек, сетка оставлена полной")
+                continue
+            grid = clipped
+            print(f"   Симметрия {plane.upper()}: срезано по {axis}=0, "
+                  f"ячеек {n_before} -> {grid.n_cells} "
+                  f"({100.0 * grid.n_cells / max(n_before, 1):.0f}%)")
+        # =================================================================
+
         report(75, "Поиск вырожденных элементов")
         tets_raw = extract_cells(grid, cell_type=10)
         if not tets_raw:

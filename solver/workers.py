@@ -54,42 +54,6 @@ MPIEXEC_EXE = "mpiexec"
 # ---------------------------------------------------------------------------
 # T2: SU2_PARTITION — mesh-декомпозиция для многоядерных расчётов
 # ---------------------------------------------------------------------------
-def find_su2_partition_exe() -> str:
-    """Ищет исполняемый файл SU2_PARTITION (или SU2_PARTITION.exe).
-
-    Источники поиска (по убыванию приоритета):
-      1. config.su2_partition_exe (если задан вручную в Solver Settings)
-      2. Каталог с config.su2_exe (часто SU2 идёт в комплекте с партиционером)
-      3. %SU2_HOME% / $SU2_HOME
-      4. shutil.which("SU2_PARTITION")
-    """
-    candidates: list = []
-    explicit = getattr(config, "su2_partition_exe", None)
-    if explicit:
-        candidates.append(explicit)
-    su2_dir = os.path.dirname(config.su2_exe) if getattr(config, "su2_exe", None) else ""
-    if su2_dir:
-        for name in ("SU2_PARTITION.exe", "SU2_PARTITION",
-                     "su2_partition.exe", "su2_partition"):
-            candidates.append(os.path.join(su2_dir, name))
-    su2_home = os.environ.get("SU2_HOME") or os.environ.get("SU2_RUN")
-    if su2_home:
-        for sub in ("bin", ""):
-            for name in ("SU2_PARTITION.exe", "SU2_PARTITION",
-                         "su2_partition.exe", "su2_partition"):
-                candidates.append(os.path.join(su2_home, sub, name))
-    for path in candidates:
-        try:
-            if path and os.path.isfile(path):
-                return os.path.abspath(path)
-        except Exception:
-            continue
-    which = shutil.which("SU2_PARTITION") or shutil.which("SU2_PARTITION.exe")
-    if which:
-        return which
-    return ""
-
-
 def find_su2_adapt_exe() -> str:
     """Ищет исполняемый файл SU2_ADAPT (адаптация сетки по решению).
 
@@ -210,81 +174,6 @@ def _mesh_npoin(mesh_path: str):
     return None
 
 
-def partition_mesh(case_dir: str, n_proc: int, log_cb=None) -> bool:
-    """Запускает SU2_PARTITION для декомпозиции mesh.su2 на n_proc частей.
-
-    Возвращает True, если декомпозиция прошла (или не нужна).
-    Возвращает False, если упало — в этом случае SU2 попробует
-    auto-partition на старте (медленнее, но работает).
-    """
-    log_cb = log_cb or (lambda m: None)
-    if n_proc <= 1:
-        return True
-    mesh_path = os.path.join(case_dir, "mesh.su2")
-    if not os.path.exists(mesh_path):
-        log_cb(f"  Внимание: partition: нет mesh.su2 в {case_dir}")
-        return False
-    part_exe = find_su2_partition_exe()
-    if not part_exe:
-        log_cb(
-            "  Внимание: SU2_PARTITION не найден — SU2 сделает auto-partition "
-            "(медленнее на старте, но работает)."
-        )
-        return False
-    mpiexec_exe = (config.mpiexec
-                   if hasattr(config, "mpiexec") and config.mpiexec
-                   else "mpiexec")
-    if not shutil.which(mpiexec_exe):
-        # На Windows mpiexec может не быть в PATH
-        log_cb(
-            "  Внимание: mpiexec не найден в PATH — пропускаем partition."
-        )
-        return False
-    cmd = [mpiexec_exe, "-n", str(int(n_proc)), part_exe, mesh_path]
-    log_cb(f"  Partition: {' '.join(cmd)}")
-    try:
-        proc = subprocess.run(
-            cmd, cwd=case_dir,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, timeout=120,
-            **hidden_subprocess_kwargs(),
-        )
-        if proc.returncode != 0:
-            log_cb(
-                f"  Внимание: SU2_PARTITION завершился с кодом {proc.returncode}: "
-                f"{(proc.stdout or '')[-300:]}"
-            )
-            return False
-        # SU2_PARTITION создаёт mesh_*.su2 файлы. Проверим, что они есть.
-        n_parts = sum(
-            1 for f in os.listdir(case_dir)
-            if f.startswith("mesh_") and f.endswith(".su2")
-        )
-        if n_parts < n_proc:
-            log_cb(
-                f"  Внимание: SU2_PARTITION создал только {n_parts}/{n_proc} частей — "
-                f"SU2 попробует auto-partition."
-            )
-            return False
-        log_cb(f"  Готово: Partition: {n_parts} частей")
-        return True
-    except subprocess.TimeoutExpired:
-        log_cb("  Внимание: SU2_PARTITION превысил таймаут 120 с")
-        return False
-    except Exception as e:
-        log_cb(f"  Внимание: SU2_PARTITION: {e}")
-        return False
-
-    def request_cores_change(self, cores: int):
-        """Запрос на смену числа ядер. Применится при следующем mpiexec."""
-        self._pending_cores = cores
-        
-    def _apply_pending_cores(self):
-        """Применяет отложенную смену ядер."""
-        if self._pending_cores is not None:
-            self._cores = self._pending_cores
-            self._pending_cores = None
-            self.log(f"CPU cores changed to {self._cores} (applied for next phase)")
 # ---------------------------------------------------------------------------
 # ТЗ п.8 — скрытие «чёрного окна» консоли SU2 на Windows
 # ---------------------------------------------------------------------------
@@ -886,19 +775,12 @@ class SessionRunner(QThread):
             if os.path.exists(MESH_FILE):
                 shutil.copy2(MESH_FILE, os.path.join(case_dir, "mesh.su2"))
             write_case_config(case_dir, aoa, sess)
-            # === T2: mesh-декомпозиция для многоядерных расчётов ==========
-            # Проверяем флаг use_partition — пользователь мог отключить его
-            # в Solver Settings (для маленьких сеток partition не нужен).
-            use_partition = bool(getattr(sess, "use_partition", True))
-            n_proc = int(getattr(sess, "cpu_cores", 1) or 1)
-            if n_proc > 1 and use_partition:
-                partition_mesh(case_dir, n_proc, log_cb)
-            elif n_proc > 1 and not use_partition:
-                log_cb(
-                    "  Mesh partition отключён пользователем — "
-                    "SU2 сделает auto-partition на старте."
-                )
-            # ==============================================================
+            # Отдельного исполняемого файла SU2_PARTITION в дистрибутивах SU2
+            # нет (проверено по дереву исходников v6.2.0, v7.0.0, v8.0.0 и
+            # master: партиционер живёт как Common/src/toolboxes/
+            # CLinearPartitioner и вкомпилирован в SU2_CFD). Поэтому
+            # предварительную декомпозицию не делаем: SU2 размечает сетку
+            # сам при старте, это штатный и единственный режим.
             return True
         except Exception as e:
             log_cb(f"Ошибка: Подготовка каталога {case_dir}: {e}")

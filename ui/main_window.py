@@ -1334,16 +1334,8 @@ class MainWindow(QMainWindow):
             "Плавно наращивать угол атаки от 0° до нужного за 100 итераций.\n"
             "Улучшает сходимость на жёстких моделях (высокие AoA, закрылки)."
         )
-        self.chk_use_partition = QCheckBox("Mesh partition")
-        self.chk_use_partition.setChecked(True)
-        self.chk_use_partition.setToolTip(
-            "Декомпозиция mesh.su2 на N частей через SU2_PARTITION.\n"
-            "Ускоряет старт многоядерного расчёта (особенно при 8+ ядрах).\n"
-            "Требует наличия SU2_PARTITION рядом с SU2_CFD."
-        )
         opts_lay.addWidget(self.chk_use_symmetry)
         opts_lay.addWidget(self.chk_use_ramp_aoa)
-        opts_lay.addWidget(self.chk_use_partition)
         opts_lay.addStretch()
         perf_lay.addRow(opts_lay)
         # =================================================================
@@ -1686,7 +1678,16 @@ class MainWindow(QMainWindow):
         self.lbl_status_time = QLabel("")
         self.lbl_status_time.setStyleSheet("font-weight: bold; color: #2E5A78; margin-right: 15px;")
         sb.addPermanentWidget(self.lbl_status_time)
-        self.lbl_status_memory = QLabel("Memory: --")
+        # Живые показатели как в диспетчере задач: ЦПУ, ГПУ, память.
+        _mono = "font-family: Consolas, monospace; color: #2c4257; margin-right: 12px;"
+        self.lbl_status_cpu = QLabel("ЦПУ н/д")
+        self.lbl_status_cpu.setStyleSheet(_mono)
+        sb.addPermanentWidget(self.lbl_status_cpu)
+        self.lbl_status_gpu = QLabel("ГПУ н/д")
+        self.lbl_status_gpu.setStyleSheet(_mono)
+        sb.addPermanentWidget(self.lbl_status_gpu)
+        self.lbl_status_memory = QLabel("Память н/д")
+        self.lbl_status_memory.setStyleSheet(_mono)
         sb.addPermanentWidget(self.lbl_status_memory)
 
         # CAD-навигация
@@ -1699,8 +1700,17 @@ class MainWindow(QMainWindow):
 
         self.project_saved = True
         self.mem_timer = QTimer(self)
-        self.mem_timer.timeout.connect(self.update_memory_status)
+        self.mem_timer.timeout.connect(self.update_system_status)
         self.mem_timer.start(2000)
+        # Часы тикают собственным таймером: раньше надпись времени
+        # перерисовывалась только по событиям прогресса, поэтому шла рывками.
+        self._clock_start = None
+        self._clock_eta = None
+        self.clock_timer = QTimer(self)
+        self.clock_timer.timeout.connect(self._tick_clock)
+        self.clock_timer.start(250)
+        self._system_monitor = None
+        QTimer.singleShot(400, self.update_system_status)
         # По умолчанию открываем Global Definitions (там теперь и условия, и правила)
         self.tree.setCurrentItem(self.item_global_defs)
         self.update_isa()
@@ -1716,19 +1726,87 @@ class MainWindow(QMainWindow):
     # =============================================================
     # ПАМЯТЬ (без psutil: ctypes на Windows, resource на Unix)
     # =============================================================
-    def update_memory_status(self):
+    # ------------------------------------------------------------------
+    # Живые показатели ЦПУ / ГПУ / памяти
+    # ------------------------------------------------------------------
+    def update_system_status(self):
+        """Обновляет ЦПУ, ГПУ и память в панели состояния.
+
+        Память процесса берётся через GetProcessMemoryInfo с явными
+        argtypes: прежний вызов без объявления типов на 64-битной Windows
+        возвращал ноль, поэтому индикатор всегда был пустым.
+        """
         try:
-            rss = _get_process_rss_bytes()
-            if rss <= 0:
-                self.lbl_status_memory.setText("Memory: --")
-                # Попытка установить psutil в фоне (если ещё не пытались)
-                if not getattr(self, "_psutil_install_attempted", False):
-                    self._psutil_install_attempted = True
-                    self._try_install_psutil()
-            else:
-                self.lbl_status_memory.setText(format_memory_size(rss))
+            from ui.system_monitor import SystemMonitor
+            if self._system_monitor is None:
+                self._system_monitor = SystemMonitor()
+            cores_used = self._cpu_cores_override() or None
+            snap = self._system_monitor.snapshot(cores_used=cores_used)
+            labels = SystemMonitor.labels(snap)
+            self.lbl_status_cpu.setText(labels["cpu"])
+            self.lbl_status_gpu.setText(labels["gpu"])
+            self.lbl_status_memory.setText(labels["mem"])
+            if snap["rss"] is None and not getattr(
+                    self, "_psutil_install_attempted", False):
+                self._psutil_install_attempted = True
+                self._try_install_psutil()
         except Exception:
-            self.lbl_status_memory.setText("Memory: --")
+            self.lbl_status_cpu.setText("ЦПУ н/д")
+            self.lbl_status_gpu.setText("ГПУ н/д")
+            self.lbl_status_memory.setText("Память н/д")
+
+    # ------------------------------------------------------------------
+    # Часы: собственный таймер, не зависит от событий прогресса
+    # ------------------------------------------------------------------
+    def _clock_begin(self, eta=None):
+        self._clock_start = time.time()
+        self._clock_eta = eta
+        self._tick_clock()
+
+    def _clock_set_eta(self, eta):
+        """Обновляет оценку остатка; часы перерисует собственный таймер."""
+        self._clock_eta = eta
+        if self._clock_start is None:
+            self._clock_start = time.time()
+
+    def _clock_end(self):
+        self._clock_start = None
+        self._clock_eta = None
+        self.lbl_status_time.setText("")
+
+    # ------------------------------------------------------------------
+    # Полоса прогресса: шаг не мельче 2%
+    # ------------------------------------------------------------------
+    def _set_progress(self, percent):
+        """Двигает полосу шагами не мельче 2%.
+
+        Воркер присылает процент по каждой записи SU2 (при INNER_ITER=6000
+        и частоте вывода 50 это ~120 событий, шаг меньше процента). Без
+        порога полоса дрожит; с порогом идёт заметными шагами 2-5%.
+        Крайние значения 0 и 100 применяются всегда.
+        """
+        try:
+            value = max(0, min(100, int(round(float(percent)))))
+        except (TypeError, ValueError):
+            return
+        if value in (0, 100) or value - self.progress.value() >= 2 \
+                or value < self.progress.value():
+            self.progress.setValue(value)
+
+    def _tick_clock(self):
+        if not self._clock_start:
+            return
+        mins, secs = divmod(int(time.time() - self._clock_start), 60)
+        text = f"{mins:02d}:{secs:02d}"
+        eta = self._clock_eta
+        if eta and eta > 0:
+            em, es = divmod(int(eta), 60)
+            text += f"  ·  осталось {em}м {es:02d}с"
+        self.lbl_status_time.setText(text)
+
+    # Совместимость со старыми вызовами.
+    def update_memory_status(self):
+        self.update_system_status()
 
     def _try_install_psutil(self):
         """Докачка psutil при первом запуске (только в режиме разработки).
@@ -2468,7 +2546,7 @@ class MainWindow(QMainWindow):
         self._install_worker.start()
 
     def on_su2_install_progress(self, percent, msg):
-        self.progress.setValue(percent)
+        self._set_progress(percent)
         self.lbl_su2_status.setText(msg)
 
     def on_su2_install_finished(self, ok, path_or_msg, install_dir):
@@ -2617,8 +2695,6 @@ class MainWindow(QMainWindow):
                                 self.chk_use_symmetry.isChecked()),
             # T1-визуал: список плоскостей симметрии (XY/XZ/YZ) из 3D-инструмента
             "symmetry_planes": list(self.get_symmetry_planes()),
-            "use_partition": bool(getattr(self, "chk_use_partition", None) and
-                                 self.chk_use_partition.isChecked()),
             "use_ramp_aoa": bool(getattr(self, "chk_use_ramp_aoa", None) and
                                 self.chk_use_ramp_aoa.isChecked()),
             "turb_model": self.get_turb_model() if hasattr(self, "combo_solver") else "SA",
@@ -2771,11 +2847,6 @@ class MainWindow(QMainWindow):
                         {"axis": ax, "enabled": True, "actor": None})
             self._rebuild_symmetry_list()
             self._update_symmetry_3d()
-        if "use_partition" in data and hasattr(self, "chk_use_partition"):
-            try:
-                self.chk_use_partition.setChecked(bool(data["use_partition"]))
-            except Exception:
-                pass
         if "use_ramp_aoa" in data and hasattr(self, "chk_use_ramp_aoa"):
             try:
                 self.chk_use_ramp_aoa.setChecked(bool(data["use_ramp_aoa"]))
@@ -3858,6 +3929,7 @@ class MainWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         self._meshing = True
         self._mesh_start_time = time.time()
+        self._clock_begin()
         self._eta_ema = None
         self._last_logged_pct = -1
         self.progress.setVisible(True)
@@ -3895,7 +3967,7 @@ class MainWindow(QMainWindow):
         self._mesh_worker.start()
 
     def on_mesh_progress(self, percent, stage):
-        self.progress.setValue(percent)
+        self._set_progress(percent)
         self.lbl_mesh_info.setText(f"{stage} ({percent}%)")
         elapsed = time.time() - self._mesh_start_time
         if percent > 2:
@@ -3905,7 +3977,7 @@ class MainWindow(QMainWindow):
                 else 0.3 * remain + 0.7 * self._eta_ema
             mins = int(self._eta_ema // 60)
             secs = int(self._eta_ema % 60)
-            self.lbl_status_time.setText(f"Осталось: {mins}м {secs}с")
+            self._clock_set_eta(self._eta_ema)
             # Подробный лог: первый раз при <5%, потом каждые ~20%
             if not hasattr(self, "_last_logged_pct"):
                 self._last_logged_pct = -1
@@ -3919,7 +3991,7 @@ class MainWindow(QMainWindow):
     def on_mesh_finished(self, ok, msg, stl_paths):
         self._meshing = False
         self.progress.setVisible(False)
-        self.lbl_status_time.setText("")
+        self._clock_end()
         if self._mesh_worker:
             self._mesh_worker.deleteLater()
             self._mesh_worker = None
@@ -4306,10 +4378,6 @@ class MainWindow(QMainWindow):
             getattr(self, "chk_use_ramp_aoa", None)
             and self.chk_use_ramp_aoa.isChecked()
         )
-        use_partition_now = bool(
-            getattr(self, "chk_use_partition", None)
-            and self.chk_use_partition.isChecked()
-        )
         turb_model_now = self.get_turb_model()
         # ==================================================================
         # Пытаемся передать через kwargs (если solver/session.py их поддерживает).
@@ -4325,7 +4393,6 @@ class MainWindow(QMainWindow):
                 ("use_symmetry", use_symmetry_now),
                 ("symmetry_planes", symmetry_planes_now),
                 ("use_ramp_aoa", use_ramp_aoa_now),
-                ("use_partition", use_partition_now),
                 ("turb_model", turb_model_now),
             ]:
                 if key in sig.parameters:
@@ -4348,7 +4415,6 @@ class MainWindow(QMainWindow):
         self.session.use_symmetry = use_symmetry_now
         self.session.symmetry_planes = symmetry_planes_now
         self.session.use_ramp_aoa = use_ramp_aoa_now
-        self.session.use_partition = use_partition_now
         self.session.turb_model = turb_model_now
         # start_new не принимает mesh_quality — пишем напрямую (атрибут есть
         # в __init__, см. solver/session.py)
@@ -4397,7 +4463,7 @@ class MainWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         self.calc_start_time = time.time()
         self._eta_ema = None
-        self.lbl_status_time.setText("Оценка времени...")
+        self._clock_begin()
         self.session_runner = SessionRunner(self.session)
         self.session_runner.log_signal.connect(self.log_text.append)
         self.session_runner.progress_signal.connect(self.on_calculation_progress)
@@ -4412,7 +4478,7 @@ class MainWindow(QMainWindow):
         self.session_runner.start()
 
     def on_calculation_progress(self, percent):
-        self.progress.setValue(percent)
+        self._set_progress(percent)
         if hasattr(self, "calc_start_time"):
             elapsed = time.time() - self.calc_start_time
             if percent > 2:
@@ -4422,7 +4488,8 @@ class MainWindow(QMainWindow):
                     else 0.3 * remain + 0.7 * self._eta_ema
                 mins = int(self._eta_ema // 60)
                 secs = int(self._eta_ema % 60)
-                self.lbl_status_time.setText(f"Осталось: {mins}м {secs}с")
+                self._clock_set_eta(self._eta_ema
+                                    if hasattr(self, "_eta_ema") else None)
         if self.session:
             curr_pt = self.session.current_index + 1
             total_pts = len(self.session.aoa_list)
@@ -4475,7 +4542,7 @@ class MainWindow(QMainWindow):
         self.set_calculation_buttons_enabled(run=self.mesh_ready, pause=False,
                                              resume=False, cancel=False)
         self.progress.setVisible(False)
-        self.lbl_status_time.setText("")
+        self._clock_end()
         self.lbl_su2_status.setText("Расчет отменен")
         self.lbl_su2_status.setStyleSheet("color: #9B2C2C; font-weight: bold;")
 
@@ -4485,7 +4552,7 @@ class MainWindow(QMainWindow):
         self.set_calculation_buttons_enabled(run=False, pause=False,
                                              resume=True, cancel=True)
         self.progress.setVisible(False)
-        self.lbl_status_time.setText("")
+        self._clock_end()
         self.lbl_su2_status.setText("На паузе")
         self.lbl_su2_status.setStyleSheet("color: orange; font-weight: bold;")
         self.log_text.append("Сессия на паузе. Можно продолжить или отменить.")
@@ -4508,7 +4575,7 @@ class MainWindow(QMainWindow):
         self.set_calculation_buttons_enabled(run=self.mesh_ready, pause=False,
                                              resume=False, cancel=False)
         self.progress.setVisible(False)
-        self.lbl_status_time.setText("")
+        self._clock_end()
         self.btn_save_csv.setEnabled(True)
         self.btn_show_flow.setEnabled(True)
         n_ok = sum(1 for r in self.all_results if not r.get("error"))
@@ -4693,7 +4760,7 @@ class MainWindow(QMainWindow):
         )
         self.opt_worker.mesh_quality = self.combo_mesh_quality.currentText()
         self.opt_worker.log_signal.connect(self.log_text.append)
-        self.opt_worker.progress_signal.connect(self.progress.setValue)
+        self.opt_worker.progress_signal.connect(self._set_progress)
         self.opt_worker.opt_finished.connect(self.optimization_completed)
         self.opt_worker.update_geometry_signal.connect(self._update_geometry_from_opt)
         self.opt_worker.start()
@@ -5070,7 +5137,7 @@ class MainWindow(QMainWindow):
             symmetry_planes=self.get_symmetry_plane_axes(),
         )
         self.opt_worker.log_signal.connect(self.log_text.append)
-        self.opt_worker.progress_signal.connect(self.progress.setValue)
+        self.opt_worker.progress_signal.connect(self._set_progress)
         self.opt_worker.opt_finished.connect(self.on_doe_finished)
         self.opt_worker.update_geometry_signal.connect(self._update_geometry_from_opt)
         self.opt_worker.variant_ready.connect(self._on_doe_variant_ready)
@@ -5905,7 +5972,6 @@ class MainWindow(QMainWindow):
         # Симметрия / RAMP / Partition
         self.chk_use_symmetry.setChecked(True)
         self.chk_use_ramp_aoa.setChecked(False)
-        self.chk_use_partition.setChecked(True)
 
         # Плоскости симметрии (3D)
         for p in list(self._symmetry_planes):

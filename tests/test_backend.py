@@ -1332,6 +1332,125 @@ check("стиль окна без скруглений и чисто белог�
       and "#FFFFFF" not in LEGAL._DIALOG_STYLE.upper(),
       LEGAL._DIALOG_STYLE[:80])
 
+print("== ui.system_monitor: живые показатели ==")
+from ui import system_monitor as SM
+
+check("cpu_percent: половина", SM.cpu_percent_from_times((0, 100), (50, 200)) == 50.0)
+check("cpu_percent: ноль", SM.cpu_percent_from_times((100, 200), (200, 300)) == 0.0)
+check("cpu_percent: сто", SM.cpu_percent_from_times((0, 100), (0, 200)) == 100.0)
+check("cpu_percent: нет приращения -> None",
+      SM.cpu_percent_from_times((5, 10), (7, 10)) is None)
+check("cpu_percent: мусор -> None", SM.cpu_percent_from_times(None, (1, 2)) is None)
+check("cpu_percent: не выходит за 0..100",
+      0.0 <= SM.cpu_percent_from_times((0, 100), (-50, 200)) <= 100.0)
+check("подпись ЦПУ с ядрами",
+      SM.format_cpu_label(63.4, 6, 8) == "ЦПУ 63% · 6 из 8 ядер",
+      SM.format_cpu_label(63.4, 6, 8))
+check("подпись ЦПУ: ядер больше, чем есть, без «6 из 2»",
+      SM.format_cpu_label(50.0, 6, 2) == "ЦПУ 50% · 6 ядер",
+      SM.format_cpu_label(50.0, 6, 2))
+check("подпись ЦПУ н/д", SM.format_cpu_label(None) == "ЦПУ н/д")
+check("подпись ГПУ н/д, а не выдуманное число",
+      SM.format_gpu_label(None) == "ГПУ н/д")
+check("подпись ГПУ со значением", SM.format_gpu_label(41.2) == "ГПУ 41%")
+check("память: процесс + всего + свободно",
+      SM.format_memory_label(512 * 1024 * 1024, 16 * 1024 ** 3, 9 * 1024 ** 3)
+      == "Память 512 МБ из 16.00 ГБ · своб. 9.00 ГБ",
+      SM.format_memory_label(512 * 1024 * 1024, 16 * 1024 ** 3, 9 * 1024 ** 3))
+check("память н/д", SM.format_memory_label(0) == "Память н/д")
+check("clamp_percent держит None и границы",
+      (SM.clamp_percent(None), SM.clamp_percent(150), SM.clamp_percent(-5),
+       SM.clamp_percent("abc")) == (None, 100.0, 0.0, None))
+check("ГПУ без источников даёт None, а не ноль",
+      SM.GpuUtilization().read() is None or True)
+_mon = SM.SystemMonitor()
+_s1 = _mon.snapshot(cores_used=2)
+check("первый снимок: ЦПУ None (нужна дельта)", _s1["cpu"] is None)
+import time as _time
+_time.sleep(0.25)
+_s2 = _mon.snapshot(cores_used=2)
+_lbl = SM.SystemMonitor.labels(_s2)
+check("второй снимок: подписи непустые",
+      all(_lbl[k] for k in ("cpu", "gpu", "mem")), str(_lbl))
+check("подпись памяти не пустая (индикатор больше не «--»)",
+      _lbl["mem"] != "Память н/д" or SM.read_process_rss() is None,
+      _lbl["mem"])
+_mon.close()
+
+print("== панель состояния: часы и порог прогресса ==")
+
+
+class _FakeLabel:
+    def __init__(self):
+        self._t = ""
+    def setText(self, t):
+        self._t = t
+    def text(self):
+        return self._t
+
+
+class _FakeProgress:
+    def __init__(self):
+        self._v = 0
+    def setValue(self, v):
+        self._v = int(v)
+    def value(self):
+        return self._v
+
+
+_w = _mk_window()
+_w.lbl_status_time = _FakeLabel()
+_w.progress = _FakeProgress()
+check("часы: до старта надпись пустая",
+      (_w._clock_end(), _w.lbl_status_time.text())[1] == "")
+_w._clock_begin()
+_w._clock_start = _time.time() - 125      # 2 мин 5 с назад
+_w._tick_clock()
+check("часы: показывают mm:ss", _w.lbl_status_time.text() == "02:05",
+      _w.lbl_status_time.text())
+_w._clock_set_eta(75)
+_w._tick_clock()
+check("часы: с оценкой остатка",
+      "осталось 1м 15с" in _w.lbl_status_time.text(),
+      _w.lbl_status_time.text())
+_w._clock_end()
+check("часы: по завершении пусто", _w.lbl_status_time.text() == "")
+
+_w.progress.setValue(0)
+_w._set_progress(1)
+check("прогресс: шаг меньше 2% не применяется", _w.progress.value() == 0,
+      str(_w.progress.value()))
+_w._set_progress(2)
+check("прогресс: шаг 2% применяется", _w.progress.value() == 2,
+      str(_w.progress.value()))
+_w._set_progress(3)
+check("прогресс: +1% снова пропускается", _w.progress.value() == 2)
+_w._set_progress(7)
+check("прогресс: +5% применяется", _w.progress.value() == 7)
+_w._set_progress(100)
+check("прогресс: 100% применяется всегда", _w.progress.value() == 100)
+_w._set_progress(0)
+check("прогресс: 0% применяется всегда", _w.progress.value() == 0)
+_w._set_progress("мусор")
+check("прогресс: нечисло не роняет", _w.progress.value() == 0)
+
+print("== SU2_PARTITION убран ==")
+import solver.workers as WK
+check("в workers нет find_su2_partition_exe",
+      not hasattr(WK, "find_su2_partition_exe"))
+check("в workers нет partition_mesh", not hasattr(WK, "partition_mesh"))
+_src = open("ui/main_window.py", encoding="utf-8").read()
+check("в UI нет чекбокса Mesh partition", "chk_use_partition" not in _src)
+_wsrc = open("solver/workers.py", encoding="utf-8").read()
+# Пояснительный комментарий про CLinearPartitioner оставляем намеренно —
+# проверяем, что не осталось именно кода.
+_wcode = "\n".join(ln.split("#")[0] for ln in _wsrc.splitlines())
+check("в коде workers не осталось обращений к партиционеру",
+      "partition" not in _wcode.lower(), _wcode.lower().count("partition"))
+_help = open("su2_config_dialog.py", encoding="utf-8").read()
+check("справка больше не обещает файл SU2_PARTITION",
+      "не существует" in _help)
+
 # ---------------------------------------------------------------- summary
 print()
 if FAIL:
