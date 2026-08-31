@@ -2339,6 +2339,115 @@ class MainWindow(QMainWindow):
     # =============================================================
     # T1-ВИЗУАЛ: Плоскости симметрии (XY / XZ / YZ)
     # =============================================================
+    # Нормали и буквы осей для плоскостей симметрии. Вынесены в чистую
+    # функцию, чтобы состояние видимости можно было проверить тестом
+    # без отрисовки.
+    _SYM_VIEW_NORMAL = {"xz": (0.0, 1.0, 0.0),
+                        "xy": (0.0, 0.0, 1.0),
+                        "yz": (1.0, 0.0, 0.0)}
+    _SYM_VIEW_AXIS = {"xz": "y", "xy": "z", "yz": "x"}
+
+    @staticmethod
+    def symmetry_view_planes(planes):
+        """Список плоскостей -> плоскости отсечения VTK ``(normal, origin)``.
+
+        Состояние ``view`` у плоскости: 0 — видны обе стороны,
+        1 — скрыта отрицательная половина, 2 — скрыта положительная.
+        VTK отрезает ту часть, где значение плоскости отрицательно,
+        поэтому для состояния 1 нормаль берётся как есть, а для
+        состояния 2 — с обратным знаком.
+        """
+        idx = {"x": 0, "y": 1, "z": 2}
+        out = []
+        for p in planes or ():
+            try:
+                state = int(p.get("view", 0) or 0)
+            except (TypeError, ValueError):
+                state = 0
+            if state not in (1, 2):
+                continue
+            axis = str(p.get("axis", "")).lower()
+            normal = MainWindow._SYM_VIEW_NORMAL.get(axis)
+            letter = MainWindow._SYM_VIEW_AXIS.get(axis)
+            if normal is None or letter is None:
+                continue
+            sign = 1.0 if state == 1 else -1.0
+            origin = [0.0, 0.0, 0.0]
+            try:
+                origin[idx[letter]] = float(p.get("offset", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                pass
+            # «+ 0.0» убирает -0.0, чтобы подпись и лог не путали.
+            out.append((tuple(c * sign + 0.0 for c in normal),
+                        tuple(origin)))
+        return out
+
+    @staticmethod
+    def symmetry_view_label(axis, state):
+        """Подпись кнопки видимости: «Всё», «y+» или «y-»."""
+        if state == 1 or state == 2:
+            letter = MainWindow._SYM_VIEW_AXIS.get(str(axis).lower(), "")
+            return "%s%s" % (letter, "+" if state == 1 else "-")
+        return "Всё"
+
+    def _cycle_symmetry_view(self, axis: str):
+        """Кнопка видимости: обе стороны -> без отрицательной половины ->
+        без положительной половины -> снова обе."""
+        for p in self._symmetry_planes:
+            if p["axis"] == axis:
+                try:
+                    cur = int(p.get("view", 0) or 0)
+                except (TypeError, ValueError):
+                    cur = 0
+                p["view"] = (cur + 1) % 3
+                break
+        self._apply_symmetry_view()
+        self._rebuild_symmetry_list()
+
+    def _apply_symmetry_view(self):
+        """Накладывает плоскости отсечения на актёры тел.
+
+        Сами меши не пересчитываются: отсечение живёт в свойстве актёра,
+        поэтому состояние обратимо и не портит геометрию.
+        """
+        specs = self.symmetry_view_planes(self._symmetry_planes)
+        try:
+            import vtk
+        except Exception:
+            return
+        self._sym_clip_planes = []
+        for normal, origin in specs:
+            try:
+                pl = vtk.vtkPlane()
+                pl.SetOrigin(*origin)
+                pl.SetNormal(*normal)
+                self._sym_clip_planes.append(pl)
+            except Exception:
+                pass
+        for b in getattr(self, "bodies", []) or []:
+            actor = b.get("actor") if isinstance(b, dict) else None
+            if actor is None:
+                continue
+            # Плоскости отсечения в VTK 9 живут на маппере: у
+            # vtkOpenGLProperty метода AddClippingPlane нет, поэтому
+            # через свойство актёра это молча не сработало бы.
+            try:
+                mapper = actor.GetMapper()
+            except Exception:
+                mapper = None
+            if mapper is None or not hasattr(mapper, "AddClippingPlane"):
+                continue
+            try:
+                mapper.RemoveAllClippingPlanes()
+                for pl in self._sym_clip_planes:
+                    mapper.AddClippingPlane(pl)
+            except Exception:
+                pass
+        try:
+            self.plotter.render()
+        except Exception:
+            pass
+
     def _add_symmetry_plane(self, axis: str):
         """Добавляет плоскость симметрии с опциональным смещением."""
         axis = axis.lower()
@@ -2358,7 +2467,8 @@ class MainWindow(QMainWindow):
         if not ok:
             return
 
-        plane = {"axis": axis, "enabled": True, "actor": None, "offset": offset}
+        plane = {"axis": axis, "enabled": True, "actor": None,
+                 "offset": offset, "view": 0}
         self._symmetry_planes.append(plane)
         self._rebuild_symmetry_list()
         self._update_symmetry_3d()
@@ -2378,6 +2488,7 @@ class MainWindow(QMainWindow):
                 break
         self._rebuild_symmetry_list()
         self._update_symmetry_3d()
+        self._apply_symmetry_view()
         self.log_text.append(f"Удалена плоскость {axis.upper()}")
 
     def _rebuild_symmetry_list(self):
@@ -2399,6 +2510,24 @@ class MainWindow(QMainWindow):
             lbl.setStyleSheet("color: #1A1A1A;")
             row.addWidget(lbl)
             row.addStretch()
+            state = int(p.get("view", 0) or 0)
+            letter = MainWindow._SYM_VIEW_AXIS.get(p["axis"], "")
+            btn_view = _PB(self.symmetry_view_label(p["axis"], state))
+            btn_view.setFixedWidth(46)
+            if state == 1:
+                tip = ("Скрыта отрицательная половина по %s.\n"
+                       "Ещё раз — скрыть положительную." % letter)
+            elif state == 2:
+                tip = ("Скрыта положительная половина по %s.\n"
+                       "Ещё раз — показать обе стороны." % letter)
+            else:
+                tip = ("Показаны обе стороны.\n"
+                       "Нажмите, чтобы скрыть отрицательную половину по %s."
+                       % letter)
+            btn_view.setToolTip(tip)
+            btn_view.clicked.connect(lambda checked=False, a=p["axis"]:
+                                     self._cycle_symmetry_view(a))
+            row.addWidget(btn_view)
             btn_del = _PB("×")
             btn_del.setFixedWidth(28)
             btn_del.setToolTip("Удалить")

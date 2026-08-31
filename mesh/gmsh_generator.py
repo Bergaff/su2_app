@@ -359,6 +359,13 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         except Exception:
             pass
 
+    # symmetry_planes по умолчанию None, а цикл резки ниже его итерирует.
+    # Без нормализации генерация падала с
+    # "'NoneType' object is not iterable".
+    if not symmetry_planes:
+        symmetry_planes = []
+    symmetry_planes = [str(p).lower() for p in symmetry_planes if p]
+
     try:
         report(2, "Загрузка поверхностей")
         body_meshes = []

@@ -1493,6 +1493,74 @@ check("вызов внешнего процесса подавляет окно 
 check("опрос внешнего процесса прорежен",
       "NVIDIA_POLL_S" in _sm_src)
 
+print("== генератор сетки не падает на symmetry_planes=None ==")
+import inspect as _insp
+import mesh.gmsh_generator as _GG
+_gsrc = _insp.getsource(_GG.generate_mesh_impl)
+check("в generate_mesh_impl есть нормализация списка плоскостей",
+      "if not symmetry_planes:" in _gsrc)
+check("нормализация стоит до цикла резки",
+      _gsrc.index("if not symmetry_planes:")
+      < _gsrc.index("for plane in symmetry_planes:"))
+
+print("== кнопка видимости плоскости симметрии ==")
+check("подписи кнопки: Всё / y+ / y-",
+      [MW.MainWindow.symmetry_view_label("xz", i) for i in (0, 1, 2)]
+      == ["Всё", "y+", "y-"],
+      [MW.MainWindow.symmetry_view_label("xz", i) for i in (0, 1, 2)])
+check("состояние 0 не даёт плоскостей отсечения",
+      MW.MainWindow.symmetry_view_planes([{"axis": "xz", "view": 0}]) == [])
+_sp1 = MW.MainWindow.symmetry_view_planes([{"axis": "xz", "view": 1}])
+check("состояние 1 скрывает отрицательную половину (нормаль +y)",
+      _sp1 == [((0.0, 1.0, 0.0), (0.0, 0.0, 0.0))], _sp1)
+_sp2 = MW.MainWindow.symmetry_view_planes([{"axis": "xz", "view": 2}])
+check("состояние 2 скрывает положительную половину (нормаль -y)",
+      _sp2 == [((0.0, -1.0, 0.0), (0.0, 0.0, 0.0))], _sp2)
+_sp3 = MW.MainWindow.symmetry_view_planes(
+    [{"axis": "xz", "offset": 0.5, "view": 1}])
+check("смещение плоскости переносится в начало отсечения",
+      _sp3 == [((0.0, 1.0, 0.0), (0.0, 0.5, 0.0))], _sp3)
+check("неизвестная ось и мусор не роняют",
+      MW.MainWindow.symmetry_view_planes(
+          [{"axis": "?!", "view": 1}, {"axis": "xz"}]) == [])
+_w4 = MW.MainWindow.__new__(MW.MainWindow)
+_w4._symmetry_planes = [{"axis": "xz", "offset": 0.0, "view": 0}]
+_w4._apply_symmetry_view = lambda: None
+_w4._rebuild_symmetry_list = lambda: None
+_seq = []
+for _ in range(4):
+    _w4._cycle_symmetry_view("xz")
+    _seq.append(_w4._symmetry_planes[0]["view"])
+check("цикл видимости: 1 -> 2 -> 0 -> 1", _seq == [1, 2, 0, 1], _seq)
+_i = _src.index("row.addWidget(btn_view)")
+_j = _src.index("row.addWidget(btn_del)", _i)
+check("кнопка видимости стоит левее кнопки удаления", _i < _j < _i + 600,
+      "расстояние %d" % (_j - _i))
+try:
+    import vtk as _vtk
+    _w5 = MW.MainWindow.__new__(MW.MainWindow)
+    _w5._symmetry_planes = [{"axis": "xz", "offset": 0.0, "view": 1}]
+    _act = _vtk.vtkActor()
+    _act.SetMapper(_vtk.vtkPolyDataMapper())
+    _w5.bodies = [{"actor": _act}]
+
+    class _FakePlotter:
+        def render(self):
+            pass
+
+    _w5.plotter = _FakePlotter()
+    _w5._apply_symmetry_view()
+    check("отсечение ложится на маппер актёра",
+          _act.GetMapper().GetNumberOfClippingPlanes() == 1,
+          _act.GetMapper().GetNumberOfClippingPlanes())
+    _w5._symmetry_planes[0]["view"] = 0
+    _w5._apply_symmetry_view()
+    check("возврат к «обе стороны» снимает отсечение",
+          _act.GetMapper().GetNumberOfClippingPlanes() == 0,
+          _act.GetMapper().GetNumberOfClippingPlanes())
+except ImportError:
+    print("  (vtk недоступен, проверка актёра пропущена)")
+
 # ---------------------------------------------------------------- summary
 print()
 if FAIL:
