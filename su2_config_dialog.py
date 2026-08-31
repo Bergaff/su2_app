@@ -70,7 +70,7 @@ PRESETS_JSON = os.path.join(_appdata_dir(), "su2_presets.json")
 # Встроенные пресеты (часть значений - те же, что в su2_autoconfig).
 BUILTIN_PRESETS = {
     "Устойчивый (safe)": {
-        "TIME_DISCRETE_FLOW": "EULER_IMPLICIT",
+        "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
         "CFL_NUMBER": "2.0",
         "CFL_ADAPT": "NO",
         "MUSCL_FLOW": "NO",
@@ -78,7 +78,7 @@ BUILTIN_PRESETS = {
         "NUM_METHOD_GRAD": "WEIGHTED_LEAST_SQUARES",
     },
     "Ультра-устойчивый (ultra)": {
-        "TIME_DISCRETE_FLOW": "EULER_IMPLICIT",
+        "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
         "CFL_NUMBER": "0.5",
         "CFL_ADAPT": "NO",
         "MUSCL_FLOW": "NO",
@@ -191,7 +191,7 @@ PARAMS = [
      "GREEN_GAUSS — проще, грубее на скошенных ячейках."),
 
     # --- Время / CFL ---
-    ("Шаг по времени (CFL)", "TIME_DISCRETE_FLOW", "Схема по времени",
+    ("Шаг по времени (CFL)", "TIME_DISCRE_FLOW", "Схема по времени",
      "combo", ["EULER_IMPLICIT", "EULER_EXPLICIT",
                "RUNGE-KUTTA_EXPLICIT"], None,
      "EULER_IMPLICIT — неявная: допускает большие CFL, быстрая сходимость, "

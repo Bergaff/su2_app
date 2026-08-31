@@ -1142,11 +1142,32 @@ with tempfile.TemporaryDirectory() as td:
           str(AC.validate_config(p_cfg)[1][:2]))
     check("в конфиге не осталось '#'-комментариев",
           not any(l.strip().startswith("#") for l in _txt.splitlines()))
-    check("блок пресета помечен '%'", "% ===== AEROOPT-AUTOCONFIG" in _txt)
+    # Все ключи пресета уже есть в базовом конфиге, поэтому они правятся
+    # на месте и отдельный блок не создаётся (блок нужен только для
+    # отсутствующих ключей).
+    check("пресет применён на месте: CFL 2.0 без автоподстройки",
+          "CFL_NUMBER= 2.0" in _txt and "CFL_ADAPT= NO" in _txt
+          and "MUSCL_FLOW= NO" in _txt)
+    check("пресет применён на месте: TIME_DISCRE_FLOW= EULER_IMPLICIT",
+          "TIME_DISCRE_FLOW= EULER_IMPLICIT" in _txt)
     AC.apply_preset(p_cfg, "ultra")
-    check("повторный пресет: блок один, конфиг всё ещё валиден",
-          open(p_cfg, encoding="utf-8").read().count("AEROOPT-AUTOCONFIG") == 2
-          and AC.validate_config(p_cfg)[0] is True)
+    _txt2 = open(p_cfg, encoding="utf-8").read()
+    check("повторный пресет: ultra применился и конфиг валиден",
+          "CFL_NUMBER= 0.5" in _txt2 and AC.validate_config(p_cfg)[0] is True,
+          str(AC.validate_config(p_cfg)[1][:2]))
+
+    # Если ключа в конфиге нет - он дописывается блоком под '%'.
+    _stripped = [l for l in _txt2.splitlines()
+                 if not l.strip().startswith("TIME_DISCRE_FLOW")]
+    open(p_cfg, "w", encoding="utf-8", newline="").write(
+        "\n".join(_stripped) + "\n")
+    AC.apply_preset(p_cfg, "safe")
+    _txt3 = open(p_cfg, encoding="utf-8").read()
+    check("отсутствующий ключ дописывается блоком, помеченным '%'",
+          "% ===== AEROOPT-AUTOCONFIG" in _txt3
+          and "TIME_DISCRE_FLOW= EULER_IMPLICIT" in _txt3
+          and AC.validate_config(p_cfg)[0] is True,
+          str(AC.validate_config(p_cfg)[1][:2]))
     SCD.write_config_values(p_cfg, {"NEW_KEY_X": "1"})
     check("write_config_values: доп. параметры тоже под '%'",
           "% ===== AeroOpt" in open(p_cfg, encoding="utf-8").read()
@@ -1171,6 +1192,111 @@ with tempfile.TemporaryDirectory() as td:
     check("detect_result: настоящее расхождение по-прежнему видно",
           _r2["status"] == "diverged" and _r2.get("last_iter") == 462,
           str(_r2["status"]))
+
+print("== опции config.cfg против реестра SU2 v8.5 ==")
+import su2_preset_format as SPF
+from solver import workers as WK
+
+# Список проверен вручную по Common/src/CConfig.cpp (SU2 v8.5.0):
+# каждое имя присутствует в option_map через addEnumOption/add*Option.
+_SU2_V8_OPTIONS = frozenset({
+    "AOA", "CFL_ADAPT", "CFL_ADAPT_PARAM", "CFL_NUMBER", "CFL_REDUCTION_TURB",
+    "CONV_CAUCHY_ELEMS", "CONV_CAUCHY_EPS", "CONV_NUM_METHOD_FLOW",
+    "CONV_NUM_METHOD_TURB", "CONV_RESIDUAL_MINVAL", "CONV_STARTITER",
+    "ENTROPY_FIX_COEFF", "FREESTREAM_PRESSURE", "FREESTREAM_TEMPERATURE",
+    "HISTORY_OUTPUT", "HISTORY_WRT_FREQ_INNER", "INNER_ITER", "KIND_TURB_MODEL",
+    "LINEAR_SOLVER", "LINEAR_SOLVER_ERROR", "LINEAR_SOLVER_ITER", "LINEAR_SOLVER_PREC",
+    "MACH_NUMBER", "MARKER_EULER", "MARKER_FAR", "MARKER_HEATFLUX",
+    "MARKER_MONITORING", "MARKER_PLOTTING", "MARKER_SYM", "MATH_PROBLEM",
+    "MESH_FILENAME", "MESH_FORMAT", "MUSCL_FLOW", "MUSCL_TURB", "NUM_METHOD_GRAD",
+    "OUTPUT_FILES", "OUTPUT_WRT_FREQ", "REF_AREA", "REF_LENGTH", "REF_ORIGIN_MOMENT_X",
+    "REF_ORIGIN_MOMENT_Y", "REF_ORIGIN_MOMENT_Z", "RESTART_FILENAME", "RESTART_SOL",
+    "REYNOLDS_LENGTH", "REYNOLDS_NUMBER", "SCREEN_OUTPUT", "SCREEN_WRT_FREQ_INNER",
+    "SIDESLIP_ANGLE", "SLOPE_LIMITER_FLOW", "SLOPE_LIMITER_TURB", "SOLUTION_FILENAME",
+    "SOLVER", "SURFACE_FILENAME", "TIME_DISCRE_FLOW", "TIME_DISCRE_TURB",
+    "VENKAT_LIMITER_COEFF", "VOLUME_FILENAME"
+})
+
+def _aeroopt_option_keys():
+    """Все имена опций, которые AeroOpt пишет или предлагает в config.cfg."""
+    found = set()
+    for eq in ("EULER", "RANS"):
+        for sym in ([], ["xz"]):
+            for tm in ("SA", "SST"):
+                txt = _bsc(3.0, _phys, eq, _ref, markers=["airfoil"],
+                           use_symmetry=bool(sym), symmetry_planes=sym,
+                           turb_model=tm)
+                for ln in txt.splitlines():
+                    s = ln.strip()
+                    if s and not s.startswith(("%", "#")) and "=" in s:
+                        found.add(s.split("=", 1)[0].strip())
+    for preset in AC.PRESETS.values():
+        found.update(preset)
+    found.update(SPF.key_catalogue())
+    return found
+
+_keys = _aeroopt_option_keys()
+check("AeroOpt пишет достаточно много опций (тест не выродился)",
+      len(_keys) >= 40, str(len(_keys)))
+_unknown = sorted(k for k in _keys if k not in _SU2_V8_OPTIONS)
+check("все опции AeroOpt существуют в SU2 v8.5",
+      not _unknown, str(_unknown))
+check("TIME_DISCRETE_FLOW больше нигде не используется (это и ломало SU2)",
+      "TIME_DISCRETE_FLOW" not in _keys
+      and "TIME_DISCRETE_FLOW" not in str(AC.PRESETS)
+      and "TIME_DISCRETE_FLOW" not in str(SPF.key_catalogue()))
+check("SOLVER_KIND_TURB больше не пишется в RANS-конфиг",
+      "SOLVER_KIND_TURB" not in _keys)
+check("ключ времени задан корректным именем TIME_DISCRE_FLOW",
+      AC.PRESETS["safe"].get("TIME_DISCRE_FLOW") == "EULER_IMPLICIT"
+      and AC.PRESETS["ultra"].get("TIME_DISCRE_FLOW") == "EULER_IMPLICIT")
+check("схема потока задана существующей опцией CONV_NUM_METHOD_FLOW",
+      "CONV_NUM_METHOD_FLOW" in _keys and "NUM_METHOD_FLOW" not in _keys)
+
+print("== линтер config.cfg: дубликаты опций ==")
+check("дубликат опции ловится (SU2 v8: option appears twice)",
+      len(AC.su2_lint_lines("CFL_NUMBER= 2.0\nCFL_NUMBER= 5.0\n")) == 1)
+_d = AC.su2_lint_lines("CFL_NUMBER= 2.0\nCFL_NUMBER= 5.0\n")
+check("в сообщении о дубликате указан номер первой строки",
+      _d and "стр. 1" in _d[0][2], str(_d))
+check("регистр имени при поиске дубликата не важен",
+      len(AC.su2_lint_lines("cfl_number= 2.0\nCFL_NUMBER= 5.0\n")) == 1)
+check("без дубликатов линтер молчит",
+      AC.su2_lint_lines("CFL_NUMBER= 2.0\nMUSCL_FLOW= NO\n") == [])
+
+with tempfile.TemporaryDirectory() as td:
+    _cfg = os.path.join(td, "config.cfg")
+    for eq, tm in (("EULER", "SA"), ("RANS", "SST")):
+        open(_cfg, "w", encoding="utf-8", newline="").write(
+            _bsc(3.0, _phys, eq, _ref, markers=["airfoil"],
+                 use_symmetry=True, symmetry_planes=["xz"], turb_model=tm))
+        AC.apply_preset(_cfg, "safe")
+        _ok, _bad = AC.validate_config(_cfg)
+        check(f"пресет safe поверх {eq}/{tm}: конфиг валиден и без дубликатов",
+              _ok is True, str(_bad[:2]))
+        _names = [l.split("=", 1)[0].strip()
+                  for l in open(_cfg, encoding="utf-8").read().splitlines()
+                  if l.strip() and not l.strip().startswith(("%", "#"))
+                  and "=" in l]
+        check(f"пресет safe поверх {eq}/{tm}: опции не повторяются",
+              len(_names) == len(set(_names)),
+              str([n for n in set(_names) if _names.count(n) > 1]))
+
+print("== показ ошибки SU2 в логе (su2_log_gate) ==")
+check("обычная строка итераций в лог не идёт",
+      WK.su2_log_gate("  Inner_Iter  12 |  -3.45 |", 0) == (False, 0))
+check("строка с 'Error in' показывается и открывает бюджет",
+      WK.su2_log_gate('Error in "void CConfig::SetConfig_Parsing":', 0)
+      == (True, 30))
+check("настоящая причина без ключевых слов всё равно показывается",
+      WK.su2_log_gate("Line 52 TIME_DISCRETE_FLOW: invalid option name", 0)
+      == (True, 30))
+check("строка после ошибки показывается за счёт бюджета",
+      WK.su2_log_gate("------------------------------ Error Exit ---", 5)
+      == (True, 4))
+check("бюджет исчерпывается и обычные строки снова скрыты",
+      WK.su2_log_gate("  Inner_Iter  13 |  -3.44 |", 1) == (True, 0)
+      and WK.su2_log_gate("  Inner_Iter  14 |  -3.43 |", 0) == (False, 0))
 
 # ---------------------------------------------------------------- summary
 print()

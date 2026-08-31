@@ -74,7 +74,7 @@ _FALLBACK_CATALOGUE: Dict[str, Tuple[str, object]] = {
     "MUSCL_FLOW": ("yesno", None),
     "ENTROPY_FIX_COEFF": ("double", (0.0, 1.0)),
     "NUM_METHOD_GRAD": ("combo", ["WEIGHTED_LEAST_SQUARES", "GREEN_GAUSS"]),
-    "TIME_DISCRETE_FLOW": ("combo", ["EULER_IMPLICIT", "EULER_EXPLICIT",
+    "TIME_DISCRE_FLOW": ("combo", ["EULER_IMPLICIT", "EULER_EXPLICIT",
                                      "RUNGE-KUTTA_EXPLICIT"]),
     "CFL_NUMBER": ("double", (0.01, 1000.0)),
     "CFL_ADAPT": ("yesno", None),
@@ -122,7 +122,7 @@ def builtin_presets() -> Dict[str, Dict[str, object]]:
         "Стандартный": {
             "description": "Настройки по умолчанию: CFL с адаптацией, 2-й порядок.",
             "params": {
-                "TIME_DISCRETE_FLOW": "EULER_IMPLICIT",
+                "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
                 "CFL_NUMBER": "5.0",
                 "CFL_ADAPT": "YES",
                 "MUSCL_FLOW": "YES",
@@ -134,7 +134,7 @@ def builtin_presets() -> Dict[str, Dict[str, object]]:
             "description": "CFL 2.0 без адаптации, первый порядок. "
                            "Для расходящихся задач.",
             "params": {
-                "TIME_DISCRETE_FLOW": "EULER_IMPLICIT",
+                "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
                 "CFL_NUMBER": "2.0",
                 "CFL_ADAPT": "NO",
                 "MUSCL_FLOW": "NO",
@@ -146,7 +146,7 @@ def builtin_presets() -> Dict[str, Dict[str, object]]:
             "description": "CFL 0.5, усиленная энтропийная поправка, "
                            "20 итераций линейного решателя.",
             "params": {
-                "TIME_DISCRETE_FLOW": "EULER_IMPLICIT",
+                "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
                 "CFL_NUMBER": "0.5",
                 "CFL_ADAPT": "NO",
                 "MUSCL_FLOW": "NO",

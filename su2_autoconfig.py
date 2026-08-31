@@ -43,7 +43,7 @@ import shutil
 
 PRESETS = {
     "safe": {
-        "TIME_DISCRETE_FLOW": "EULER_IMPLICIT",
+        "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
         "CFL_NUMBER": "2.0",
         "CFL_ADAPT": "NO",
         "MUSCL_FLOW": "NO",
@@ -51,7 +51,7 @@ PRESETS = {
         "NUM_METHOD_GRAD": "WEIGHTED_LEAST_SQUARES",
     },
     "ultra": {
-        "TIME_DISCRETE_FLOW": "EULER_IMPLICIT",
+        "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
         "CFL_NUMBER": "0.5",
         "CFL_ADAPT": "NO",
         "MUSCL_FLOW": "NO",
@@ -154,6 +154,7 @@ def su2_lint_lines(text):
     SU2 такой файл прочитает.
     """
     problems = []
+    seen = {}             # имя опции -> номер строки (дубликат у SU2 фатален)
     pending = ""          # склейка продолжений через обратный слэш
     start_no = 0
     for i, raw in enumerate(text.splitlines(), 1):
@@ -196,6 +197,17 @@ def su2_lint_lines(text):
             problems.append((start_no, raw.rstrip("\r"),
                              f"недопустимое имя параметра {stripped!r} "
                              "(SU2 понимает как комментарий только '%')"))
+            continue
+        # SU2 v8 считает повтор опции ошибкой разбора:
+        #   "Line N KEY: option appears twice" -> SetConfig_Parsing падает.
+        name = stripped.upper()
+        if name in seen:
+            problems.append((start_no, raw.rstrip("\r"),
+                             f"параметр {name} встречается дважды "
+                             f"(первый раз — стр. {seen[name]}); SU2 v8 "
+                             "считает это ошибкой разбора"))
+        else:
+            seen[name] = start_no
     return problems
 
 

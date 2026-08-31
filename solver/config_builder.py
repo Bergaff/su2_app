@@ -199,8 +199,7 @@ def build_rans_config(p: Mapping, markers=None, restart: bool = False,
     if turb_upper in ("SST", "MENTER", "KW", "K-OMEGA", "K_OMEGA"):
         turb_block = (
             "KIND_TURB_MODEL= SST\n"
-            "SOLVER_KIND_TURB= ROE\n"
-            "CONV_NUM_METHOD_TURB= ROE\n"
+                        "CONV_NUM_METHOD_TURB= ROE\n"
             "MUSCL_TURB= YES\n"
             "SLOPE_LIMITER_TURB= VENKATAKRISHNAN\n"
         )

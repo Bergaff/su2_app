@@ -307,6 +307,30 @@ def hidden_subprocess_kwargs() -> dict:
 # ---------------------------------------------------------------------------
 # parse helpers
 # ---------------------------------------------------------------------------
+_SU2_ERROR_KEYWORDS = ("error", "exception", "cannot", "fail", "not found",
+                       "invalid option", "appears twice")
+
+
+def su2_log_gate(line, budget=0):
+    """Решает, показывать ли строку вывода SU2 в логе приложения.
+
+    Возвращает ``(показывать, новый_бюджет)``.
+
+    SU2 печатает ошибку в три приёма: ``Error in "func":``, разделитель
+    ``---- Error Exit ----`` и только ПОТОМ настоящую причину, например
+    ``Line 52 TIME_DISCRETE_FLOW: invalid option name``. Раньше в лог
+    попадали лишь строки со словом "error", поэтому причина терялась и
+    приходилось гадать. Теперь после строки-признака следующие ``budget``
+    строк печатаются как есть.
+    """
+    if budget > 0:
+        return True, budget - 1
+    low = (line or "").lower()
+    if any(kw in low for kw in _SU2_ERROR_KEYWORDS):
+        return True, 30
+    return False, 0
+
+
 _HISTORY_LINE = re.compile(r"^\s*(\d+)\s*\|\s*([-\deE.+]+)")
 
 
@@ -558,6 +582,7 @@ class SU2Worker:
         last_rms = None
         # === ПАТЧ: для авто-фоллбэка собираем весь вывод ==================
         all_output_lines: list = []
+        err_mode = 0
         # =================================================================
 
         while True:
@@ -581,11 +606,9 @@ class SU2Worker:
                     all_output_lines = all_output_lines[-1000:]
                 # =========================================================
 
-            low = line.lower()
-            for kw in ("error", "exception", "cannot", "fail", "not found"):
-                if kw in low:
-                    self.log_cb(f"  SU2: {line}")
-                    break
+            show, err_mode = su2_log_gate(line, err_mode)
+            if show:
+                self.log_cb(f"  SU2: {line}")
 
             parsed = parse_iteration_line(line)
             if parsed:
