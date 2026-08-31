@@ -1298,6 +1298,40 @@ check("бюджет исчерпывается и обычные строки с
       WK.su2_log_gate("  Inner_Iter  13 |  -3.44 |", 1) == (True, 0)
       and WK.su2_log_gate("  Inner_Iter  14 |  -3.43 |", 0) == (False, 0))
 
+print("== ui.legal: раздел правовой информации ==")
+import re as _re
+from ui import legal as LEGAL
+
+check("DOCUMENTS содержит оба документа (TOS и privacy)",
+      set(LEGAL.DOCUMENTS) == {"tos", "privacy"}, str(set(LEGAL.DOCUMENTS)))
+for _kind, (_title, _body) in LEGAL.DOCUMENTS.items():
+    check(f"{_kind}: заголовок непустой", bool(_title.strip()))
+    check(f"{_kind}: текст непустой и содержит разделы",
+          len(_body) > 800 and "\n1." in _body and "\n2." in _body,
+          str(len(_body)))
+    check(f"{_kind}: помечен как заготовка",
+          "заготовк" in _body.lower() and "[" in _body)
+    _pic = _re.findall(
+        "[\U0001F000-\U0001FAFF\u2300-\u27BF\u2B00-\u2BFF"
+        "\u25A0-\u25FF\uFE0F]", _body)
+    check(f"{_kind}: без пиктограмм", not _pic, str(_pic[:5]))
+check("TOS: есть раздел об ограничении ответственности",
+      "ОТВЕТСТВЕННОСТИ" in LEGAL.TERMS_OF_SERVICE)
+check("TOS: заявлено, что расчёт не заменяет аттестованный",
+      "аттестованный" in LEGAL.TERMS_OF_SERVICE)
+check("Privacy: заявлено, что геометрия и результаты не передаются",
+      "не передаёт расчётные модели" in LEGAL.PRIVACY_POLICY)
+check("Privacy: описаны права субъекта данных",
+      "ПРАВА СУБЪЕКТА ДАННЫХ" in LEGAL.PRIVACY_POLICY)
+check("show_legal_document: неизвестный документ -> ValueError",
+      _raises(ValueError, LEGAL.show_legal_document, None, "нет_такого"))
+_menu = LEGAL.install_menu(_mk_window())
+check("install_menu возвращает меню", _menu is not None)
+check("стиль окна без скруглений и чисто белого фона",
+      "border-radius" not in LEGAL._DIALOG_STYLE
+      and "#FFFFFF" not in LEGAL._DIALOG_STYLE.upper(),
+      LEGAL._DIALOG_STYLE[:80])
+
 # ---------------------------------------------------------------- summary
 print()
 if FAIL:

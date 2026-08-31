@@ -207,6 +207,7 @@ MODULES = [
     "su2_autoconfig",
     "su2_config_dialog",
     "ui.main_window",
+    "ui.legal",
     "su2_gui",
     "main",
 ]

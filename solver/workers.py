@@ -167,7 +167,7 @@ def run_su2_adapt(case_dir: str, mesh_path: str, restart_path: str,
             "ADAPT_STATISTICS= YES\n"
         )
 
-    _log(f"🔧 SU2_ADAPT: {adapt_exe}")
+    _log(f"SU2_ADAPT: {adapt_exe}")
     _log(f"   Сетка: mesh.su2, решение: restart.dat, маркеры: {markers}")
     try:
         proc = subprocess.run(
@@ -188,7 +188,7 @@ def run_su2_adapt(case_dir: str, mesh_path: str, restart_path: str,
     if proc.returncode != 0 or not os.path.isfile(out_mesh):
         tail = (proc.stdout or "")[-1500:] + (proc.stderr or "")[-1500:]
         raise RuntimeError("SU2_ADAPT завершился ошибкой.\n" + tail)
-    _log("✅ Адаптация завершена: mesh_adapt.su2")
+    _log("Готово: Адаптация завершена: mesh_adapt.su2")
     return out_mesh
 
 
@@ -222,12 +222,12 @@ def partition_mesh(case_dir: str, n_proc: int, log_cb=None) -> bool:
         return True
     mesh_path = os.path.join(case_dir, "mesh.su2")
     if not os.path.exists(mesh_path):
-        log_cb(f"  ⚠️ partition: нет mesh.su2 в {case_dir}")
+        log_cb(f"  Внимание: partition: нет mesh.su2 в {case_dir}")
         return False
     part_exe = find_su2_partition_exe()
     if not part_exe:
         log_cb(
-            "  ⚠️ SU2_PARTITION не найден — SU2 сделает auto-partition "
+            "  Внимание: SU2_PARTITION не найден — SU2 сделает auto-partition "
             "(медленнее на старте, но работает)."
         )
         return False
@@ -237,11 +237,11 @@ def partition_mesh(case_dir: str, n_proc: int, log_cb=None) -> bool:
     if not shutil.which(mpiexec_exe):
         # На Windows mpiexec может не быть в PATH
         log_cb(
-            "  ⚠️ mpiexec не найден в PATH — пропускаем partition."
+            "  Внимание: mpiexec не найден в PATH — пропускаем partition."
         )
         return False
     cmd = [mpiexec_exe, "-n", str(int(n_proc)), part_exe, mesh_path]
-    log_cb(f"  🔧 Partition: {' '.join(cmd)}")
+    log_cb(f"  Partition: {' '.join(cmd)}")
     try:
         proc = subprocess.run(
             cmd, cwd=case_dir,
@@ -251,7 +251,7 @@ def partition_mesh(case_dir: str, n_proc: int, log_cb=None) -> bool:
         )
         if proc.returncode != 0:
             log_cb(
-                f"  ⚠️ SU2_PARTITION завершился с кодом {proc.returncode}: "
+                f"  Внимание: SU2_PARTITION завершился с кодом {proc.returncode}: "
                 f"{(proc.stdout or '')[-300:]}"
             )
             return False
@@ -262,17 +262,17 @@ def partition_mesh(case_dir: str, n_proc: int, log_cb=None) -> bool:
         )
         if n_parts < n_proc:
             log_cb(
-                f"  ⚠️ SU2_PARTITION создал только {n_parts}/{n_proc} частей — "
+                f"  Внимание: SU2_PARTITION создал только {n_parts}/{n_proc} частей — "
                 f"SU2 попробует auto-partition."
             )
             return False
-        log_cb(f"  ✅ Partition: {n_parts} частей")
+        log_cb(f"  Готово: Partition: {n_parts} частей")
         return True
     except subprocess.TimeoutExpired:
-        log_cb("  ⚠️ SU2_PARTITION превысил таймаут 120 с")
+        log_cb("  Внимание: SU2_PARTITION превысил таймаут 120 с")
         return False
     except Exception as e:
-        log_cb(f"  ⚠️ SU2_PARTITION: {e}")
+        log_cb(f"  Внимание: SU2_PARTITION: {e}")
         return False
 
     def request_cores_change(self, cores: int):
@@ -539,7 +539,7 @@ class SU2Worker:
         # === ПАТЧ: лог GPU-режима =========================================
         if launch_mode != "cpu":
             self.log_cb(
-                f"🎮 Гибридный режим ({launch_mode}): GPU {self.gpu_percent}%, "
+                f"Гибридный режим ({launch_mode}): GPU {self.gpu_percent}%, "
                 f"ядер CPU {self.cpu_cores}"
             )
             # Пишем в лог подсказку, какие строки можно добавить в config.cfg
@@ -637,7 +637,7 @@ class SU2Worker:
             full_output = "\n".join(all_output_lines)
             if is_unknown_gpu_option(full_output):
                 self.log_cb(
-                    "⚠️ mpiexec не поддерживает опцию -gpu → фоллбэк "
+                    "Внимание: mpiexec не поддерживает опцию -gpu → фоллбэк "
                     "на OpenMP target offload."
                 )
                 self._gpu_attempts = 1
@@ -646,7 +646,7 @@ class SU2Worker:
             full_output = "\n".join(all_output_lines)
             if is_openmp_offload_unavailable(full_output):
                 self.log_cb(
-                    "⚠️ SU2 собрана без GPU-поддержки (CUDA/HIP) → фоллбэк "
+                    "Внимание: SU2 собрана без GPU-поддержки (CUDA/HIP) → фоллбэк "
                     "на чистый CPU. Гибридный режим не активен."
                 )
                 self._gpu_attempts = 2
@@ -729,17 +729,17 @@ class SessionRunner(QThread):
         det = su2_autoconfig.detect_result(case_dir, screen_text=text)
         if det["status"] == "converged":
             return "abort"
-        log_cb(f"⚠️ {det.get('detail', 'Расчёт не сошёлся.')}")
+        log_cb(f"Внимание: {det.get('detail', 'Расчёт не сошёлся.')}")
 
         # Если диалоговый модуль недоступен — безопасный авто-пресет без вопросов
         if su2_config_dialog is None:
             try:
                 su2_autoconfig.apply_preset(
                     os.path.join(case_dir, "config.cfg"), "safe")
-                log_cb("🔧 Автоматически применён устойчивый пресет 'safe'.")
+                log_cb("Автоматически применён устойчивый пресет 'safe'.")
                 return "rerun_safe"
             except Exception as e:
-                log_cb(f"⚠️ Автоконфиг недоступен: {e}")
+                log_cb(f"Внимание: Автоконфиг недоступен: {e}")
                 return "abort"
 
         self._recovery_answer = None
@@ -781,7 +781,7 @@ class SessionRunner(QThread):
         gpu_percent = int(getattr(sess, "gpu_percent", 0) or 0)
         if compute_device == "cpu_gpu":
             self.log_signal.emit(
-                f"🎮 Сессия в гибридном режиме: GPU {gpu_percent}%, "
+                f"Сессия в гибридном режиме: GPU {gpu_percent}%, "
                 f"ядер CPU {sess.cpu_cores}"
             )
         # =================================================================
@@ -815,10 +815,10 @@ class SessionRunner(QThread):
                         su2_autoconfig.apply_preset(
                             os.path.join(case_dir, "config.cfg"),
                             self._auto_preset)
-                        log_cb(f"🔧 К точке применён устойчивый пресет "
+                        log_cb(f"К точке применён устойчивый пресет "
                                f"'{self._auto_preset}'.")
                     except Exception as e:
-                        log_cb(f"⚠️ Не удалось применить пресет: {e}")
+                        log_cb(f"Внимание: Не удалось применить пресет: {e}")
 
                 def _make_worker():
                     return SU2Worker(
@@ -842,12 +842,12 @@ class SessionRunner(QThread):
                             self._auto_preset = "ultra"
                         elif verdict == "rerun_safe":
                             self._auto_preset = "safe"
-                        log_cb("🔁 Повторный расчёт точки с новыми настройками...")
+                        log_cb("Повторный расчёт точки с новыми настройками...")
                         self._worker = _make_worker()
                         res = self._worker.run(aoa)
                     else:
                         self._recovery_declined = True
-                        log_cb("ℹ️ Автоконфиг отклонён — продолжаю серию "
+                        log_cb("Автоконфиг отклонён — продолжаю серию "
                                "без повторных вопросов.")
                         break
             else:
@@ -869,7 +869,7 @@ class SessionRunner(QThread):
             sess.save()
             if res.get("error") and "Не найден SU2_CFD" in res.get("error_msg", ""):
                 self.result_ready.emit(res)
-                self.log_signal.emit("⛔ Серия прервана: нет исполняемого SU2.")
+                self.log_signal.emit("Серия прервана: нет исполняемого SU2.")
                 self.finished_all.emit()
                 return
             self.result_ready.emit(res)
@@ -895,13 +895,13 @@ class SessionRunner(QThread):
                 partition_mesh(case_dir, n_proc, log_cb)
             elif n_proc > 1 and not use_partition:
                 log_cb(
-                    "  ℹ️ Mesh partition отключён пользователем — "
+                    "  Mesh partition отключён пользователем — "
                     "SU2 сделает auto-partition на старте."
                 )
             # ==============================================================
             return True
         except Exception as e:
-            log_cb(f"❌ Подготовка каталога {case_dir}: {e}")
+            log_cb(f"Ошибка: Подготовка каталога {case_dir}: {e}")
             return False
 
 
@@ -1046,7 +1046,7 @@ class OptimizationWorker(QThread):
                           encoding="utf-8") as f:
                     f.write(text)
             except Exception as e:
-                self.log_signal.emit(f"⚠️ Кейс оптимизации: {e}")
+                self.log_signal.emit(f"Внимание: Кейс оптимизации: {e}")
                 continue
             # === ПАТЧ: пробрасываем compute_device/gpu_percent в оценку ===
             compute_device = getattr(self, "compute_device", "cpu")
@@ -1082,7 +1082,7 @@ class OptimizationWorker(QThread):
             cands = [self._candidate(it) for it in range(self.n_iterations)]
             mode = "случайный поиск"
         n_total = max(1, len(cands))
-        self.log_signal.emit(f"🧬 Старт оптимизации ({mode}): {n_total} кандидатов, "
+        self.log_signal.emit(f"Старт оптимизации ({mode}): {n_total} кандидатов, "
                              f"точек на кандидата: {len(self.flight_points)}")
         for it, cand in enumerate(cands):
             if self._stop:
@@ -1092,7 +1092,7 @@ class OptimizationWorker(QThread):
                                  f"sweep={cand.get('sweep')}")
             self.update_geometry_signal.emit(dict(cand))
             if not self._wait_geometry():
-                self.log_signal.emit("⚠️ Перестройка геометрии прервана.")
+                self.log_signal.emit("Внимание: Перестройка геометрии прервана.")
                 break
             ev = self._evaluate(cand)
             params_for_rules = dict(cand)
@@ -1148,9 +1148,9 @@ class OptimizationWorker(QThread):
             self.progress_signal.emit(pct)
 
         if self._stop:
-            self.log_signal.emit("⛔ Оптимизация остановлена пользователем.")
+            self.log_signal.emit("Оптимизация остановлена пользователем.")
         else:
             dt = _time.time() - t0
-            self.log_signal.emit(f"🏁 Оптимизация завершена за {dt:.0f} сек. "
+            self.log_signal.emit(f"Оптимизация завершена за {dt:.0f} сек. "
                                  f"Лучший K={best.get('k_weighted', 0):.2f}")
         self.opt_finished.emit(best if best_score > -1e17 else None)

@@ -52,7 +52,7 @@ except ModuleNotFoundError as exc:
     missing = str(exc).split("'")[-2] if "'" in str(exc) else str(exc)
 
     print("=" * 60)
-    print("❌ ОШИБКА ИМПОРТА")
+    print("Ошибка: ОШИБКА ИМПОРТА")
     print("=" * 60)
     print(f"  Не найден модуль: {exc}")
     print(f"  Корень проекта:   {_project_root}")
@@ -62,15 +62,15 @@ except ModuleNotFoundError as exc:
     # Проверяем, существует ли папка ui/
     ui_dir = os.path.join(_project_root, "ui")
     if not os.path.isdir(ui_dir):
-        print(f"  ⚠️  Папка '{ui_dir}' НЕ СУЩЕСТВУЕТ!")
+        print(f"  Внимание: Папка '{ui_dir}' НЕ СУЩЕСТВУЕТ!")
         print(f"     Убедитесь, что su2_gui.py лежит в корне проекта")
         print(f"     (рядом с папками config/, solver/, ui/ и т.д.)")
     else:
         init_path = os.path.join(ui_dir, "__init__.py")
         main_path = os.path.join(ui_dir, "main_window.py")
-        print(f"  📂 Папка ui/:          {'✅ существует' if os.path.isdir(ui_dir) else '❌ нет'}")
-        print(f"  📄 ui/__init__.py:     {'✅ есть' if os.path.isfile(init_path) else '❌ НЕТ — создайте пустой файл!'}")
-        print(f"  📄 ui/main_window.py:  {'✅ есть' if os.path.isfile(main_path) else '❌ НЕТ'}")
+        print(f"  Папка ui/:          {'Готово: существует' if os.path.isdir(ui_dir) else 'Ошибка: нет'}")
+        print(f"  ui/__init__.py:     {'Готово: есть' if os.path.isfile(init_path) else 'Ошибка: НЕТ — создайте пустой файл!'}")
+        print(f"  ui/main_window.py:  {'Готово: есть' if os.path.isfile(main_path) else 'Ошибка: НЕТ'}")
 
         if os.path.isdir(ui_dir):
             print(f"\n  Содержимое ui/:")

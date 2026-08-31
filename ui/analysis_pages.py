@@ -90,8 +90,8 @@ def build_aeroelastic_page(on_check=None, on_plot=None) -> tuple:
     lay.addWidget(gb2)
 
     btns = QHBoxLayout()
-    w["btn_check"] = QPushButton("📈 Проверить аэроупругость")
-    w["btn_plot"] = QPushButton("📉 V-g диаграмма")
+    w["btn_check"] = QPushButton("Проверить аэроупругость")
+    w["btn_plot"] = QPushButton("V-g диаграмма")
     if on_check:
         w["btn_check"].clicked.connect(on_check)
     if on_plot:
@@ -166,7 +166,7 @@ def build_structural_page(on_calc=None) -> tuple:
     f2.addRow("Коэф. запаса:", w["sf"])
     lay.addWidget(gb2)
 
-    w["btn_calc"] = QPushButton("🔩 Рассчитать прочность")
+    w["btn_calc"] = QPushButton("Рассчитать прочность")
     if on_calc:
         w["btn_calc"].clicked.connect(on_calc)
     lay.addWidget(w["btn_calc"])
@@ -202,7 +202,7 @@ def build_specials_page(on_polar=None, on_report=None, on_csv=None) -> tuple:
     w["s_ref"].setValue(12.0); w["s_ref"].setSuffix(" м²")
     w["mach"] = QDoubleSpinBox(); w["mach"].setRange(0.0, 0.95)
     w["mach"].setValue(0.15); w["mach"].setDecimals(3)
-    w["btn_polar"] = QPushButton("📊 Построить поляру по таблице результатов")
+    w["btn_polar"] = QPushButton("Построить поляру по таблице результатов")
     if on_polar:
         w["btn_polar"].clicked.connect(on_polar)
     f.addRow("Полётный вес:", w["weight"])
@@ -216,8 +216,8 @@ def build_specials_page(on_polar=None, on_report=None, on_csv=None) -> tuple:
     f2 = QFormLayout(gb2)
     w["template"] = QComboBox(); w["template"].addItems(list(TEMPLATES))
     w["project_name"] = QLineEdit("Без имени")
-    w["btn_report"] = QPushButton("📄 Сформировать отчёт (HTML)")
-    w["btn_csv"] = QPushButton("💾 Выгрузить поляру в CSV")
+    w["btn_report"] = QPushButton("Сформировать отчёт (HTML)")
+    w["btn_csv"] = QPushButton("Выгрузить поляру в CSV")
     if on_report:
         w["btn_report"].clicked.connect(on_report)
     if on_csv:
@@ -263,9 +263,9 @@ def build_presets_page(on_export=None, on_import=None, on_apply=None) -> tuple:
     w["source"].addItem("Встроенный: Стандартный", "std")
     w["source"].addItem("Встроенный: Устойчивый (safe)", "safe")
     w["source"].addItem("Встроенный: Ультра-устойчивый (ultra)", "ultra")
-    w["btn_export"] = QPushButton("⬆️ Экспортировать пресет…")
-    w["btn_import"] = QPushButton("⬇️ Импортировать пресет…")
-    w["btn_apply"] = QPushButton("✔️ Применить импортированный к проекту")
+    w["btn_export"] = QPushButton("Экспортировать пресет…")
+    w["btn_import"] = QPushButton("Импортировать пресет…")
+    w["btn_apply"] = QPushButton("Готово: Применить импортированный к проекту")
     if on_export:
         w["btn_export"].clicked.connect(on_export)
     if on_import:

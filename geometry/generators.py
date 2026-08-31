@@ -478,7 +478,7 @@ def cad_to_stl(src_path: str, out_path: str, log=None) -> str:
     Возвращает out_path. При ошибке поднимает RuntimeError.
     """
     if log:
-        log(f"  🔄 Конвертация CAD → STL: {os.path.basename(src_path)}")
+        log(f"  Конвертация CAD → STL: {os.path.basename(src_path)}")
     try:
         import gmsh
     except Exception as e:
@@ -593,7 +593,7 @@ def cad_inspect(src_path: str, log=None) -> list:
                         "volume": volume, "bbox": bbox,
                         "n_surfaces": int(n_surf)})
         if log:
-            log(f"  ℹ️ В сборке тел: {len(out)}")
+            log(f"  В сборке тел: {len(out)}")
         return out
     except Exception as e:
         raise RuntimeError(f"Не удалось разобрать CAD-сборку: {e}") from e
@@ -658,7 +658,7 @@ def cad_split_to_stl(src_path: str, out_dir: str, log=None,
             except Exception:
                 pass
             if log:
-                log(f"  ⚠️ Тело #{tag} ({info.get('name') or 'без имени'}) "
+                log(f"  Внимание: Тело #{tag} ({info.get('name') or 'без имени'}) "
                     f"не конвертировано: {e}")
             continue
         finally:
@@ -669,13 +669,13 @@ def cad_split_to_stl(src_path: str, out_dir: str, log=None,
         n_tri = count_stl_triangles(out_path)
         if n_tri == 0:
             if log:
-                log(f"  ⚠️ Тело #{tag}: пустая триангуляция, пропущено")
+                log(f"  Внимание: Тело #{tag}: пустая триангуляция, пропущено")
             continue
         results.append({"tag": tag, "name": info.get("name", ""),
                         "stl": out_path, "triangles": n_tri,
                         "volume": info.get("volume", 0.0)})
         if log:
-            log(f"  ✅ {os.path.basename(out_path)}: {n_tri} треугольников, "
+            log(f"  Готово: {os.path.basename(out_path)}: {n_tri} треугольников, "
                 f"V={info.get('volume', 0.0):.4g} м³")
 
     if not results:

@@ -425,7 +425,7 @@ class Su2ConfigDialog(QDialog):
         b_cancel = QPushButton("Отмена")
         b_cancel.clicked.connect(self.reject)
         btns.addWidget(b_cancel)
-        b_ok = QPushButton("💾 Сохранить в config.cfg")
+        b_ok = QPushButton("Сохранить в config.cfg")
         b_ok.setDefault(True)
         b_ok.clicked.connect(self._save_and_close)
         btns.addWidget(b_ok)

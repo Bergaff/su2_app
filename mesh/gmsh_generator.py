@@ -369,7 +369,7 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                 m = pv.read(path).triangulate().clean(tolerance=1e-5)
                 if m.n_cells > 0:
                     body_meshes.append(m)
-                    print(f"   ✓ {os.path.basename(path)}: {m.n_cells} граней")
+                    print(f"   Готово: {os.path.basename(path)}: {m.n_cells} граней")
             except Exception as e:
                 print(f"   x Ошибка обработки {path}: {e}")
             report(2 + int(6 * (fi + 1) / n_files), "Загрузка поверхностей")
@@ -387,7 +387,7 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         if body_size < 1e-6:
             return False, "Геометрия вырождена (нулевой размер)"
 
-        print("🔧 Создание фоновой сетки с локальным сгущением...")
+        print("Создание фоновой сетки с локальным сгущением...")
 
         # Параметры сетки
         if "Грубая" in quality_text:
@@ -514,7 +514,7 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         cell_centers = grid.cell_centers().points
         centers_poly = pv.PolyData(cell_centers)
         keep_mask = np.ones(len(cell_centers), dtype=bool)
-        print("✂️ Вырезаем тела из фона (надежный метод VTK)...")
+        print("Вырезаем тела из фона (надежный метод VTK)...")
 
         total_removed = 0
         n_comp = max(1, len(body_meshes))
@@ -545,9 +545,9 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                 if n_inside > 0:
                     keep_mask &= ~inside
                     total_removed += n_inside
-                    print(f"   ✓ Компонент {i}: удалено {n_inside} ячеек внутри тела")
+                    print(f"   Готово: Компонент {i}: удалено {n_inside} ячеек внутри тела")
                 else:
-                    print(f"   ⚠ Компонент {i}: 0 ячеек попало внутрь!")
+                    print(f"   Внимание: Компонент {i}: 0 ячеек попало внутрь!")
             except Exception as e:
                 print(f"   x Ошибка вырезания компонента {i}: {e}")
 
@@ -630,13 +630,13 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                                   dtype=np.uint8)
         grid = pv.UnstructuredGrid(cell_array_clean, celltypes_clean,
                                    new_points)
-        print(f"✓ Итоговая сетка: {grid.n_points} узлов, {grid.n_cells} тетраэдров")
+        print(f"Готово: Итоговая сетка: {grid.n_points} узлов, {grid.n_cells} тетраэдров")
 
         try:
             grid.save(PREVIEW_MESH)
-            print(f"👁 Preview сохранён: {PREVIEW_MESH}")
+            print(f"Preview сохранён: {PREVIEW_MESH}")
         except Exception as e:
-            print(f"⚠ Preview не сохранён: {e}")
+            print(f"Внимание: Preview не сохранён: {e}")
 
         check_cancel()
         report(94, "Извлечение граничной поверхности и нормалей")
@@ -682,7 +682,7 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
 
         if os.path.exists(su2_path):
             sz = os.path.getsize(su2_path)
-            print(f"✓ mesh.su2 создан ({sz:,} байт)")
+            print(f"Готово: mesh.su2 создан ({sz:,} байт)")
             # === ИСПРАВЛЕНО: доп. проверка, что в файле есть маркеры ===
             check_ok, check_msg = quick_mesh_check(su2_path)
             if not check_ok:

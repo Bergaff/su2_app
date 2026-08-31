@@ -293,7 +293,7 @@ def rebuild_with_metric(geometry_path: str, metric_msh: str, out_stl: str,
         gmsh.model.mesh.generate(2)
         gmsh.write(out_stl)
         if log:
-            log(f"  ✅ Адаптивная сетка: {os.path.basename(out_stl)}")
+            log(f"  Готово: Адаптивная сетка: {os.path.basename(out_stl)}")
     except Exception as e:
         raise RuntimeError(f"Не удалось построить адаптивную сетку: {e}") from e
     finally:

@@ -92,29 +92,29 @@ def _prepare_dist(project_root):
     """
     dist_dir = os.path.join(project_root, "dist", "AeroOpt")
     if not os.path.isdir(dist_dir):
-        print("✅ dist/AeroOpt нет — чистая сборка.")
+        print("Готово: dist/AeroOpt нет — чистая сборка.")
         return True
 
     # Командная строка, открытая внутри dist, сама держит папку.
     cwd = os.path.abspath(os.getcwd())
     dist_root = os.path.join(project_root, "dist")
     if cwd == dist_root or cwd.startswith(dist_root + os.sep):
-        print("⚠️  Текущий каталог внутри dist/ — он и блокирует папку.")
+        print("Внимание: Текущий каталог внутри dist/ — он и блокирует папку.")
         print("   Перехожу в корень проекта: " + project_root)
         try:
             os.chdir(project_root)
         except OSError:
             pass
 
-    print("🧹 Освобождаю dist/AeroOpt ...")
+    print("Освобождаю dist/AeroOpt ...")
     _kill_app()
 
     ok, err = _rmtree_force(dist_dir)
     if ok:
-        print("✅ dist/AeroOpt удалён.")
+        print("Готово: dist/AeroOpt удалён.")
         return True
 
-    print("⚠️  Удалить не удалось: " + str(err))
+    print("Внимание: Удалить не удалось: " + str(err))
     pids = _running_pids()
     if pids:
         print("   " + APP_EXE + " всё ещё работает, PID: " + ", ".join(pids))
@@ -147,7 +147,7 @@ def _prepare_dist(project_root):
         print("     5. перезагрузите ПК и сразу запустите python build_exe.py.")
         return False
 
-    print("   ↪️  Не удалил, а переименовал в " + os.path.basename(renamed) +
+    print("   Не удалил, а переименовал в " + os.path.basename(renamed) +
           " — сборка продолжается.")
     print("      Сотрите эту папку вручную, когда " + APP_EXE + " точно закрыт.")
     return True
@@ -155,24 +155,24 @@ def _prepare_dist(project_root):
 
 def build():
     print("=" * 60)
-    print("🚀 AeroOpt v4.1 Standalone Executable Build Script")
+    print("AeroOpt v4.1 Standalone Executable Build Script")
     print("=" * 60)
 
     if sys.platform != "win32":
-        print("⚠️ ПРЕДУПРЕЖДЕНИЕ:")
+        print("Внимание:")
         print("   Скрипт запущен в не-Windows окружении. PyInstaller собирает .exe")
         print("   только под ту ОС, где запущен. Скопируйте проект на Windows-ПК и")
         print("   запустите там:  python build_exe.py\n")
 
     try:
         import PyInstaller  # noqa: F401
-        print("✅ PyInstaller обнаружен.")
+        print("Готово: PyInstaller обнаружен.")
     except ImportError:
-        print("📦 Установка PyInstaller...")
+        print("Установка PyInstaller...")
         try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
         except Exception as e:
-            print(f"❌ Не удалось установить PyInstaller: {e}")
+            print(f"Не удалось установить PyInstaller: {e}")
             print("   Выполните вручную: pip install pyinstaller")
             return
 
@@ -180,16 +180,16 @@ def build():
     lic_dir = os.path.join(project_root, "license_client")
 
     if not os.path.isdir(lic_dir):
-        print(f"❌ Папка license_client не найдена: {lic_dir}")
+        print(f"Ошибка: Папка license_client не найдена: {lic_dir}")
         print("   Убедитесь, что license_client/ лежит рядом с su2_gui.py")
         return
     if not os.path.isfile(os.path.join(lic_dir, "__init__.py")):
         with open(os.path.join(lic_dir, "__init__.py"), "w", encoding="utf-8") as f:
             f.write('from .license_checker import LicenseChecker, LicenseStatus\n')
             f.write('__all__ = ["LicenseChecker", "LicenseStatus"]\n')
-        print("✅ Создан license_client/__init__.py")
+        print("Готово: Создан license_client/__init__.py")
     else:
-        print("✅ license_client/__init__.py найден")
+        print("Готово: license_client/__init__.py найден")
 
     # Быстрая проверка, что пакет импортируется ДО сборки.
     try:
@@ -198,13 +198,13 @@ def build():
              "import license_client, license_client.license_checker; print('import OK')"],
             cwd=project_root)
     except Exception:
-        print("❌ license_client не импортируется из корня проекта.")
+        print("Ошибка: license_client не импортируется из корня проекта.")
         print("   Ожидается: <project>/license_client/__init__.py и license_checker.py")
         return
 
     entry = "su2_gui.py"
     if not os.path.isfile(os.path.join(project_root, entry)):
-        print(f"❌ Не найден точка входа: {os.path.join(project_root, entry)}")
+        print(f"Ошибка: Не найден точка входа: {os.path.join(project_root, entry)}")
         return
 
     # Перед сборкой освобождаем dist/AeroOpt. Именно здесь раньше падало
@@ -212,7 +212,7 @@ def build():
     # а скрипт считал это ошибкой и трижды требовал Enter).
     if sys.platform == "win32":
         if not _prepare_dist(project_root):
-            print("\n❌ Сборка прервана: не удалось освободить dist/AeroOpt.")
+            print("\nОшибка: Сборка прервана: не удалось освободить dist/AeroOpt.")
             print("   dist/AeroOpt остался нетронутым — ничего не сломано.\n")
             return
         # Кэш PyInstaller тоже может быть занят — чистим, но не фатально.
@@ -262,7 +262,7 @@ def build():
         import importlib.util
         if importlib.util.find_spec("gmsh") is not None:
             cmd.append("--collect-all=gmsh")
-            print("✅ gmsh найден — собираю с нативными библиотеками.")
+            print("Готово: gmsh найден — собираю с нативными библиотеками.")
     except Exception:
         pass
 
@@ -271,7 +271,7 @@ def build():
 
     cmd.append(entry)
 
-    print("\n📦 Запуск PyInstaller...")
+    print("\nЗапуск PyInstaller...")
     print(f"   Корень проекта: {project_root}")
     print(f"   Локальные пакеты (все подмодули): {', '.join(local_packages) or 'нет'}")
     print(f"   Полный лог: build_log.txt\n")
@@ -290,19 +290,19 @@ def build():
 
     exe_path = os.path.join(project_root, "dist", "AeroOpt", APP_EXE)
     if proc.returncode == 0 and not os.path.isfile(exe_path):
-        print("\n❌ PyInstaller завершился без ошибки, но " + exe_path +
+        print("\nОшибка: PyInstaller завершился без ошибки, но " + exe_path +
               " не появился.")
         print("   Пришлите build_log.txt.\n")
         return
 
     if proc.returncode == 0:
         print("\n" + "=" * 60)
-        print("🎉 СБОРКА УСПЕШНО ЗАВЕРШЕНА!")
+        print("СБОРКА УСПЕШНО ЗАВЕРШЕНА!")
         print("   Результат: " + exe_path)
         print("   Папку dist/AeroOpt можно архивировать и переносить.")
         print("=" * 60)
     else:
-        print("\n❌ Сборка не удалась. Настоящая причина — выше и в build_log.txt.")
+        print("\nОшибка: Сборка не удалась. Настоящая причина — выше и в build_log.txt.")
         print("   Ищите строки с 'ERROR', 'Traceback', 'Unable to find'.")
         print("   Пришлите последние ~40 строк build_log.txt.\n")
 

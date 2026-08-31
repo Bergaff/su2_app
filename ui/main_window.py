@@ -10,7 +10,7 @@ ui/main_window.py — главное окно AeroOpt v4.0 (патч-верси�
     таблицу bodies_table).
  3. Все вызовы self.plotter.reset_camera() удалены — камера больше НЕ
     перескакивает при действиях пользователя.
- 4. Добавлена кнопка '✅ Применить' для выбора количества ядер CPU.
+ 4. Добавлена кнопка 'Готово: Применить' для выбора количества ядер CPU.
     Значение применяется только после нажатия.
  5. Память отображается через ctypes (Windows) / resource (Unix) —
     без зависимости от psutil.
@@ -168,7 +168,7 @@ class SU2FirstLaunchDialog(QDialog):
         self.setMinimumHeight(280)
         layout = QVBoxLayout(self)
         banner = QLabel("Добро пожаловать в AeroOpt v4.0!")
-        banner.setStyleSheet("font-size: 16px; font-weight: bold; color: #003366;")
+        banner.setStyleSheet("font-size: 16px; font-weight: bold; color: #22384A;")
         layout.addWidget(banner)
         desc = QLabel(
             "Для проведения численного аэродинамического анализа (CFD) программе требуется\n"
@@ -176,17 +176,17 @@ class SU2FirstLaunchDialog(QDialog):
         desc.setStyleSheet("font-size: 11px; line-height: 1.4;")
         layout.addWidget(desc)
         layout.addSpacing(15)
-        self.btn_auto = QPushButton("📥 СКАЧАТЬ И УСТАНОВИТЬ АВТОМАТИЧЕСКИ (Рекомендуется)")
-        self.btn_auto.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; font-size: 11px; padding: 10px;")
+        self.btn_auto = QPushButton("СКАЧАТЬ И УСТАНОВИТЬ АВТОМАТИЧЕСКИ (Рекомендуется)")
+        self.btn_auto.setStyleSheet("background-color: #2E5A78; color: #FBFBFC; font-weight: bold; font-size: 11px; padding: 10px;")
         self.btn_auto.clicked.connect(self.on_auto_clicked)
         layout.addWidget(self.btn_auto)
-        self.btn_manual = QPushButton("📂 Указать путь к существующему SU2_CFD.exe на диске")
-        self.btn_manual.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; font-size: 11px; padding: 10px;")
+        self.btn_manual = QPushButton("Указать путь к существующему SU2_CFD.exe на диске")
+        self.btn_manual.setStyleSheet("background-color: #2E5A78; color: #FBFBFC; font-weight: bold; font-size: 11px; padding: 10px;")
         self.btn_manual.clicked.connect(self.on_manual_clicked)
         layout.addWidget(self.btn_manual)
         layout.addSpacing(15)
         self.lbl_status = QLabel("Статус: не настроено")
-        self.lbl_status.setStyleSheet("color: red; font-weight: bold;")
+        self.lbl_status.setStyleSheet("color: #9B2C2C; font-weight: bold;")
         layout.addWidget(self.lbl_status)
         self.choice = None
         self.manual_path = None
@@ -219,22 +219,22 @@ class SU2InstallWorker(QThread):
             import zipfile
             url = "https://github.com/su2code/SU2/releases/download/v7.5.1/SU2-v7.5.1-win64.zip"
             zip_path = os.path.join(self.install_dir, "su2_temp.zip")
-            self.progress_signal.emit(5, "🌐 Скачивание SU2 v7.5.1...")
+            self.progress_signal.emit(5, "Скачивание SU2 v7.5.1...")
 
             def report_hook(block_num, block_size, total_size):
                 if total_size > 0:
                     percent = int((block_num * block_size / total_size) * 80) + 5
-                    self.progress_signal.emit(percent, f"🌐 Скачивание SU2: {percent - 5}%")
+                    self.progress_signal.emit(percent, f"Скачивание SU2: {percent - 5}%")
 
             urllib.request.urlretrieve(url, zip_path, reporthook=report_hook)
-            self.progress_signal.emit(85, "📦 Распаковка архива...")
+            self.progress_signal.emit(85, "Распаковка архива...")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(self.install_dir)
             try:
                 os.remove(zip_path)
             except Exception:
                 pass
-            self.progress_signal.emit(95, "🔍 Поиск исполняемого файла...")
+            self.progress_signal.emit(95, "Поиск исполняемого файла...")
             su2_cfd_path = None
             for root, dirs, files in os.walk(self.install_dir):
                 for f in files:
@@ -356,7 +356,7 @@ def _detect_cpu_cores() -> dict:
 # ---------------------------------------------------------------------------
 class AeroPlotCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=3, dpi=100):
-        fig = Figure(figsize=(width, height), dpi=dpi, facecolor='#FCFCFC')
+        fig = Figure(figsize=(width, height), dpi=dpi, facecolor='#FAFAFB')
         self.axes1 = fig.add_subplot(121)
         self.axes2 = fig.add_subplot(122)
         super().__init__(fig)
@@ -364,12 +364,12 @@ class AeroPlotCanvas(FigureCanvas):
         self.setup_plot()
 
     def setup_plot(self):
-        self.axes1.set_title("Поляра: CL vs CD", fontsize=9, fontweight='bold', color='#113366')
+        self.axes1.set_title("Поляра: CL vs CD", fontsize=9, fontweight='bold', color='#22384A')
         self.axes1.set_xlabel("CD (сопротивление)", fontsize=8)
         self.axes1.set_ylabel("CL (подъемная сила)", fontsize=8)
         self.axes1.grid(True, linestyle='--', alpha=0.5)
         self.axes1.tick_params(labelsize=8)
-        self.axes2.set_title("Подъемная сила: CL vs AoA", fontsize=9, fontweight='bold', color='#113366')
+        self.axes2.set_title("Подъемная сила: CL vs AoA", fontsize=9, fontweight='bold', color='#22384A')
         self.axes2.set_xlabel("AoA (угол атаки, град)", fontsize=8)
         self.axes2.set_ylabel("CL (подъемная сила)", fontsize=8)
         self.axes2.grid(True, linestyle='--', alpha=0.5)
@@ -407,18 +407,18 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("AeroOpt v4.0")
         self.setGeometry(50, 50, 1750, 1050)
         self.setStyleSheet("""
-            QMainWindow { background-color: #F3F7FA; }
+            QMainWindow { background-color: #F2F3F5; }
             QTreeWidget {
-                background-color: #FFFFFF; border: 1px solid #C3CBD5;
+                background-color: #FBFBFC; border: 1px solid #C3CBD5;
                 font-family: Segoe UI, sans-serif; font-size: 11px;
             }
             QTreeWidget::item { padding: 4px; }
-            QTreeWidget::item:selected { background-color: #D6E4F0; color: #000000; }
-            QStackedWidget { background-color: #FFFFFF; border: 1px solid #C3CBD5; }
+            QTreeWidget::item:selected { background-color: #D9DDE2; color: #1A1A1A; }
+            QStackedWidget { background-color: #FBFBFC; border: 1px solid #C3CBD5; }
             QGroupBox {
-                border: 1px solid #D1D9E0; border-radius: 4px; margin-top: 15px;
+                border: 1px solid #D1D9E0; margin-top: 15px;
                 font-family: Segoe UI, sans-serif; font-size: 11px;
-                font-weight: bold; background-color: #FCFDFF;
+                font-weight: bold; background-color: #FAFAFB;
             }
             QGroupBox::title {
                 subcontrol-origin: margin; left: 10px; padding: 0 5px 0 5px;
@@ -426,36 +426,36 @@ class MainWindow(QMainWindow):
             }
             QLabel { font-family: Segoe UI, sans-serif; font-size: 11px; color: #2c4257; }
             QPushButton {
-                background-color: #F0F4F8; border: 1px solid #B0B9C5;
-                border-radius: 3px; padding: 5px 12px;
+                background-color: #ECEEF1; border: 1px solid #B0B9C5;
+                padding: 5px 12px;
                 font-family: Segoe UI, sans-serif; font-size: 11px; color: #1a2d37;
             }
-            QPushButton:hover { background-color: #E2ECF5; border-color: #0078D7; }
-            QPushButton:pressed { background-color: #CCE4F7; border-color: #005499; }
+            QPushButton:hover { background-color: #E2E5E9; border-color: #2E5A78; }
+            QPushButton:pressed { background-color: #D2D7DC; border-color: #26485F; }
             QPushButton:disabled {
-                background-color: #E2E8F0 !important;
+                background-color: #E2E5E9 !important;
                 border-color: #CBD5E1 !important;
                 color: #94A3B8 !important;
             }
             QTableWidget {
-                background-color: #FFFFFF; border: 1px solid #C3CBD5;
-                gridline-color: #E6EDF5; font-family: Segoe UI, sans-serif;
+                background-color: #FBFBFC; border: 1px solid #C3CBD5;
+                gridline-color: #E6E8EB; font-family: Segoe UI, sans-serif;
                 font-size: 11px;
             }
             QHeaderView::section {
-                background-color: #EBF2F8; padding: 4px; border: 1px solid #C3CBD5;
+                background-color: #E9EBEE; padding: 4px; border: 1px solid #C3CBD5;
                 font-family: Segoe UI, sans-serif; font-size: 11px;
                 font-weight: bold; color: #2c4257;
             }
-            QTabWidget::pane { border: 1px solid #C3CBD5; background-color: #FFFFFF; }
+            QTabWidget::pane { border: 1px solid #C3CBD5; background-color: #FBFBFC; }
             QTabBar::tab {
-                background-color: #E5ECF4; border: 1px solid #B0B9C5;
+                background-color: #E5E7EA; border: 1px solid #B0B9C5;
                 border-bottom-color: none; border-top-left-radius: 4px;
                 border-top-right-radius: 4px; padding: 6px 14px; margin-right: 2px;
                 font-family: Segoe UI, sans-serif; font-size: 11px; color: #2c4257;
             }
             QTabBar::tab:selected {
-                background-color: #FFFFFF; border-bottom-color: #FFFFFF; font-weight: bold;
+                background-color: #FBFBFC; border-bottom-color: #FBFBFC; font-weight: bold;
             }
         """)
 
@@ -493,7 +493,7 @@ class MainWindow(QMainWindow):
         cpu_info = _detect_cpu_cores()
         self._cpu_cores_pending = cpu_info["recommended"]
         # Гибридный GPU-режим: какой вычислитель и доля GPU.
-        # Применяются через кнопку «✅ Применить» (apply_load_level) и
+        # Применяются через кнопку «Готово: Применить» (apply_load_level) и
         # передаются в CalculationSession при следующем запуске.
         self._compute_device_pending = "cpu"     # "cpu" | "cpu_gpu"
         self._gpu_percent_pending = 0            # 0..100
@@ -536,16 +536,16 @@ class MainWindow(QMainWindow):
         save_as_action = file_menu.addAction("Сохранить как...")
         save_as_action.triggered.connect(self.save_project)
         file_menu.addSeparator()
-        reset_action = file_menu.addAction("🔄 Сбросить интерфейс")
+        reset_action = file_menu.addAction("Сбросить интерфейс")
         reset_action.triggered.connect(self.reset_interface)
 
         # === T6: меню «Лицензия» ========================================
         license_menu = menu_bar.addMenu("Лицензия")
-        act_activate = license_menu.addAction("🔑 Активировать ключ...")
+        act_activate = license_menu.addAction("Активировать ключ...")
         act_activate.triggered.connect(self._show_activate_dialog)
-        act_status = license_menu.addAction("📊 Статус лицензии")
+        act_status = license_menu.addAction("Статус лицензии")
         act_status.triggered.connect(self._show_license_status)
-        act_deactivate = license_menu.addAction("🔌 Отвязать эту машину")
+        act_deactivate = license_menu.addAction("Отвязать эту машину")
         act_deactivate.triggered.connect(self._deactivate_license)
         # =================================================================
 
@@ -558,7 +558,7 @@ class MainWindow(QMainWindow):
         self.ribbon = QTabWidget()
         self.ribbon.setMaximumHeight(115)
         self.ribbon.setStyleSheet("""
-            QTabWidget::pane { border: 1px solid #C3CBD5; background-color: #F8FAFD; }
+            QTabWidget::pane { border: 1px solid #C3CBD5; background-color: #F7F8F9; }
             QTabBar::tab { padding: 4px 15px; font-weight: bold; }
         """)
 
@@ -566,22 +566,22 @@ class MainWindow(QMainWindow):
         tab_home = QWidget()
         home_lay = QHBoxLayout(tab_home)
         home_lay.setContentsMargins(5, 5, 5, 5)
-        btn_open = QPushButton("📂 Открыть проект")
+        btn_open = QPushButton("Открыть проект")
         btn_open.clicked.connect(self.load_project)
-        btn_save = QPushButton("💾 Сохранить")
+        btn_save = QPushButton("Сохранить")
         btn_save.clicked.connect(self.save_project)
-        btn_mesh_build = QPushButton("🔧 Построить сетку")
+        btn_mesh_build = QPushButton("Построить сетку")
         btn_mesh_build.clicked.connect(self.make_mesh_from_bodies)
-        btn_run_sol = QPushButton("🚀 Запустить расчёт")
+        btn_run_sol = QPushButton("Запустить расчёт")
         btn_run_sol.clicked.connect(self.start_calculation)
         self.ribbon_btn_run = btn_run_sol
-        btn_pause_sol = QPushButton("⏸ Пауза")
+        btn_pause_sol = QPushButton("Пауза")
         btn_pause_sol.clicked.connect(self.pause_calculation)
         self.ribbon_btn_pause = btn_pause_sol
-        btn_resume_sol = QPushButton("▶ Продолжить")
+        btn_resume_sol = QPushButton("Продолжить")
         btn_resume_sol.clicked.connect(self.resume_calculation)
         self.ribbon_btn_resume = btn_resume_sol
-        btn_cancel_sol = QPushButton("⛔ Отмена")
+        btn_cancel_sol = QPushButton("Отмена")
         btn_cancel_sol.clicked.connect(self.cancel_calculation)
         self.ribbon_btn_cancel = btn_cancel_sol
         for btn in [btn_open, btn_save, btn_mesh_build, btn_run_sol,
@@ -595,18 +595,18 @@ class MainWindow(QMainWindow):
         tab_geometry_ribbon = QWidget()
         geom_rib_lay = QHBoxLayout(tab_geometry_ribbon)
         geom_rib_lay.setContentsMargins(5, 5, 5, 5)
-        btn_gen_aircraft = QPushButton("✈️ Полный самолет")
+        btn_gen_aircraft = QPushButton("Полный самолет")
         btn_gen_aircraft.clicked.connect(self.generate_full_aircraft)
-        btn_gen_w = QPushButton("⚙️ Создать крыло")
+        btn_gen_w = QPushButton("Создать крыло")
         btn_gen_w.clicked.connect(lambda: self.generate_wing_mesh_parametric(
             self.w_span.value(), self.w_chord_root.value(), self.w_chord_tip.value()))
-        btn_gen_f = QPushButton("✈️ Создать фюзеляж")
+        btn_gen_f = QPushButton("Создать фюзеляж")
         btn_gen_f.clicked.connect(self.generate_fuselage)
-        btn_gen_hs_r = QPushButton("🔧 Создать ГО")
+        btn_gen_hs_r = QPushButton("Создать ГО")
         btn_gen_hs_r.clicked.connect(self.generate_horizontal_stabilizer)
-        btn_gen_vk_r = QPushButton("🔧 Создать ВО")
+        btn_gen_vk_r = QPushButton("Создать ВО")
         btn_gen_vk_r.clicked.connect(self.generate_vertical_stabilizer)
-        btn_auto_w_r = QPushButton("🎯 Автоподбор крыла")
+        btn_auto_w_r = QPushButton("Автоподбор крыла")
         btn_auto_w_r.clicked.connect(self.auto_suggest_wing_params)
         for btn in [btn_gen_aircraft, btn_gen_w, btn_gen_f,
                     btn_gen_hs_r, btn_gen_vk_r, btn_auto_w_r]:
@@ -618,9 +618,9 @@ class MainWindow(QMainWindow):
         tab_physics_ribbon = QWidget()
         phys_rib_lay = QHBoxLayout(tab_physics_ribbon)
         phys_rib_lay.setContentsMargins(5, 5, 5, 5)
-        btn_check_r = QPushButton("🔎 Проверить правила")
+        btn_check_r = QPushButton("Проверить правила")
         btn_check_r.clicked.connect(self.validate_current_design)
-        btn_check_conflict = QPushButton("⚡ Проверить конфликты")
+        btn_check_conflict = QPushButton("Проверить конфликты")
         btn_check_conflict.clicked.connect(self.check_rules_consistency)
         phys_rib_lay.addWidget(btn_check_r)
         phys_rib_lay.addWidget(btn_check_conflict)
@@ -690,7 +690,7 @@ class MainWindow(QMainWindow):
         settings_outer_lay.setContentsMargins(0, 0, 0, 0)
         settings_outer_lay.setSpacing(0)
         header_widget = QWidget()
-        header_widget.setStyleSheet("background-color: #EBF2F8; border-bottom: 1px solid #C3CBD5;")
+        header_widget.setStyleSheet("background-color: #E9EBEE; border-bottom: 1px solid #C3CBD5;")
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(10, 6, 10, 6)
         self.lbl_settings_header = QLabel("Settings")
@@ -750,7 +750,7 @@ class MainWindow(QMainWindow):
         fc_lay.addRow("Угол атаки:", self.input_aoa)
 
         self.lbl_isa = QLabel("—")
-        self.lbl_isa.setStyleSheet("color:#0066cc; font-weight:bold;")
+        self.lbl_isa.setStyleSheet("color:#2E5A78; font-weight:bold;")
         self.lbl_isa.setToolTip(
             "Параметры стандартной атмосферы для текущей высоты: "
             "T — температура, P — давление, ρ — плотность, M — число Маха."
@@ -763,7 +763,7 @@ class MainWindow(QMainWindow):
 
         # Кнопка применения — без неё изменения в self.flight не пишутся
         # (раньше изменения подхватывались сразу; теперь явный «commit»)
-        self.btn_apply_flight = QPushButton("✅ Применить условия полёта")
+        self.btn_apply_flight = QPushButton("Готово: Применить условия полёта")
         self.btn_apply_flight.setToolTip(
             "Применить введённые скорость/высоту/AoA к текущей сессии расчёта. "
             "До нажатия изменения только отображаются в полях."
@@ -782,7 +782,7 @@ class MainWindow(QMainWindow):
         self.combo_preset = QComboBox()
         for name in PRESETS.keys():
             self.combo_preset.addItem(name)
-        btn_load_preset_rules = QPushButton("📥 Загрузить")
+        btn_load_preset_rules = QPushButton("Загрузить")
         btn_load_preset_rules.clicked.connect(self.load_rule_preset)
         pg_lay.addWidget(self.combo_preset)
         pg_lay.addWidget(btn_load_preset_rules)
@@ -798,11 +798,11 @@ class MainWindow(QMainWindow):
         rules_lay.addWidget(self.rules_table)
 
         rules_btn_lay = QHBoxLayout()
-        btn_add_rule = QPushButton("➕ Добавить")
+        btn_add_rule = QPushButton("Добавить")
         btn_add_rule.clicked.connect(self.add_rule_dialog)
-        btn_rem_rule = QPushButton("🗑 Удалить")
+        btn_rem_rule = QPushButton("Удалить")
         btn_rem_rule.clicked.connect(self.remove_selected_rule)
-        btn_check_rules = QPushButton("🔎 Проверить")
+        btn_check_rules = QPushButton("Проверить")
         btn_check_rules.clicked.connect(self.check_rules_consistency)
         rules_btn_lay.addWidget(btn_add_rule)
         rules_btn_lay.addWidget(btn_rem_rule)
@@ -810,11 +810,11 @@ class MainWindow(QMainWindow):
         rules_lay.addLayout(rules_btn_lay)
 
         rules_io_lay = QHBoxLayout()
-        btn_save_rules = QPushButton("💾 Сохранить")
+        btn_save_rules = QPushButton("Сохранить")
         btn_save_rules.clicked.connect(self.save_rule_set)
-        btn_load_rules = QPushButton("📂 Открыть")
+        btn_load_rules = QPushButton("Открыть")
         btn_load_rules.clicked.connect(self.load_rule_set)
-        btn_validate_now = QPushButton("✅ Проверить")
+        btn_validate_now = QPushButton("Готово: Проверить")
         btn_validate_now.clicked.connect(self.validate_current_design)
         rules_io_lay.addWidget(btn_save_rules)
         rules_io_lay.addWidget(btn_load_rules)
@@ -834,11 +834,11 @@ class MainWindow(QMainWindow):
         wiz_lay = QVBoxLayout(wizard_group)
         # Сокращённый текст + кнопка «? Помощь» с подробной подсказкой
         wiz_short = QLabel("Загрузите фюзеляж или STL, задайте роль и переходите к Mesh.")
-        wiz_short.setStyleSheet("font-size: 10px; color: #334466;")
+        wiz_short.setStyleSheet("font-size: 10px; color: #2c4257;")
         wiz_lay.addWidget(wiz_short)
-        btn_wiz_help = QPushButton("❓ Помощь")
+        btn_wiz_help = QPushButton("Помощь")
         btn_wiz_help.setToolTip(
-            "Шаг 1: Нажмите «📂 Фюзеляж» или «➕ STL» для импорта компонентов.\n"
+            "Шаг 1: Нажмите «Фюзеляж» или «STL» для импорта компонентов.\n"
             "Шаг 2: В таблице ниже выберите роль детали из выпадающего списка "
             "(для полной модели используйте «Произвольный самолет»/«Другое»).\n"
             "Шаг 3: Выберите в дереве слева узел «Mesh 1» и нажмите "
@@ -853,11 +853,11 @@ class MainWindow(QMainWindow):
         wiz_lay.addWidget(btn_wiz_help)
         lay3.addWidget(wizard_group)
         btn_load_lay = QHBoxLayout()
-        self.btn_add_fuselage = QPushButton("📂 Фюзеляж")
+        self.btn_add_fuselage = QPushButton("Фюзеляж")
         self.btn_add_fuselage.clicked.connect(self.load_stl_fuselage)
-        self.btn_add_body = QPushButton("➕ STL")
+        self.btn_add_body = QPushButton("STL")
         self.btn_add_body.clicked.connect(self.add_bodies)
-        self.btn_add_primitive = QPushButton("📦 Примитив")
+        self.btn_add_primitive = QPushButton("Примитив")
         menu = QMenu()
         menu.addAction("Куб", lambda: self._create_primitive("Куб"))
         menu.addAction("Цилиндр", lambda: self._create_primitive("Цилиндр"))
@@ -868,14 +868,14 @@ class MainWindow(QMainWindow):
         btn_load_lay.addWidget(self.btn_add_primitive)
         lay3.addLayout(btn_load_lay)
         simplify_layout = QHBoxLayout()
-        self.btn_simplify_simple = QPushButton("✂️ Упростить (грубо)")
+        self.btn_simplify_simple = QPushButton("Упростить (грубо)")
         self.btn_simplify_simple.clicked.connect(lambda: self.simplify_geometry(level="simple"))
-        self.btn_simplify_medium = QPushButton("✂️ Упростить (средне)")
+        self.btn_simplify_medium = QPushButton("Упростить (средне)")
         self.btn_simplify_medium.clicked.connect(lambda: self.simplify_geometry(level="medium"))
         simplify_layout.addWidget(self.btn_simplify_simple)
         simplify_layout.addWidget(self.btn_simplify_medium)
         lay3.addLayout(simplify_layout)
-        self.btn_heal_stl = QPushButton("🏥 Лечить выбранный STL")
+        self.btn_heal_stl = QPushButton("Лечить выбранный STL")
         self.btn_heal_stl.clicked.connect(self.heal_selected_stl)
         self.btn_heal_stl.setEnabled(False)
         lay3.addWidget(self.btn_heal_stl)
@@ -887,7 +887,7 @@ class MainWindow(QMainWindow):
         self.bodies_table.cellClicked.connect(self.on_table_click)
         lay3.addWidget(self.bodies_table)
         tool_layout = QHBoxLayout()
-        self.btn_remove = QPushButton("🗑 Удалить")
+        self.btn_remove = QPushButton("Удалить")
         self.btn_remove.clicked.connect(self.remove_body)
         tool_layout.addWidget(self.btn_remove)
         for axis in ['x', 'y', 'z']:
@@ -939,9 +939,9 @@ class MainWindow(QMainWindow):
         lay4.addRow("X:", self.f_pos_x)
         lay4.addRow("Y:", self.f_pos_y)
         lay4.addRow("Z:", self.f_pos_z)
-        self.btn_gen_fuselage = QPushButton("✈️ Сгенерировать фюзеляж")
+        self.btn_gen_fuselage = QPushButton("Сгенерировать фюзеляж")
         self.btn_gen_fuselage.clicked.connect(self.generate_fuselage)
-        self.btn_export_fuselage = QPushButton("💾 Экспорт фюзеляжа")
+        self.btn_export_fuselage = QPushButton("Экспорт фюзеляжа")
         self.btn_export_fuselage.clicked.connect(self.export_fuselage)
         lay4.addRow(self.btn_gen_fuselage)
         lay4.addRow(self.btn_export_fuselage)
@@ -1002,9 +1002,9 @@ class MainWindow(QMainWindow):
         self.wbox_lz = QDoubleSpinBox(); self.wbox_lz.setRange(0.1, 100); self.wbox_lz.setValue(1.0); self.wbox_lz.setSuffix(" м")
         self.chk_wing_auto_from_box = QCheckBox("Авторазмеры крыла из области")
         self.chk_wing_auto_from_box.setChecked(True)
-        btn_box_from_fuselage = QPushButton("📦 Взять область из фюзеляжа")
+        btn_box_from_fuselage = QPushButton("Взять область из фюзеляжа")
         btn_box_from_fuselage.clicked.connect(self.fill_wing_box_from_fuselage)
-        btn_box_preview = QPushButton("👁 Показать область")
+        btn_box_preview = QPushButton("Показать область")
         btn_box_preview.clicked.connect(self.preview_wing_box)
         wb_lay.addRow("Центр X:", self.wbox_cx)
         wb_lay.addRow("Центр Y:", self.wbox_cy)
@@ -1016,14 +1016,14 @@ class MainWindow(QMainWindow):
         wb_lay.addRow(btn_box_from_fuselage)
         wb_lay.addRow(btn_box_preview)
         lay5.addRow(wbox_group)
-        self.btn_gen_wing = QPushButton("⚙️ Сгенерировать крыло")
+        self.btn_gen_wing = QPushButton("Сгенерировать крыло")
         self.btn_gen_wing.clicked.connect(lambda: self.generate_wing_mesh_parametric(
             self.w_span.value(), self.w_chord_root.value(), self.w_chord_tip.value()))
-        self.btn_auto_wing = QPushButton("🎯 Автоподбор крыла по фюзеляжу")
+        self.btn_auto_wing = QPushButton("Автоподбор крыла по фюзеляжу")
         self.btn_auto_wing.clicked.connect(self.auto_suggest_wing_params)
-        self.btn_export_wing = QPushButton("💾 Экспорт крыла")
+        self.btn_export_wing = QPushButton("Экспорт крыла")
         self.btn_export_wing.clicked.connect(self.export_wing)
-        btn_full_aircraft = QPushButton("🚀 Сгенерировать ВЕСЬ САМОЛЁТ")
+        btn_full_aircraft = QPushButton("Сгенерировать ВЕСЬ САМОЛЁТ")
         btn_full_aircraft.clicked.connect(self.generate_full_aircraft)
         lay5.addRow(self.btn_gen_wing)
         lay5.addRow(self.btn_auto_wing)
@@ -1101,9 +1101,9 @@ class MainWindow(QMainWindow):
         self.elev_deflection = QDoubleSpinBox(); self.elev_deflection.setRange(-30, 30); self.elev_deflection.setValue(0.0); self.elev_deflection.setSuffix("°")
         self.elev_deflection.setToolTip("Угол отклонения руля высоты, градусы.")
         self.hs_auto = QCheckBox("Автоподбор по фюзеляжу")
-        btn_gen_hs = QPushButton("🔧 Сгенерировать ГО")
+        btn_gen_hs = QPushButton("Сгенерировать ГО")
         btn_gen_hs.clicked.connect(self.generate_horizontal_stabilizer)
-        btn_export_hs = QPushButton("💾 Экспорт")
+        btn_export_hs = QPushButton("Экспорт")
         btn_export_hs.clicked.connect(lambda: self.export_component("h_stab"))
         hs_lay.addRow("Размах:", self.hs_span)
         hs_lay.addRow("Хорда:", self.hs_chord)
@@ -1127,9 +1127,9 @@ class MainWindow(QMainWindow):
         self.vk_pos_x.setToolTip("X-координата корневой хорды ВО (м).")
         self.vk_pos_z = QDoubleSpinBox(); self.vk_pos_z.setRange(-10, 10); self.vk_pos_z.setValue(0.0)
         self.vk_pos_z.setToolTip("Z-координата ВО (м).")
-        btn_gen_vk = QPushButton("🔧 Сгенерировать ВО")
+        btn_gen_vk = QPushButton("Сгенерировать ВО")
         btn_gen_vk.clicked.connect(self.generate_vertical_stabilizer)
-        btn_export_vk = QPushButton("💾 Экспорт")
+        btn_export_vk = QPushButton("Экспорт")
         btn_export_vk.clicked.connect(lambda: self.export_component("v_stab"))
         vk_lay.addRow("Высота:", self.vk_height)
         vk_lay.addRow("Хорда:", self.vk_chord)
@@ -1150,15 +1150,15 @@ class MainWindow(QMainWindow):
         self.combo_mesh_quality = QComboBox()
         self.combo_mesh_quality.addItems(MESH_QUALITY)
         self.combo_mesh_quality.setCurrentIndex(1)
-        self.lbl_mesh_info = QLabel("⏱ ~30-60 сек")
+        self.lbl_mesh_info = QLabel("~30-60 сек")
         self.combo_mesh_quality.currentTextChanged.connect(self.on_mesh_quality_changed)
         q_lay.addRow("Качество:", self.combo_mesh_quality)
         q_lay.addRow("Инфо:", self.lbl_mesh_info)
         lay8.addWidget(q_group)
-        self.btn_make_mesh = QPushButton("🔧 Построить расчётную сетку")
+        self.btn_make_mesh = QPushButton("Построить расчётную сетку")
         self.btn_make_mesh.clicked.connect(self.make_mesh_from_bodies)
         lay8.addWidget(self.btn_make_mesh)
-        self.btn_adapt_mesh = QPushButton("🧬 Адаптировать сетку (SU2_ADAPT)")
+        self.btn_adapt_mesh = QPushButton("Адаптировать сетку (SU2_ADAPT)")
         self.btn_adapt_mesh.setToolTip(
             "Локально сгустить сетку по решению (restart.dat) из последнего "
             "расчёта: точнее в областях высоких градиентов, чем при "
@@ -1184,7 +1184,7 @@ class MainWindow(QMainWindow):
         self.adapt_power.setToolTip(
             "Показатель сгущения: 1 — линейно по градиенту Cp, "
             "больше — резче контраст между носком и остальной поверхностью.")
-        self.btn_adapt_cp = QPushButton("🧲 Перестроить сетку по Cp")
+        self.btn_adapt_cp = QPushButton("Перестроить сетку по Cp")
         self.btn_adapt_cp.setToolTip(
             "Взять surface_flow.csv последнего расчёта, построить поле "
             "целевых размеров (мельче там, где больше |dCp/ds|) и "
@@ -1198,7 +1198,7 @@ class MainWindow(QMainWindow):
         lay8.addWidget(adapt2)
         self.settings_stack.addWidget(self.page_mesh)
 
-        # Page 9: Solver — теперь с кнопкой «✅ Применить» для ядер
+        # Page 9: Solver — теперь с кнопкой «Готово: Применить» для ядер
         self.page_solver = QWidget()
         lay9 = QVBoxLayout(self.page_solver)
         lay9.setContentsMargins(10, 10, 10, 10)
@@ -1209,14 +1209,14 @@ class MainWindow(QMainWindow):
         su2_lay.addWidget(QLabel("Путь к SU2_CFD.exe:"))
         su2_lay.addWidget(self.txt_su2_path)
         su2_btn_lay = QHBoxLayout()
-        btn_browse_su2 = QPushButton("📂 Обзор...")
+        btn_browse_su2 = QPushButton("Обзор...")
         btn_browse_su2.clicked.connect(self.browse_su2_exe)
-        btn_check_su2 = QPushButton("⚡ Проверить связь")
+        btn_check_su2 = QPushButton("Проверить связь")
         btn_check_su2.clicked.connect(self.check_su2_connection)
-        btn_save_su2 = QPushButton("💾 Сохранить путь")
+        btn_save_su2 = QPushButton("Сохранить путь")
         btn_save_su2.clicked.connect(self.save_su2_path)
-        btn_install_su2 = QPushButton("📥 Авто-установка SU2")
-        btn_install_su2.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        btn_install_su2 = QPushButton("Авто-установка SU2")
+        btn_install_su2.setStyleSheet("background-color: #2E5A78; color: #FBFBFC; font-weight: bold;")
         btn_install_su2.clicked.connect(self.install_su2_automatically)
         su2_btn_lay.addWidget(btn_browse_su2)
         su2_btn_lay.addWidget(btn_check_su2)
@@ -1224,7 +1224,7 @@ class MainWindow(QMainWindow):
         su2_btn_lay.addWidget(btn_install_su2)
         su2_lay.addLayout(su2_btn_lay)
         self.lbl_su2_status = QLabel("Статус: не проверено")
-        self.lbl_su2_status.setStyleSheet("color: gray; font-style: italic;")
+        self.lbl_su2_status.setStyleSheet("color: #6B7280; font-style: italic;")
         su2_lay.addWidget(self.lbl_su2_status)
         lay9.addWidget(su2_group)
         solver_group = QGroupBox("Решатель")
@@ -1267,7 +1267,7 @@ class MainWindow(QMainWindow):
         self.slider_cpu_load.setToolTip(cores_info_text)
         self.lbl_cpu_load_value = QLabel("50%")
         self.lbl_cpu_load_value.setStyleSheet(
-            "color: #0066cc; font-weight: bold; min-width: 40px;"
+            "color: #2E5A78; font-weight: bold; min-width: 40px;"
         )
         # Точный ручной override (спинбокс, 0 = «по слайдеру»)
         self.spin_cpu_cores = QSpinBox()
@@ -1290,8 +1290,8 @@ class MainWindow(QMainWindow):
         # Вычислитель: CPU / CPU + GPU
         self.combo_device = QComboBox()
         self.combo_device.addItems([
-            "🖥️  Только CPU (mpiexec)",
-            "🖥️+🎮 CPU + GPU (гибридный SU2)",
+            "Только CPU (mpiexec)",
+            "+CPU + GPU (гибридный SU2)",
         ])
         self.combo_device.setCurrentIndex(0)
         self.combo_device.setToolTip(
@@ -1310,7 +1310,7 @@ class MainWindow(QMainWindow):
         self.slider_gpu_load.setTickInterval(25)
         self.lbl_gpu_load_value = QLabel("50%")
         self.lbl_gpu_load_value.setStyleSheet(
-            "color: #9C27B0; font-weight: bold; min-width: 40px;"
+            "color: #2E5A78; font-weight: bold; min-width: 40px;"
         )
         gpu_load_lay = QHBoxLayout()
         gpu_load_lay.addWidget(self.slider_gpu_load, 1)
@@ -1380,7 +1380,7 @@ class MainWindow(QMainWindow):
 
         # Кнопка применения + индикатор
         cores_apply_lay = QHBoxLayout()
-        self.btn_apply_cores = QPushButton("✅ Применить")
+        self.btn_apply_cores = QPushButton("Готово: Применить")
         self.btn_apply_cores.setToolTip(
             "Подтвердить выбранные нагрузки CPU/GPU. "
             "Используется при следующем запуске расчёта."
@@ -1420,21 +1420,21 @@ class MainWindow(QMainWindow):
         lay9.addWidget(sweep_group)
         self.rb_single.toggled.connect(self.update_mode_ui)
         self.rb_sweep.toggled.connect(self.update_mode_ui)
-        self.btn_run = QPushButton("🚀 ЗАПУСТИТЬ РАСЧЁТ")
+        self.btn_run = QPushButton("ЗАПУСТИТЬ РАСЧЁТ")
         self.btn_run.clicked.connect(self.start_calculation)
         self.btn_run.setEnabled(False)
         lay9.addWidget(self.btn_run)
         pause_resume_lay = QHBoxLayout()
-        self.btn_pause = QPushButton("⏸ ПАУЗА")
+        self.btn_pause = QPushButton("ПАУЗА")
         self.btn_pause.clicked.connect(self.pause_calculation)
         self.btn_pause.setEnabled(False)
-        self.btn_resume = QPushButton("▶ ВОЗОБНОВИТЬ")
+        self.btn_resume = QPushButton("ВОЗОБНОВИТЬ")
         self.btn_resume.clicked.connect(self.resume_calculation)
         self.btn_resume.setEnabled(False)
         pause_resume_lay.addWidget(self.btn_pause)
         pause_resume_lay.addWidget(self.btn_resume)
         lay9.addLayout(pause_resume_lay)
-        self.btn_cancel = QPushButton("⛔ ОТМЕНА")
+        self.btn_cancel = QPushButton("ОТМЕНА")
         self.btn_cancel.clicked.connect(self.cancel_calculation)
         self.btn_cancel.setEnabled(False)
         lay9.addWidget(self.btn_cancel)
@@ -1444,7 +1444,7 @@ class MainWindow(QMainWindow):
         self.page_opt = QWidget()
         lay10 = QVBoxLayout(self.page_opt)
         lay10.setContentsMargins(10, 10, 10, 10)
-        self.btn_start_opt = QPushButton("🎯 ЗАПУСТИТЬ ОПТИМИЗАЦИЮ")
+        self.btn_start_opt = QPushButton("ЗАПУСТИТЬ ОПТИМИЗАЦИЮ")
         self.btn_start_opt.clicked.connect(self.run_geometric_optimization)
         lay10.addWidget(self.btn_start_opt)
         mp_group = QGroupBox("Многоточечная оптимизация")
@@ -1453,9 +1453,9 @@ class MainWindow(QMainWindow):
         self.points_table.setHorizontalHeaderLabels(["Режим", "AoA °", "Вес"])
         mp_lay.addWidget(self.points_table)
         mp_btns = QHBoxLayout()
-        btn_add_pt = QPushButton("➕ Добавить точку")
+        btn_add_pt = QPushButton("Добавить точку")
         btn_add_pt.clicked.connect(self.add_opt_point)
-        btn_load_preset_opt = QPushButton("📋 Пресет")
+        btn_load_preset_opt = QPushButton("Пресет")
         btn_load_preset_opt.clicked.connect(lambda: self.load_opt_points_preset("cruise"))
         mp_btns.addWidget(btn_add_pt)
         mp_btns.addWidget(btn_load_preset_opt)
@@ -1480,17 +1480,17 @@ class MainWindow(QMainWindow):
         self.doe_table.setSelectionMode(QTableWidget.ExtendedSelection)
         doe_lay.addWidget(self.doe_table)
         doe_btns = QHBoxLayout()
-        btn_doe_from_current = QPushButton("➕ Из текущих параметров")
+        btn_doe_from_current = QPushButton("Из текущих параметров")
         btn_doe_from_current.setToolTip(
             "Добавить строку со значениями из генератора крыла.")
         btn_doe_from_current.clicked.connect(self.add_doe_row_from_current)
-        btn_doe_add = QPushButton("➕ Ввести вручную…")
+        btn_doe_add = QPushButton("Ввести вручную…")
         btn_doe_add.clicked.connect(self.add_doe_row_dialog)
-        btn_doe_del = QPushButton("🗑 Удалить выбранное")
+        btn_doe_del = QPushButton("Удалить выбранное")
         btn_doe_del.clicked.connect(self.remove_doe_rows)
-        btn_doe_clear = QPushButton("🧹 Очистить")
+        btn_doe_clear = QPushButton("Очистить")
         btn_doe_clear.clicked.connect(self.clear_doe_table)
-        btn_doe_grid = QPushButton("🧮 Сетка вариантов…")
+        btn_doe_grid = QPushButton("Сетка вариантов…")
         btn_doe_grid.setToolTip(
             "Сгенерировать таблицу по диапазонам параметров: полный "
             "факторный план, варьирование по одному параметру или "
@@ -1527,7 +1527,7 @@ class MainWindow(QMainWindow):
         self.doe_results.horizontalHeader().setStretchLastSection(True)
         doe_lay.addWidget(self.doe_results)
         doe_run_lay = QHBoxLayout()
-        self.btn_start_doe = QPushButton("🔁 ЗАПУСТИТЬ ПЕРЕБОР")
+        self.btn_start_doe = QPushButton("ЗАПУСТИТЬ ПЕРЕБОР")
         self.btn_start_doe.setToolTip(
             "Прогнать все строки таблицы: каждая строка = один расчёт "
             "(геометрия перестраивается, сетка перегенерируется).")
@@ -1547,8 +1547,8 @@ class MainWindow(QMainWindow):
         self.trim_arm = QDoubleSpinBox(); self.trim_arm.setRange(0.1, 100.0); self.trim_arm.setValue(5.0); self.trim_arm.setSuffix(" м")
         self.trim_eff = QDoubleSpinBox(); self.trim_eff.setRange(0.001, 1.0); self.trim_eff.setValue(0.015); self.trim_eff.setDecimals(3)
         self.lbl_trim_result = QLabel("Расчет не производился")
-        self.lbl_trim_result.setStyleSheet("color: green; font-weight: bold; font-size: 13px;")
-        btn_calc_trim = QPushButton("⚖️ Рассчитать балансировку")
+        self.lbl_trim_result.setStyleSheet("color: #2E6B45; font-weight: bold; font-size: 13px;")
+        btn_calc_trim = QPushButton("Рассчитать балансировку")
         btn_calc_trim.clicked.connect(self.calculate_aerodynamic_trim)
         lay11.addWidget(QLabel("Плечо ГО (L_ht):"))
         lay11.addWidget(self.trim_arm)
@@ -1571,7 +1571,7 @@ class MainWindow(QMainWindow):
         self.chk_show_volume.stateChanged.connect(self.render_flow_scene)
         self.chk_show_arrows = QCheckBox("Стрелки скорости")
         self.chk_show_arrows.stateChanged.connect(self.render_flow_scene)
-        self.btn_show_flow = QPushButton("🌊 Визуализировать обтекание")
+        self.btn_show_flow = QPushButton("Визуализировать обтекание")
         self.btn_show_flow.clicked.connect(self.show_flow_field)
         self.btn_show_flow.setEnabled(False)
         v_lay.addRow("Карта поля:", self.combo_scalar)
@@ -1592,7 +1592,7 @@ class MainWindow(QMainWindow):
         ])
         self.history_table.horizontalHeader().setStretchLastSection(True)
         lay12.addWidget(self.history_table)
-        btn_clear_history = QPushButton("🗑 Очистить историю")
+        btn_clear_history = QPushButton("Очистить историю")
         btn_clear_history.clicked.connect(self.clear_generation_history)
         lay12.addWidget(btn_clear_history)
         self.settings_stack.addWidget(self.page_history)
@@ -1664,7 +1664,7 @@ class MainWindow(QMainWindow):
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["AoA", "Cl", "Cd", "Cm", "K", "Статус"])
         res_lay_in.addWidget(self.table)
-        self.btn_save_csv = QPushButton("💾 Экспорт поляры CSV")
+        self.btn_save_csv = QPushButton("Экспорт поляры CSV")
         self.btn_save_csv.clicked.connect(self.save_polar_csv)
         self.btn_save_csv.setEnabled(False)
         res_lay_in.addWidget(self.btn_save_csv)
@@ -1684,7 +1684,7 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         sb.addPermanentWidget(self.progress)
         self.lbl_status_time = QLabel("")
-        self.lbl_status_time.setStyleSheet("font-weight: bold; color: #004488; margin-right: 15px;")
+        self.lbl_status_time.setStyleSheet("font-weight: bold; color: #2E5A78; margin-right: 15px;")
         sb.addPermanentWidget(self.lbl_status_time)
         self.lbl_status_memory = QLabel("Memory: --")
         sb.addPermanentWidget(self.lbl_status_memory)
@@ -1705,7 +1705,7 @@ class MainWindow(QMainWindow):
         self.tree.setCurrentItem(self.item_global_defs)
         self.update_isa()
         self.update_mode_ui()
-        self.log_text.append("✅ AeroOpt v4.0 запущен.")
+        self.log_text.append("Готово: AeroOpt v4.0 запущен.")
         if hasattr(self, 'points_table'):
             self.load_opt_points_preset("cruise")
         self.set_calculation_buttons_enabled(run=False, pause=False,
@@ -1792,8 +1792,8 @@ class MainWindow(QMainWindow):
                 w.blockSignals(False)
         self.update_isa()
         self.log_text.append(
-            f"📋 Пресет полётных условий: {preset_name} "
-            f"(примените кнопкой «✅ Применить условия полёта»)"
+            f"Пресет полётных условий: {preset_name} "
+            f"(примените кнопкой «Готово: Применить условия полёта»)"
         )
 
     def on_flight_field_changed(self, *_args):
@@ -1817,7 +1817,7 @@ class MainWindow(QMainWindow):
             self.flight.name = "Ручной режим"
             self.flight.preset_name = ""
         self.log_text.append(
-            f"✅ Применены условия полёта: V={self.flight.speed_m_s:.1f} м/с, "
+            f"Готово: Применены условия полёта: V={self.flight.speed_m_s:.1f} м/с, "
             f"H={self.flight.altitude_m:.0f} м, AoA={self.flight.aoa_deg:.2f}° "
             f"({self.flight.name})"
         )
@@ -1831,7 +1831,7 @@ class MainWindow(QMainWindow):
         max_cores = getattr(self, "_cpu_cores_max", None)
         if max_cores and new_value > max_cores:
             self.log_text.append(
-                f"⚠️ Запрошено {new_value} ядер, "
+                f"Внимание: Запрошено {new_value} ядер, "
                 f"но физически доступно {max_cores}. "
                 f"Применяю {max_cores}."
             )
@@ -1845,7 +1845,7 @@ class MainWindow(QMainWindow):
             self.lbl_cores_status.setText(suffix)
         except Exception:
             pass
-        self.log_text.append(f"✅ Применено количество ядер CPU: {new_value}")
+        self.log_text.append(f"Готово: Применено количество ядер CPU: {new_value}")
 
     # ------------------------------------------------------------------
     # Нагрузка CPU/GPU через слайдеры процентов
@@ -2068,7 +2068,7 @@ class MainWindow(QMainWindow):
             gpus = self._detect_gpus()
             if not gpus:
                 self.log_text.append(
-                    "⚠️ GPU не обнаружены (нет nvidia-smi / rocm-smi / видеокарты). "
+                    "Внимание: GPU не обнаружены (нет nvidia-smi / rocm-smi / видеокарты). "
                     "Будет использован чистый CPU."
                 )
                 device = "cpu"
@@ -2090,14 +2090,14 @@ class MainWindow(QMainWindow):
         # Подсказка, что нужно для реального гибридного запуска
         if device == "cpu_gpu":
             self.log_text.append(
-                "🎮 Гибридный режим: SU2_CFD должен быть собран с "
+                "Гибридный режим: SU2_CFD должен быть собран с "
                 "-DENABLE_CUDA=ON (NVIDIA) или -DENABLE_HIP=ON (AMD), "
                 "а solver/workers.py — формировать команду с "
                 "`mpiexec -gpu` (Microsoft MPI) или "
                 "`OMP_TARGET_OFFLOAD=MANDATORY` (OpenMP offload)."
             )
         self.log_text.append(
-            f"✅ Применено: {cores} ядер CPU ({self._cpu_load_percent()}%)"
+            f"Готово: Применено: {cores} ядер CPU ({self._cpu_load_percent()}%)"
             f"{(' · GPU ' + str(self._gpu_load_percent()) + '%' + gpu_info) if device == 'cpu_gpu' else ''}"
         )
         # Обновляем индикатор
@@ -2163,7 +2163,7 @@ class MainWindow(QMainWindow):
                 logger.info("Активация успешна: %s", message)
                 QMessageBox.information(
                     self, "Активация лицензии",
-                    f"✅ Лицензия успешно активирована.\n\n{message}")
+                    f"Готово: Лицензия успешно активирована.\n\n{message}")
                 # Обновить индикатор лицензии в главном окне, если такой
                 # метод есть (имена в разных версиях UI могут отличаться)
                 for meth in ("_update_license_status",
@@ -2183,7 +2183,7 @@ class MainWindow(QMainWindow):
                 logger.warning("Активация отклонена: %s", message)
                 QMessageBox.warning(
                     self, "Активация лицензии",
-                    f"❌ Не удалось активировать ключ.\n\n{message}\n\n"
+                    f"Не удалось активировать ключ.\n\n{message}\n\n"
                     "Если ключ введён верно, но ошибка повторяется — "
                     "напишите на sales@aeroopt.app "
                     "(с приложением лога сессии).")
@@ -2219,7 +2219,7 @@ class MainWindow(QMainWindow):
             text += f"Последний heartbeat: {time.strftime('%Y-%m-%d %H:%M', time.localtime(info['last_heartbeat']))}\n"
         # Пробуем сделать heartbeat прямо сейчас
         ok, hb_msg = self._license.heartbeat()
-        text += f"\nHeartbeat: {'✅ ' + hb_msg if ok else '⛔ ' + hb_msg}"
+        text += f"\nHeartbeat: {'Готово: ' + hb_msg if ok else '' + hb_msg}"
         QMessageBox.information(self, "Статус лицензии", text)
 
     def _deactivate_license(self):
@@ -2245,9 +2245,9 @@ class MainWindow(QMainWindow):
         if ok:
             QMessageBox.information(
                 self, "Отвязка",
-                "✅ Лицензия отвязана. Закройте приложение."
+                "Готово: Лицензия отвязана. Закройте приложение."
             )
-            self.log_text.append("🔌 Лицензия отвязана")
+            self.log_text.append("Лицензия отвязана")
         else:
             QMessageBox.warning(
                 self, "Ошибка",
@@ -2264,7 +2264,7 @@ class MainWindow(QMainWindow):
         if axis not in ("xy", "xz", "yz"):
             return
         if any(p["axis"] == axis for p in self._symmetry_planes):
-            self.log_text.append(f"⚠️ Плоскость {axis.upper()} уже добавлена.")
+            self.log_text.append(f"Внимание: Плоскость {axis.upper()} уже добавлена.")
             return
 
         # Диалог смещения
@@ -2282,7 +2282,7 @@ class MainWindow(QMainWindow):
         self._rebuild_symmetry_list()
         self._update_symmetry_3d()
         suffix = f" (смещение {offset:+.2f}м)" if abs(offset) > 0.001 else ""
-        self.log_text.append(f"✅ Добавлена плоскость {axis.upper()}{suffix}")
+        self.log_text.append(f"Готово: Добавлена плоскость {axis.upper()}{suffix}")
 
     def _remove_symmetry_plane(self, axis: str):
         """Удаляет плоскость симметрии."""
@@ -2297,7 +2297,7 @@ class MainWindow(QMainWindow):
                 break
         self._rebuild_symmetry_list()
         self._update_symmetry_3d()
-        self.log_text.append(f"🗑 Удалена плоскость {axis.upper()}")
+        self.log_text.append(f"Удалена плоскость {axis.upper()}")
 
     def _rebuild_symmetry_list(self):
         while self.sym_list_layout.count():
@@ -2361,7 +2361,7 @@ class MainWindow(QMainWindow):
                     show_edges=True, edge_color="#1A1A1A",
                     name=f"symmetry_{p['axis']}")
             except Exception as e:
-                self.log_text.append(f"⚠️ Не удалось отрисовать плоскость {p['axis']}: {e}")
+                self.log_text.append(f"Внимание: Не удалось отрисовать плоскость {p['axis']}: {e}")
         try:
             self.plotter.render()
         except Exception:
@@ -2411,7 +2411,7 @@ class MainWindow(QMainWindow):
                     self.check_su2_connection()
             else:
                 self.log_text.append(
-                    "⚠️ Первоначальная настройка пропущена. SU2 можно настроить позже "
+                    "Внимание: Первоначальная настройка пропущена. SU2 можно настроить позже "
                     "в разделе Solver Settings.")
 
     def browse_su2_exe(self):
@@ -2426,14 +2426,14 @@ class MainWindow(QMainWindow):
         config.save()
         self.lbl_su2_status.setText("Статус: путь сохранён")
         self.lbl_su2_status.setStyleSheet("color: #2c4257; font-style: italic;")
-        self.log_text.append(f"💾 Путь к SU2 сохранён: {config.su2_exe}")
+        self.log_text.append(f"Путь к SU2 сохранён: {config.su2_exe}")
 
     def check_su2_connection(self):
         import subprocess
         path = self.txt_su2_path.text().strip()
         if not path or not os.path.exists(path):
-            self.lbl_su2_status.setText("Статус: файл не найден ❌")
-            self.lbl_su2_status.setStyleSheet("color: red; font-weight: bold;")
+            self.lbl_su2_status.setText("Статус: файл не найден Ошибка: ")
+            self.lbl_su2_status.setStyleSheet("color: #9B2C2C; font-weight: bold;")
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)
         self.lbl_su2_status.setText("Статус: проверка...")
@@ -2449,11 +2449,11 @@ class MainWindow(QMainWindow):
             ok = False
         QApplication.restoreOverrideCursor()
         if ok:
-            self.lbl_su2_status.setText("Статус: SU2 доступен ✅")
-            self.lbl_su2_status.setStyleSheet("color: green; font-weight: bold;")
+            self.lbl_su2_status.setText("Статус: SU2 доступен Готово: ")
+            self.lbl_su2_status.setStyleSheet("color: #2E6B45; font-weight: bold;")
         else:
-            self.lbl_su2_status.setText("Статус: SU2 не запускается ❌")
-            self.lbl_su2_status.setStyleSheet("color: red; font-weight: bold;")
+            self.lbl_su2_status.setText("Статус: SU2 не запускается Ошибка: ")
+            self.lbl_su2_status.setStyleSheet("color: #9B2C2C; font-weight: bold;")
 
     def install_su2_automatically(self):
         install_dir = os.path.join(os.path.expanduser("~"), ".aeroopt", "SU2")
@@ -2481,13 +2481,13 @@ class MainWindow(QMainWindow):
             self.txt_su2_path.setText(path_or_msg)
             config.su2_exe = path_or_msg
             config.save()
-            self.lbl_su2_status.setText("Статус: SU2 установлен ✅")
-            self.lbl_su2_status.setStyleSheet("color: green; font-weight: bold;")
-            self.log_text.append(f"✅ SU2 установлен: {path_or_msg}")
+            self.lbl_su2_status.setText("Статус: SU2 установлен Готово: ")
+            self.lbl_su2_status.setStyleSheet("color: #2E6B45; font-weight: bold;")
+            self.log_text.append(f"Готово: SU2 установлен: {path_or_msg}")
             self.check_su2_connection()
         else:
-            self.lbl_su2_status.setText("Статус: ошибка установки ❌")
-            self.lbl_su2_status.setStyleSheet("color: red; font-weight: bold;")
+            self.lbl_su2_status.setText("Статус: ошибка установки Ошибка: ")
+            self.lbl_su2_status.setStyleSheet("color: #9B2C2C; font-weight: bold;")
             QMessageBox.critical(self, "Установка SU2", path_or_msg)
 
     # =============================================================
@@ -2625,7 +2625,7 @@ class MainWindow(QMainWindow):
         }
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        self.log_text.append(f"💾 Проект сохранён: {path}")
+        self.log_text.append(f"Проект сохранён: {path}")
         self.project_saved = True
 
     def load_project(self):
@@ -2656,7 +2656,7 @@ class MainWindow(QMainWindow):
                     })
                     self.next_body_id += 1
                 except Exception as e:
-                    self.log_text.append(f"⚠️ Не загружено {item.get('name')}: {e}")
+                    self.log_text.append(f"Внимание: Не загружено {item.get('name')}: {e}")
         wbp = data.get("wing_box_params", {})
         if wbp:
             self.wbox_cx.setValue(wbp.get("cx", 2.5))
@@ -2673,7 +2673,7 @@ class MainWindow(QMainWindow):
                 self.rule_set = RuleSet.from_dict(rs_data)
                 self.update_rules_table()
             except Exception as e:
-                self.log_text.append(f"⚠️ Ошибка загрузки правил: {e}")
+                self.log_text.append(f"Внимание: Ошибка загрузки правил: {e}")
         if hasattr(self, 'points_table'):
             self.points_table.setRowCount(0)
             for pt in data.get("opt_points", []):
@@ -2798,7 +2798,7 @@ class MainWindow(QMainWindow):
         self.update_bodies_table()
         # камеру НЕ сбрасываем — оставляем как было до загрузки
         QApplication.restoreOverrideCursor()
-        self.log_text.append(f"📂 Проект загружен: {path}")
+        self.log_text.append(f"Проект загружен: {path}")
         self.project_saved = True
 
     # =============================================================
@@ -2807,11 +2807,11 @@ class MainWindow(QMainWindow):
     def on_mesh_quality_changed(self, *args):
         q = self.combo_mesh_quality.currentText()
         if "Грубая" in q:
-            self.lbl_mesh_info.setText("⏱ ~15-30 сек")
+            self.lbl_mesh_info.setText("~15-30 сек")
         elif "Точная" in q:
-            self.lbl_mesh_info.setText("⏱ ~2-5 мин")
+            self.lbl_mesh_info.setText("~2-5 мин")
         else:
-            self.lbl_mesh_info.setText("⏱ ~30-60 сек")
+            self.lbl_mesh_info.setText("~30-60 сек")
 
     def select_and_highlight_body(self, index):
         self.current_selected_body_index = index
@@ -2874,7 +2874,7 @@ class MainWindow(QMainWindow):
         self.wbox_ly.setValue(max(2.0, 1.15 * length))
         self.wbox_lz.setValue(max(0.4, 1.2 * height))
         self.preview_wing_box()
-        self.log_text.append("📦 Область крыла заполнена по фюзеляжу.")
+        self.log_text.append("Область крыла заполнена по фюзеляжу.")
 
     def _get_wing_box_bounds(self):
         cx, cy, cz = self.wbox_cx.value(), self.wbox_cy.value(), self.wbox_cz.value()
@@ -2937,7 +2937,7 @@ class MainWindow(QMainWindow):
             oy = self.w_pos_y.value()
             oz = self.w_pos_z.value()
             self.log_text.append(
-                f"📏 RefData: Lref={ref_length:.3f}, Sref={ref_area:.3f}, "
+                f"RefData: Lref={ref_length:.3f}, Sref={ref_area:.3f}, "
                 f"O=({ox:.3f}, {oy:.3f}, {oz:.3f})")
             return (ref_length, ref_area, ox, oy, oz)
         bounds = [b["mesh"].bounds for b in self.bodies if b.get("mesh") is not None]
@@ -2954,10 +2954,10 @@ class MainWindow(QMainWindow):
             oy = 0.5 * (y_min + y_max)
             oz = 0.5 * (z_min + z_max)
             self.log_text.append(
-                f"⚠️ Крыла нет, RefData по габаритам: Lref={ref_length:.3f}, "
+                f"Внимание: Крыла нет, RefData по габаритам: Lref={ref_length:.3f}, "
                 f"Sref={ref_area:.3f}")
             return (ref_length, ref_area, ox, oy, oz)
-        self.log_text.append("⚠️ RefData не вычислены, по умолчанию 1.0/1.0")
+        self.log_text.append("Внимание: RefData не вычислены, по умолчанию 1.0/1.0")
         return (1.0, 1.0, 0.25, 0.0, 0.0)
 
     # =============================================================
@@ -2981,14 +2981,14 @@ class MainWindow(QMainWindow):
         try:
             solids = cad_inspect(path, log=lambda m: self.log_text.append(m))
         except Exception as e:
-            self.log_text.append(f"  ℹ️ Разбор сборки недоступен: {e}")
+            self.log_text.append(f"  Разбор сборки недоступен: {e}")
             return False
         if len(solids) <= 1:
-            self.log_text.append("  ℹ️ В файле одно тело — импорт без разбора")
+            self.log_text.append("  В файле одно тело — импорт без разбора")
             return False
         vols = "; ".join(f"{s_.get('name') or ('тело ' + str(s_['tag']))}"
                          f" V={s_.get('volume', 0.0):.4g}" for s_ in solids[:6])
-        self.log_text.append(f"  🧩 Сборка из {len(solids)} тел: {vols}")
+        self.log_text.append(f"  Сборка из {len(solids)} тел: {vols}")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             parts = cad_split_to_stl(
@@ -2996,7 +2996,7 @@ class MainWindow(QMainWindow):
                 log=lambda m: self.log_text.append(m))
         except Exception as e:
             QApplication.restoreOverrideCursor()
-            self.log_text.append(f"  ⚠️ Не удалось разобрать сборку: {e}")
+            self.log_text.append(f"  Внимание: Не удалось разобрать сборку: {e}")
             return False
         QApplication.restoreOverrideCursor()
         if not parts:
@@ -3009,7 +3009,7 @@ class MainWindow(QMainWindow):
                     f" ({part['triangles']} тр.)")
         self.update_bodies_table()
         self.update_flow_arrow()
-        self.log_text.append(f"✅ Сборка импортирована по телам: {len(parts)}")
+        self.log_text.append(f"Готово: Сборка импортирована по телам: {len(parts)}")
         return True
 
     def add_bodies(self):
@@ -3028,7 +3028,7 @@ class MainWindow(QMainWindow):
             # ТЗ п.4: многодетальная сборка раскладывается на отдельные
             # тела — иначе детали сливаются в одну и теряют имена.
             self.log_text.append(
-                f"🔄 Direct CAD Import: {os.path.basename(path)} ({ext})")
+                f"Direct CAD Import: {os.path.basename(path)} ({ext})")
             os.makedirs(WORK_DIR_BASE, exist_ok=True)
             if self.chk_cad_split.isChecked() and self._cad_try_split(path, role):
                 return
@@ -3038,11 +3038,11 @@ class MainWindow(QMainWindow):
             try:
                 cad_to_stl(path, stl_path,
                            log=lambda m: self.log_text.append(m))
-                self.log_text.append(f"  ✅ CAD → STL: {stl_path}")
+                self.log_text.append(f"  Готово: CAD → STL: {stl_path}")
                 path = stl_path
             except Exception as e:
                 QApplication.restoreOverrideCursor()
-                self.log_text.append(f"❌ Ошибка импорта CAD: {e}")
+                self.log_text.append(f"Ошибка импорта CAD: {e}")
                 QMessageBox.critical(
                     self, "Ошибка чтения CAD-формата",
                     f"Не удалось импортировать {ext}-файл: {e}\n\n"
@@ -3063,10 +3063,10 @@ class MainWindow(QMainWindow):
             })
             self.next_body_id += 1
             self.update_bodies_table()
-            self.log_text.append(f"✅ Загружен: {os.path.basename(source_path)}")
+            self.log_text.append(f"Готово: Загружен: {os.path.basename(source_path)}")
             self.invalidate_mesh("загружен новый STL")
         except Exception as e:
-            self.log_text.append(f"❌ Ошибка загрузки: {e}")
+            self.log_text.append(f"Ошибка загрузки: {e}")
             if ext in CAD_EXTENSIONS:
                 QMessageBox.critical(self, "Ошибка чтения CAD-формата",
                                      f"Не удалось импортировать {ext}-файл напрямую. "
@@ -3119,7 +3119,7 @@ class MainWindow(QMainWindow):
                     self.wbox_lz.setValue(z_max - z_min)
                     self.preview_wing_box()
                     self.log_text.append(
-                        f"📦 Область генерации адаптирована под деталь '{b['name']}'.")
+                        f"Область генерации адаптирована под деталь '{b['name']}'.")
                 break
 
     def remove_body(self):
@@ -3172,7 +3172,7 @@ class MainWindow(QMainWindow):
         body = self.bodies[idx]
         mesh = body["mesh"]
         original_count = mesh.n_cells
-        self.log_text.append(f"✂️ Упрощение '{body['name']}' ({original_count} граней)...")
+        self.log_text.append(f"Упрощение '{body['name']}' ({original_count} граней)...")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             if level == "simple":
@@ -3183,9 +3183,9 @@ class MainWindow(QMainWindow):
                 simplified = mesh.decimate(target_reduction=0.70)
                 if simplified.n_points > 10:
                     simplified = simplified.smooth(n_iter=3, relaxation_factor=0.05)
-            self.log_text.append(f"  ✅ {original_count} → {simplified.n_cells} граней")
+            self.log_text.append(f"  Готово: {original_count} → {simplified.n_cells} граней")
             if simplified.n_cells == 0:
-                self.log_text.append("  ❌ После упрощения 0 граней")
+                self.log_text.append("  Ошибка: После упрощения 0 граней")
                 return
             if body.get("actor"):
                 self.plotter.remove_actor(body["actor"])
@@ -3200,7 +3200,7 @@ class MainWindow(QMainWindow):
             self.plotter.render()
             self.invalidate_mesh("геометрия упрощена")
         except Exception as e:
-            self.log_text.append(f"  ❌ Ошибка упрощения: {e}")
+            self.log_text.append(f"  Ошибка упрощения: {e}")
         QApplication.restoreOverrideCursor()
 
     # =============================================================
@@ -3248,7 +3248,7 @@ class MainWindow(QMainWindow):
         try:
             mesh = create_primitive(shape_type, params, pos)
         except Exception as e:
-            self.log_text.append(f"❌ Ошибка создания примитива: {e}")
+            self.log_text.append(f"Ошибка создания примитива: {e}")
             return
         os.makedirs(WORK_DIR_BASE, exist_ok=True)
         prim_id = self.next_body_id
@@ -3264,14 +3264,14 @@ class MainWindow(QMainWindow):
         self.next_body_id += 1
         self.update_bodies_table()
         # КАМЕРУ НЕ СБРАСЫВАЕМ
-        self.log_text.append(f"✅ Примитив '{shape_type}' создан ({role})")
+        self.log_text.append(f"Готово: Примитив '{shape_type}' создан ({role})")
 
     # =============================================================
     # ГЕНЕРАЦИЯ ГЕОМЕТРИИ
     # =============================================================
     def generate_fuselage(self):
         try:
-            self.log_text.append("⚙️ Генерация фюзеляжа...")
+            self.log_text.append("Генерация фюзеляжа...")
             QApplication.setOverrideCursor(Qt.WaitCursor)
             L = self.f_length.value()
             D = self.f_diameter.value()
@@ -3349,10 +3349,10 @@ class MainWindow(QMainWindow):
             self.update_bodies_table()
             # КАМЕРУ НЕ СБРАСЫВАЕМ
             self.plotter.render()
-            self.log_text.append(f"✅ Фюзеляж: L={L:.2f} м, D={D:.2f} м")
+            self.log_text.append(f"Готово: Фюзеляж: L={L:.2f} м, D={D:.2f} м")
             self.invalidate_mesh("сгенерирован новый фюзеляж")
         except Exception as e:
-            self.log_text.append(f"❌ Ошибка генерации фюзеляжа: {e}")
+            self.log_text.append(f"Ошибка генерации фюзеляжа: {e}")
         QApplication.restoreOverrideCursor()
 
     def generate_wing_mesh_parametric(self, span, chord_root, chord_tip,
@@ -3448,12 +3448,12 @@ class MainWindow(QMainWindow):
                 self.update_history_table()
             if not silent:
                 self.log_text.append(
-                    f"✅ Крыло сгенерировано! (размах {span:.2f}м, хорда {chord_root:.2f}м)")
+                    f"Готово: Крыло сгенерировано! (размах {span:.2f}м, хорда {chord_root:.2f}м)")
                 if self.flap_enabled.isChecked():
-                    self.log_text.append("ℹ️ Сгенерированы механизированные закрылки.")
+                    self.log_text.append("Сгенерированы механизированные закрылки.")
                 self.invalidate_mesh("сгенерировано новое крыло")
         except Exception as e:
-            self.log_text.append(f"❌ Ошибка генерации крыла: {e}")
+            self.log_text.append(f"Ошибка генерации крыла: {e}")
 
     def generate_horizontal_stabilizer(self):
         try:
@@ -3465,7 +3465,7 @@ class MainWindow(QMainWindow):
                 self.hs_pos_z.setValue((bounds[4] + bounds[5]) * 0.5)
                 self.hs_span.setValue(max(1.5, length * 0.35))
                 self.hs_chord.setValue(max(0.3, length * 0.10))
-                self.log_text.append("📐 ГО автоподстроено по фюзеляжу")
+                self.log_text.append("ГО автоподстроено по фюзеляжу")
             for b in self.bodies:
                 if b["role"] in ("h_stab", "elevator") and b.get("actor"):
                     self.plotter.remove_actor(b["actor"])
@@ -3561,10 +3561,10 @@ class MainWindow(QMainWindow):
             # Не вызываем plotter.render() здесь — пользователь останется
             # на своём ракурсе (ГО/ВО генерируется поверх уже видимой геометрии).
             self.log_text.append(
-                f"✅ ГО и руль высоты сгенерированы! Отклонение руля: {elev_deflection:.1f}°")
+                f"Готово: ГО и руль высоты сгенерированы! Отклонение руля: {elev_deflection:.1f}°")
             self.invalidate_mesh("сгенерировано горизонтальное оперение")
         except Exception as e:
-            self.log_text.append(f"❌ Ошибка генерации ГО: {e}")
+            self.log_text.append(f"Ошибка генерации ГО: {e}")
 
     def generate_vertical_stabilizer(self):
         try:
@@ -3620,10 +3620,10 @@ class MainWindow(QMainWindow):
             self.next_body_id += 1
             self.update_bodies_table()
             # Не вызываем plotter.render() — пользователь остаётся на своём ракурсе.
-            self.log_text.append(f"✅ ВО: H={height:.1f}м, chord={chord:.2f}м")
+            self.log_text.append(f"Готово: ВО: H={height:.1f}м, chord={chord:.2f}м")
             self.invalidate_mesh("сгенерировано вертикальное оперение")
         except Exception as e:
-            self.log_text.append(f"❌ Ошибка генерации ВО: {e}")
+            self.log_text.append(f"Ошибка генерации ВО: {e}")
 
     def export_component(self, role):
         comp = next((b for b in self.bodies if b["role"] == role), None)
@@ -3635,7 +3635,7 @@ class MainWindow(QMainWindow):
             self, f"Экспорт {ROLES.get(role, role)}", f"{role}.stl", "STL (*.stl)")
         if path:
             comp["mesh"].save(path)
-            self.log_text.append(f"💾 Экспортировано: {path}")
+            self.log_text.append(f"Экспортировано: {path}")
 
     def export_fuselage(self):
         fuselage = next((b for b in self.bodies if b["role"] == "fuselage"), None)
@@ -3646,7 +3646,7 @@ class MainWindow(QMainWindow):
                                               "fuselage.stl", "STL (*.stl)")
         if path:
             fuselage["mesh"].save(path)
-            self.log_text.append(f"💾 Фюзеляж экспортирован: {path}")
+            self.log_text.append(f"Фюзеляж экспортирован: {path}")
 
     def export_wing(self):
         wing = next((b for b in self.bodies if b["role"] == "wing"), None)
@@ -3657,11 +3657,11 @@ class MainWindow(QMainWindow):
                                               "STL (*.stl)")
         if path:
             wing["mesh"].save(path)
-            self.log_text.append(f"💾 Крыло экспортировано: {path}")
+            self.log_text.append(f"Крыло экспортировано: {path}")
 
     def generate_full_aircraft(self):
         try:
-            self.log_text.append("🚀 Генерация полного самолёта...")
+            self.log_text.append("Генерация полного самолёта...")
             if not self._get_fuselage_body():
                 self.generate_fuselage()
             self.fill_wing_box_from_fuselage()
@@ -3670,9 +3670,9 @@ class MainWindow(QMainWindow):
             self.generate_horizontal_stabilizer()
             self.generate_vertical_stabilizer()
             # КАМЕРУ НЕ СБРАСЫВАЕМ
-            self.log_text.append("✅ Полный самолёт сгенерирован!")
+            self.log_text.append("Готово: Полный самолёт сгенерирован!")
         except Exception as e:
-            self.log_text.append(f"❌ Ошибка генерации самолёта: {e}")
+            self.log_text.append(f"Ошибка генерации самолёта: {e}")
 
     def auto_suggest_wing_params(self):
         fuselage = self._get_fuselage_body()
@@ -3693,12 +3693,12 @@ class MainWindow(QMainWindow):
         self.w_pos_x.setValue(bounds[0] + length * 0.4)
         self.w_pos_y.setValue(0.0)
         self.w_pos_z.setValue((bounds[4] + bounds[5]) / 2.0)
-        self.log_text.append(f"🎯 Автоподбор крыла: размах {span:.2f} м, "
+        self.log_text.append(f"Автоподбор крыла: размах {span:.2f} м, "
                              f"корень {chord_root:.2f} м")
         try:
             self.generate_wing_mesh_parametric(span, chord_root, chord_tip)
         except Exception as e:
-            self.log_text.append(f"  ⚠️ Ошибка генерации: {e}")
+            self.log_text.append(f"  Внимание: Ошибка генерации: {e}")
 
     def heal_selected_stl(self):
         idx = self.bodies_table.currentRow()
@@ -3707,7 +3707,7 @@ class MainWindow(QMainWindow):
         body = self.bodies[idx]
         def log(msg):
             self.log_text.append(msg)
-        log(f"\n🏥 Лечение: {body['name']}")
+        log(f"\nЛечение: {body['name']}")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         ok, msg, healed_path = heal_stl_mesh(body["path"], log_callback=log,
                                              work_dir=WORK_DIR_BASE)
@@ -3723,15 +3723,15 @@ class MainWindow(QMainWindow):
                 body["path"] = healed_path
                 self.plotter.render()
             except Exception as e:
-                log(f"⚠️ Не удалось обновить сцену: {e}")
+                log(f"Внимание: Не удалось обновить сцену: {e}")
         report = f"=== ОТЧЁТ О ЛЕЧЕНИИ ===\n\nФайл: {body['name']}\n{msg}"
         if ok and healed_path and os.path.exists(healed_path):
             nm = pv.read(healed_path)
             report += (f"\n\nПосле лечения:\n  Вершин: {nm.n_points}\n"
                        f"  Граней: {nm.n_cells}\n  Открытых рёбер: {nm.n_open_edges}")
-        dlg = HealReportDialog("🏥 Отчёт о лечении STL", report, self)
+        dlg = HealReportDialog("Отчёт о лечении STL", report, self)
         dlg.exec_()
-        log("✅ Готово")
+        log("Готово")
 
     # =============================================================
     # ПРОВЕРКА СЕТКИ
@@ -3793,7 +3793,7 @@ class MainWindow(QMainWindow):
                                  msg + "\n\nПостройте сетку заново.")
             self.mesh_ready = False
             return False
-        self.log_text.append(f"✅ Проверка сетки: {msg}")
+        self.log_text.append(f"Готово: Проверка сетки: {msg}")
         return True
 
     def invalidate_mesh(self, reason="геометрия изменена"):
@@ -3801,7 +3801,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "btn_run"):
             self.btn_run.setEnabled(False)
             self.ribbon_btn_run.setEnabled(False)
-        self.log_text.append(f"⚠️ Сетка устарела: {reason}. "
+        self.log_text.append(f"Внимание: Сетка устарела: {reason}. "
                              "Нужно построить сетку заново.")
 
     # =============================================================
@@ -3829,7 +3829,7 @@ class MainWindow(QMainWindow):
         stl_paths = []
         t_save_start = time.time()
         self.log_text.append("\n" + "=" * 50)
-        self.log_text.append("🔧 ПОСТРОЕНИЕ РАСЧЁТНОЙ СЕТКИ")
+        self.log_text.append("ПОСТРОЕНИЕ РАСЧЁТНОЙ СЕТКИ")
         self.log_text.append(f"   Старт: {datetime.now().strftime('%H:%M:%S')}, "
                              f"компонентов: {len(visible)}, "
                              f"качество: {self.combo_mesh_quality.currentText()}")
@@ -3840,21 +3840,21 @@ class MainWindow(QMainWindow):
                 b["mesh"].save(path)
                 stl_paths.append(path)
                 self.log_text.append(
-                    f"  ✅ {b['name']} ({b['mesh'].n_cells} граней) → {path}"
+                    f"  Готово: {b['name']} ({b['mesh'].n_cells} граней) → {path}"
                 )
             except Exception as e:
-                self.log_text.append(f"  ❌ {b['name']}: {e}")
+                self.log_text.append(f"  Ошибка: {b['name']}: {e}")
         if not stl_paths:
             QMessageBox.critical(self, "Ошибка", "Не удалось сохранить геометрию.")
             self.btn_make_mesh.setEnabled(True)
             self.ribbon_btn_mesh.setEnabled(True)
             return
         self.log_text.append(
-            f"  ⏱ Сохранение STL заняло {time.time() - t_save_start:.1f}с"
+            f"  Сохранение STL заняло {time.time() - t_save_start:.1f}с"
         )
         quality = self.combo_mesh_quality.currentText()
-        self.log_text.append(f"\n⚙️ Качество: {quality}")
-        self.log_text.append("🔄 Генерация в фоновом режиме (UI не зависает)…")
+        self.log_text.append(f"\nКачество: {quality}")
+        self.log_text.append("Генерация в фоновом режиме (UI не зависает)…")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         self._meshing = True
         self._mesh_start_time = time.time()
@@ -3862,8 +3862,8 @@ class MainWindow(QMainWindow):
         self._last_logged_pct = -1
         self.progress.setVisible(True)
         self.progress.setValue(0)
-        self.lbl_su2_status.setText("⏳ Генерация расчетной сетки...")
-        self.lbl_su2_status.setStyleSheet("color: blue; font-style: italic;")
+        self.lbl_su2_status.setText("Генерация расчетной сетки...")
+        self.lbl_su2_status.setStyleSheet("color: #2E5A78; font-style: italic;")
         # === T1: пробрасываем плоскости симметрии в MeshWorker ==========
         # Источник — список плоскостей из 3D-инструмента. Если список
         # пуст, fallback на старый флаг chk_use_symmetry (XZ).
@@ -3905,13 +3905,13 @@ class MainWindow(QMainWindow):
                 else 0.3 * remain + 0.7 * self._eta_ema
             mins = int(self._eta_ema // 60)
             secs = int(self._eta_ema % 60)
-            self.lbl_status_time.setText(f"⏳ Осталось: {mins}м {secs}с")
+            self.lbl_status_time.setText(f"Осталось: {mins}м {secs}с")
             # Подробный лог: первый раз при <5%, потом каждые ~20%
             if not hasattr(self, "_last_logged_pct"):
                 self._last_logged_pct = -1
             if percent - self._last_logged_pct >= 20 or percent < 5:
                 self.log_text.append(
-                    f"  ⏳ [{int(elapsed):02d}с] {stage} — {percent}%, "
+                    f"  [{int(elapsed):02d}с] {stage} — {percent}%, "
                     f"осталось ~{mins}м {secs:02d}с"
                 )
                 self._last_logged_pct = percent
@@ -3933,7 +3933,7 @@ class MainWindow(QMainWindow):
             self.log_text.append("\n" + "=" * 50)
             elapsed = time.time() - self._mesh_start_time
             self.log_text.append(
-                f"✅ {msg}  (время: {int(elapsed)}с)"
+                f"Готово: {msg}  (время: {int(elapsed)}с)"
             )
             self.log_text.append("=" * 50)
             valid, valid_msg = self._validate_mesh_file()
@@ -3944,7 +3944,7 @@ class MainWindow(QMainWindow):
                 self.ribbon_btn_mesh.setEnabled(True)
                 return
             self.mesh_ready = True
-            self.log_text.append(f"✅ {valid_msg}")
+            self.log_text.append(f"Готово: {valid_msg}")
             # Размер mesh.su2
             try:
                 sz = os.path.getsize(MESH_FILE)
@@ -3952,7 +3952,7 @@ class MainWindow(QMainWindow):
                     sz_str = f"{sz / (1024 * 1024):.1f} МБ"
                 else:
                     sz_str = f"{sz / 1024:.0f} КБ"
-                self.log_text.append(f"📦 Размер mesh.su2: {sz_str}")
+                self.log_text.append(f"Размер mesh.su2: {sz_str}")
             except Exception:
                 pass
             try:
@@ -3969,26 +3969,26 @@ class MainWindow(QMainWindow):
                             mesh_preview, color="lightblue", opacity=0.15,
                             show_edges=True, name="volume_mesh")
                         self.log_text.append(
-                            f"👁 Отображена сетка: {mesh_preview.n_cells} ячеек")
+                            f"Отображена сетка: {mesh_preview.n_cells} ячеек")
                     except Exception as e:
-                        self.log_text.append(f"⚠️ Не удалось загрузить preview: {e}")
+                        self.log_text.append(f"Внимание: Не удалось загрузить preview: {e}")
                 # T1-визуал: перерисовать плоскости симметрии после очистки
                 if hasattr(self, "_symmetry_planes") and self._symmetry_planes:
                     self._update_symmetry_3d()
                 # КАМЕРУ НЕ СБРАСЫВАЕМ
             except Exception as e:
-                self.log_text.append(f"⚠️ Ошибка визуализации: {e}")
+                self.log_text.append(f"Внимание: Ошибка визуализации: {e}")
             self.btn_run.setEnabled(True)
             self.ribbon_btn_run.setEnabled(True)
             self.btn_show_flow.setEnabled(False)
-            self.lbl_su2_status.setText("✅ Сетка успешно построена")
-            self.lbl_su2_status.setStyleSheet("color: green; font-weight: bold;")
+            self.lbl_su2_status.setText("Готово: Сетка успешно построена")
+            self.lbl_su2_status.setStyleSheet("color: #2E6B45; font-weight: bold;")
         else:
             self.log_text.append("\n" + "=" * 50)
-            self.log_text.append(f"❌ {msg}")
+            self.log_text.append(f"Ошибка: {msg}")
             self.log_text.append("=" * 50)
-            self.lbl_su2_status.setText("❌ Ошибка построения сетки!")
-            self.lbl_su2_status.setStyleSheet("color: red; font-weight: bold;")
+            self.lbl_su2_status.setText("Ошибка построения сетки!")
+            self.lbl_su2_status.setStyleSheet("color: #9B2C2C; font-weight: bold;")
             QMessageBox.critical(self, "Ошибка генерации сетки", msg)
         self.btn_make_mesh.setEnabled(True)
         self.ribbon_btn_mesh.setEnabled(True)
@@ -4044,13 +4044,13 @@ class MainWindow(QMainWindow):
                 QApplication.restoreOverrideCursor()
         except Exception as e:
             QApplication.restoreOverrideCursor()
-            self.log_text.append(f"❌ Адаптация по Cp не выполнена: {e}")
+            self.log_text.append(f"Ошибка: Адаптация по Cp не выполнена: {e}")
             QMessageBox.critical(self, "Адаптация по Cp", str(e))
             return
         rep = adaptivity_report(samples, sizes)
         text = format_adaptivity_report(rep)
-        self.log_text.append("🧲 " + text.replace("\n", " | "))
-        self.log_text.append(f"  ✅ Адаптивная геометрия: {out_stl}")
+        self.log_text.append("" + text.replace("\n", " | "))
+        self.log_text.append(f"  Готово: Адаптивная геометрия: {out_stl}")
         self._add_body(out_stl, "other")
         self.update_flow_arrow()
         QMessageBox.information(
@@ -4088,7 +4088,7 @@ class MainWindow(QMainWindow):
             return
         if not os.path.isfile(MESH_FILE):
             QMessageBox.warning(self, "Адаптивная сетка",
-                                "Сначала постройте сетку (кнопка «🔧 Построить сетку»).")
+                                "Сначала постройте сетку (кнопка «Построить сетку»).")
             return
         # Нужно решение (restart.dat) из завершённого расчёта
         restart = self._find_latest_restart()
@@ -4117,10 +4117,10 @@ class MainWindow(QMainWindow):
         self.btn_adapt_mesh.setEnabled(False)
         self.progress.setVisible(True)
         self.progress.setValue(0)
-        self.lbl_su2_status.setText("🧬 Адаптация сетки (SU2_ADAPT)...")
-        self.lbl_su2_status.setStyleSheet("color: blue; font-style: italic;")
+        self.lbl_su2_status.setText("Адаптация сетки (SU2_ADAPT)...")
+        self.lbl_su2_status.setStyleSheet("color: #2E5A78; font-style: italic;")
         self.log_text.append("\n" + "=" * 50)
-        self.log_text.append("🧬 АДАПТИВНАЯ СЕТКА (SU2_ADAPT)")
+        self.log_text.append("АДАПТИВНАЯ СЕТКА (SU2_ADAPT)")
         self.log_text.append("=" * 50)
         self._adapt_worker = MeshAdaptWorker(
             case_dir=case_dir,
@@ -4155,9 +4155,9 @@ class MainWindow(QMainWindow):
             self._adapt_worker.deleteLater()
             self._adapt_worker = None
         if not ok:
-            self.log_text.append(f"❌ {msg}")
-            self.lbl_su2_status.setText("❌ Ошибка адаптации")
-            self.lbl_su2_status.setStyleSheet("color: red; font-weight: bold;")
+            self.log_text.append(f"Ошибка: {msg}")
+            self.lbl_su2_status.setText("Ошибка адаптации")
+            self.lbl_su2_status.setStyleSheet("color: #9B2C2C; font-weight: bold;")
             QMessageBox.critical(self, "Ошибка адаптации сетки", msg)
             return
         # Заменяем рабочую сетку адаптированной
@@ -4166,12 +4166,12 @@ class MainWindow(QMainWindow):
             shutil.copy2(msg, MESH_FILE)
             npoin_after = _mesh_npoin(MESH_FILE) or 0
             self.log_text.append(
-                f"✅ Адаптированная сетка: {msg}")
+                f"Готово: Адаптированная сетка: {msg}")
             self.log_text.append(
                 f"   Точки: {npoin_before} → {npoin_after} "
                 f"({(npoin_after / max(npoin_before, 1)):.2f}×)")
-            self.lbl_su2_status.setText("✅ Сетка адаптирована")
-            self.lbl_su2_status.setStyleSheet("color: green; font-weight: bold;")
+            self.lbl_su2_status.setText("Готово: Сетка адаптирована")
+            self.lbl_su2_status.setStyleSheet("color: #2E6B45; font-weight: bold;")
             QMessageBox.information(
                 self, "Адаптация завершена",
                 f"Сетка адаптирована по решению.\n\n"
@@ -4179,7 +4179,7 @@ class MainWindow(QMainWindow):
                 "Теперь можно запустить расчёт заново — результат будет "
                 "точнее в областях высоких градиентов.")
         except Exception as e:
-            self.log_text.append(f"❌ Не удалось применить адаптированную сетку: {e}")
+            self.log_text.append(f"Не удалось применить адаптированную сетку: {e}")
             QMessageBox.critical(self, "Ошибка", f"{e}")
 
     # =============================================================
@@ -4203,14 +4203,14 @@ class MainWindow(QMainWindow):
                     "Введите ключ через меню <b>Лицензия → Активировать</b>."
                 )
                 msg_box.exec_()
-                self.log_text.append(f"⛔ {reason}")
+                self.log_text.append(f"{reason}")
                 return
             # Запрашиваем одноразовый run_token у сервера
             ok, msg = self._license.acquire_run_token()
             if not ok:
                 QMessageBox.warning(
                     self, "Лицензия", f"Не удалось получить run_token:\n{msg}")
-                self.log_text.append(f"⛔ {msg}")
+                self.log_text.append(f"{msg}")
                 return
             # ok=True (или offline в grace) — продолжаем
         # ================================================================
@@ -4232,7 +4232,7 @@ class MainWindow(QMainWindow):
             if choice == "new":
                 existing.clear()
                 self.log_text.append(
-                    "🗑 Прошлая приостановленная сессия отменена, "
+                    "Прошлая приостановленная сессия отменена, "
                     "стартуем новую."
                 )
             elif choice == "resume":
@@ -4247,7 +4247,7 @@ class MainWindow(QMainWindow):
                 )
                 self.session = existing
                 self.log_text.append(
-                    f"▶ Возобновление сессии: точка "
+                    f"Возобновление сессии: точка "
                     f"{existing.current_index + 1}/{len(existing.aoa_list)}, "
                     f"вычислитель {self._compute_device_pending}"
                     + (f" (GPU {self._gpu_percent_pending}%)"
@@ -4263,7 +4263,7 @@ class MainWindow(QMainWindow):
                 rec = min(phys, max(1, int(round(npoin / 150000.0))))
                 cur = self._resolve_cores_for_level()
                 self.log_text.append(
-                    f"💡 Сетка ~{npoin} точек: рекомендуется ≈{rec} ядер "
+                    f"Сетка ~{npoin} точек: рекомендуется ≈{rec} ядер "
                     f"(сейчас {cur}). Для ускорения увеличьте нагрузку CPU "
                     f"в Solver Settings.")
         except Exception:
@@ -4354,7 +4354,7 @@ class MainWindow(QMainWindow):
         # в __init__, см. solver/session.py)
         self.session.mesh_quality = mesh_quality_now
         self.log_text.append(
-            f"\n🚀 Запуск сессии ({mode}) в {datetime.now().strftime('%H:%M:%S')}, "
+            f"\nЗапуск сессии ({mode}) в {datetime.now().strftime('%H:%M:%S')}, "
             f"точек: {len(aoa_list)}, ядер: {self._cpu_cores_pending}, "
             f"решатель: {solver}, сетка: {mesh_quality_now}, "
             f"вычислитель: {compute_device_now}"
@@ -4381,8 +4381,8 @@ class MainWindow(QMainWindow):
             f"Прогресс: точка {n_done}/{n_total}.\n\n"
             f"Что сделать?"
         )
-        btn_resume = msg_box.addButton("▶ Продолжить прошлую", QMessageBox.AcceptRole)
-        btn_new = msg_box.addButton("🆕 Начать новую", QMessageBox.DestructiveRole)
+        btn_resume = msg_box.addButton("Продолжить прошлую", QMessageBox.AcceptRole)
+        btn_new = msg_box.addButton("Начать новую", QMessageBox.DestructiveRole)
         btn_cancel = msg_box.addButton("Отмена", QMessageBox.RejectRole)
         msg_box.setDefaultButton(btn_resume)
         msg_box.exec_()
@@ -4397,7 +4397,7 @@ class MainWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         self.calc_start_time = time.time()
         self._eta_ema = None
-        self.lbl_status_time.setText("⏳ Оценка времени...")
+        self.lbl_status_time.setText("Оценка времени...")
         self.session_runner = SessionRunner(self.session)
         self.session_runner.log_signal.connect(self.log_text.append)
         self.session_runner.progress_signal.connect(self.on_calculation_progress)
@@ -4422,17 +4422,17 @@ class MainWindow(QMainWindow):
                     else 0.3 * remain + 0.7 * self._eta_ema
                 mins = int(self._eta_ema // 60)
                 secs = int(self._eta_ema % 60)
-                self.lbl_status_time.setText(f"⏳ Осталось: {mins}м {secs}с")
+                self.lbl_status_time.setText(f"Осталось: {mins}м {secs}с")
         if self.session:
             curr_pt = self.session.current_index + 1
             total_pts = len(self.session.aoa_list)
             self.lbl_su2_status.setText(
-                f"⏳ Расчёт точки {curr_pt}/{total_pts} ({percent}%)")
-            self.lbl_su2_status.setStyleSheet("color: blue; font-style: italic;")
+                f"Расчёт точки {curr_pt}/{total_pts} ({percent}%)")
+            self.lbl_su2_status.setStyleSheet("color: #2E5A78; font-style: italic;")
 
     def pause_calculation(self):
         if self.session_runner and self.session_runner.isRunning():
-            self.log_text.append("⏸ Запрошена пауза...")
+            self.log_text.append("Запрошена пауза...")
             self.btn_pause.setEnabled(False)
             self.session_runner.request_pause()
 
@@ -4454,7 +4454,7 @@ class MainWindow(QMainWindow):
         )
         self.session = session
         self.log_text.append(
-            f"▶ Возобновление сессии: ядер {self._cpu_cores_pending}, "
+            f"Возобновление сессии: ядер {self._cpu_cores_pending}, "
             f"вычислитель {self._compute_device_pending}"
             + (f" (GPU {self._gpu_percent_pending}%)"
                if self._compute_device_pending == "cpu_gpu" else "")
@@ -4465,19 +4465,19 @@ class MainWindow(QMainWindow):
         while QApplication.overrideCursor() is not None:
             QApplication.restoreOverrideCursor()
         if self.session_runner and self.session_runner.isRunning():
-            self.log_text.append("⛔ Отмена расчёта...")
+            self.log_text.append("Отмена расчёта...")
             self.session_runner.request_cancel()
             self.session_runner.wait(5000)
         elif self.session:
             self.session.mark_cancelled()
-            self.log_text.append("⛔ Приостановленная сессия отменена.")
+            self.log_text.append("Приостановленная сессия отменена.")
         self.cleanup_session_data()
         self.set_calculation_buttons_enabled(run=self.mesh_ready, pause=False,
                                              resume=False, cancel=False)
         self.progress.setVisible(False)
         self.lbl_status_time.setText("")
-        self.lbl_su2_status.setText("⛔ Расчет отменен")
-        self.lbl_su2_status.setStyleSheet("color: red; font-weight: bold;")
+        self.lbl_su2_status.setText("Расчет отменен")
+        self.lbl_su2_status.setStyleSheet("color: #9B2C2C; font-weight: bold;")
 
     def on_session_paused(self):
         while QApplication.overrideCursor() is not None:
@@ -4486,9 +4486,9 @@ class MainWindow(QMainWindow):
                                              resume=True, cancel=True)
         self.progress.setVisible(False)
         self.lbl_status_time.setText("")
-        self.lbl_su2_status.setText("⏸ На паузе")
+        self.lbl_su2_status.setText("На паузе")
         self.lbl_su2_status.setStyleSheet("color: orange; font-weight: bold;")
-        self.log_text.append("⏸ Сессия на паузе. Можно продолжить или отменить.")
+        self.log_text.append("Сессия на паузе. Можно продолжить или отменить.")
         if not self.project_saved:
             reply = QMessageBox.question(
                 self, "Сохранить проект",
@@ -4524,18 +4524,18 @@ class MainWindow(QMainWindow):
             elapsed = None
         if n_ok > 0:
             self.lbl_su2_status.setText(
-                f"✅ Расчёт завершён: {n_ok} успешно, {n_fail} с ошибкой")
-            self.lbl_su2_status.setStyleSheet("color: green; font-weight: bold;")
+                f"Готово: Расчёт завершён: {n_ok} успешно, {n_fail} с ошибкой")
+            self.lbl_su2_status.setStyleSheet("color: #2E6B45; font-weight: bold;")
         else:
-            self.lbl_su2_status.setText("❌ Расчёт завершился безуспешно")
-            self.lbl_su2_status.setStyleSheet("color: red; font-weight: bold;")
+            self.lbl_su2_status.setText("Ошибка: Расчёт завершился безуспешно")
+            self.lbl_su2_status.setStyleSheet("color: #9B2C2C; font-weight: bold;")
         if elapsed is not None:
             self.log_text.append(
-                f"⏱ Расчёт шёл {_format_duration(elapsed)} "
+                f"Расчёт шёл {_format_duration(elapsed)} "
                 f"(≈ {elapsed:.1f} с)"
             )
         self.log_text.append(
-            f"🏁 Сессия завершена: {n_ok} успешных, {n_fail} с ошибкой.")
+            f"Сессия завершена: {n_ok} успешных, {n_fail} с ошибкой.")
 
     def _check_pending_session(self):
         tmp_session = CalculationSession(WORK_DIR_BASE)
@@ -4574,9 +4574,9 @@ class MainWindow(QMainWindow):
                     case_dir,
                     f"history_paused_{datetime.now().strftime('%H%M%S')}.csv")
                 shutil.copy2(src, dst)
-                self.log_text.append(f"💾 История расчёта сохранена: {dst}")
+                self.log_text.append(f"История расчёта сохранена: {dst}")
         except Exception as e:
-            self.log_text.append(f"⚠️ Не удалось сохранить историю паузы: {e}")
+            self.log_text.append(f"Внимание: Не удалось сохранить историю паузы: {e}")
 
     # =============================================================
     # РЕЗУЛЬТАТЫ
@@ -4595,7 +4595,7 @@ class MainWindow(QMainWindow):
                     avg = (time.time() - t0) / done
                     remain = avg * (total - done)
                     self.log_text.append(
-                        f"⏱ Точка {done}/{total}: среднее {avg:.0f} с/точка, "
+                        f"Точка {done}/{total}: среднее {avg:.0f} с/точка, "
                         f"осталось ~{int(remain // 60)}м {int(remain % 60)}с")
         except Exception:
             pass
@@ -4620,9 +4620,9 @@ class MainWindow(QMainWindow):
         self.plot_canvas.update_plots(self.all_results)
         self.project_saved = False
         if is_err:
-            msg = (f"❌ Ошибка при расчете точки AoA = {res.get('aoa', 0)}°.\n\n"
+            msg = (f"Ошибка при расчете точки AoA = {res.get('aoa', 0)}°.\n\n"
                    f"Причина: {status_text}\n\n"
-                   "👉 Рекомендации:\n"
+                   "Рекомендации:\n"
                    "1. Проверьте путь к SU2_CFD.exe в Solver Settings.\n"
                    "2. Убедитесь, что сетка корректна и не содержит вырожденных элементов.\n"
                    "3. Проверьте лог файлы в папке расчёта (su2_stdout.log).")
@@ -4649,7 +4649,7 @@ class MainWindow(QMainWindow):
                     "Введите ключ через меню <b>Лицензия → Активировать</b>."
                 )
                 msg_box.exec_()
-                self.log_text.append(f"⛔ {reason}")
+                self.log_text.append(f"{reason}")
                 return
         # ================================================================
         if not self.bodies:
@@ -4663,7 +4663,7 @@ class MainWindow(QMainWindow):
         self._opt_running = True
         self.progress.setVisible(True)
         self.progress.setValue(0)
-        self.lbl_opt_status.setText("🔄 Оптимизация...")
+        self.lbl_opt_status.setText("Оптимизация...")
         initial_params = {
             'span': self.w_span.value(),
             'chord_root': self.w_chord_root.value(),
@@ -4754,7 +4754,7 @@ class MainWindow(QMainWindow):
             self._mesh_worker.deleteLater()
             self._mesh_worker = None
         if not ok:
-            self.log_text.append(f"⚠️ Опт. сетка не построена: {msg}")
+            self.log_text.append(f"Внимание: Опт. сетка не построена: {msg}")
         if self.opt_worker:
             self.opt_worker.geometry_ready()
 
@@ -4765,36 +4765,36 @@ class MainWindow(QMainWindow):
         if best and 'cl_weighted' in best:
             cl = best['cl_weighted']
             k = best['k_weighted']
-            self.lbl_opt_status.setText(f"✅ Cl={cl:.3f}, K={k:.1f}")
-            self.log_text.append(f"🏆 Оптимизация завершена: Cl={cl:.3f}, K={k:.1f}")
+            self.lbl_opt_status.setText(f"Готово: Cl={cl:.3f}, K={k:.1f}")
+            self.log_text.append(f"Оптимизация завершена: Cl={cl:.3f}, K={k:.1f}")
             target_cl = self.opt_target_cl.value()
             target_k = self.opt_target_k.value()
             unmet_recs = []
             if cl < target_cl:
                 unmet_recs.append(
                     f"• Подъемная сила (Cl = {cl:.3f} при цели {target_cl:.2f}) не достигнута.\n"
-                    "  👉 Рекомендации:\n"
+                    "  Рекомендации:\n"
                     "     - Увеличьте хорду крыла или размах для роста площади.\n"
                     "     - Выберите профиль NACA с большей кривизной (напр. 4412).\n"
                     "     - Увеличьте угол атаки или крутку крыла.")
             if k < target_k:
                 unmet_recs.append(
                     f"• Качество (K = {k:.1f} при цели {target_k:.1f}) не достигнуто.\n"
-                    "  👉 Рекомендации:\n"
+                    "  Рекомендации:\n"
                     "     - Увеличьте удлинение крыла (снизится индуктивное сопротивление).\n"
                     "     - Уменьшите толщину профиля NACA.\n"
                     "     - Снизьте стреловидность.")
             if unmet_recs:
-                msg = ("⚠️ Оптимизация завершена, но цели не достигнуты полностью "
+                msg = ("Внимание: Оптимизация завершена, но цели не достигнуты полностью "
                        "в заданных границах.\n\n" + "\n\n".join(unmet_recs) +
-                       "\n\n⚙️ Совет: ослабьте ограничения в Rule Set или расширьте бокс.")
+                       "\n\nСовет: ослабьте ограничения в Rule Set или расширьте бокс.")
                 QMessageBox.warning(self, "Цели оптимизации не достигнуты", msg)
             else:
                 QMessageBox.information(
                     self, "Успех!",
-                    f"🎉 Целевые параметры достигнуты!\n\nCl = {cl:.3f}, K = {k:.1f}")
+                    f"Целевые параметры достигнуты!\n\nCl = {cl:.3f}, K = {k:.1f}")
         else:
-            self.lbl_opt_status.setText("❌ Решение не найдено")
+            self.lbl_opt_status.setText("Ошибка: Решение не найдено")
             QMessageBox.critical(self, "Ошибка",
                                  "Не удалось найти допустимый вариант. "
                                  "Проверьте сетку и граничные условия.")
@@ -4937,7 +4937,7 @@ class MainWindow(QMainWindow):
         self._doe_plan = combo_plan.currentText()
         self._doe_levels = int(spin_levels.value())
         self._doe_samples = int(spin_samples.value())
-        self.log_text.append(f"🧮 Сетка DOE: план «{self._doe_plan}», "
+        self.log_text.append(f"Сетка DOE: план «{self._doe_plan}», "
                              f"вариантов {len(rows)}")
 
     def add_doe_row_from_current(self):
@@ -5021,7 +5021,7 @@ class MainWindow(QMainWindow):
             allowed, reason = self._license.is_calculation_allowed()
             if not allowed:
                 QMessageBox.warning(self, "Лицензия", reason)
-                self.log_text.append(f"⛔ {reason}")
+                self.log_text.append(f"{reason}")
                 return
         cands = self._get_doe_candidates()
         if not cands:
@@ -5029,10 +5029,10 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Перебор вариантов",
                                     "Таблица вариантов пуста или содержит "
                                     "некорректные значения. Добавьте строки "
-                                    "кнопкой «➕ Из текущих параметров» или "
-                                    "сгенерируйте сетку «🧮 Сетка вариантов».")
+                                    "кнопкой «Из текущих параметров» или "
+                                    "сгенерируйте сетку «Сетка вариантов».")
             else:
-                self.log_text.append("⚠️ Перебор остановлен: нет вариантов")
+                self.log_text.append("Внимание: Перебор остановлен: нет вариантов")
                 self._finish_doe()
             return
         if not self.bodies:
@@ -5049,9 +5049,9 @@ class MainWindow(QMainWindow):
         gen = getattr(self, "_doe_gen_index", 1)
         total = getattr(self, "_doe_gen_total", 1)
         prefix = (f"Поколение {gen}/{total}: " if total > 1 else "")
-        self.lbl_doe_status.setText(f"🔄 {prefix}перебор {len(cands)} "
+        self.lbl_doe_status.setText(f"{prefix}перебор {len(cands)} "
                                     f"вариантов...")
-        self.log_text.append(f"🧬 {prefix}запуск {len(cands)} вариантов")
+        self.log_text.append(f"{prefix}запуск {len(cands)} вариантов")
         self.progress.setVisible(True)
         self.progress.setValue(0)
         active_markers = [b["role"] for b in self.bodies if b.get("visible", True)]
@@ -5123,7 +5123,7 @@ class MainWindow(QMainWindow):
                                  n_levels=int(getattr(self, "_doe_levels", 3)),
                                  n_samples=int(getattr(self, "_doe_samples", 9)))
             except Exception as e:
-                self.log_text.append(f"⚠️ Не удалось построить следующее "
+                self.log_text.append(f"Внимание: Не удалось построить следующее "
                                      f"поколение: {e}")
                 rows = []
             if rows:
@@ -5131,7 +5131,7 @@ class MainWindow(QMainWindow):
                 self._fill_doe_table(rows)
                 self._doe_gen_index = gen + 1
                 self.log_text.append(
-                    f"🧬 Поколение {gen + 1}: диапазоны сужены до "
+                    f"Поколение {gen + 1}: диапазоны сужены до "
                     + ", ".join(f"{k} {v[0]:g}…{v[1]:g}"
                                 for k, v in ranges.items()))
                 self._launch_doe_generation(interactive=False)
@@ -5147,22 +5147,22 @@ class MainWindow(QMainWindow):
         gens = getattr(self, "_doe_gen_results", [])
         if len(gens) > 1:
             self.log_text.append(
-                "📈 Поколения: " + " → ".join(f"{g['k']:.1f}" for g in gens))
+                "Поколения: " + " → ".join(f"{g['k']:.1f}" for g in gens))
         if best and best.get("k_weighted"):
-            text = (f"✅ Лучший вариант: span={best.get('span', 0):.2f} м, "
+            text = (f"Готово: Лучший вариант: span={best.get('span', 0):.2f} м, "
                     f"cr={best.get('chord_root', 0):.2f} м, "
                     f"ct={best.get('chord_tip', 0):.2f} м, "
                     f"sweep={best.get('sweep', 0):.1f}° → "
                     f"Cl={best.get('cl_weighted', 0):.3f}, "
                     f"K={best.get('k_weighted', 0):.1f}")
             self.lbl_doe_status.setText(text)
-            self.log_text.append(f"🏆 {text}")
+            self.log_text.append(f"{text}")
             try:
                 self._update_geometry_from_opt(best)
             except Exception as e:
-                self.log_text.append(f"⚠️ Не удалось применить лучший вариант: {e}")
+                self.log_text.append(f"Внимание: Не удалось применить лучший вариант: {e}")
         else:
-            self.lbl_doe_status.setText("❌ Допустимых вариантов не найдено")
+            self.lbl_doe_status.setText("Ошибка: Допустимых вариантов не найдено")
         if self.opt_worker:
             self.opt_worker.deleteLater()
             self.opt_worker = None
@@ -5179,9 +5179,9 @@ class MainWindow(QMainWindow):
         running = runner is not None and getattr(runner, "isRunning", lambda: False)()
         if running:
             self.log_text.append(
-                f"ℹ️ Изменение числа ядер на {cores} применится при следующем этапе.")
+                f"Изменение числа ядер на {cores} применится при следующем этапе.")
         else:
-            self.log_text.append(f"✅ Применено ядер CPU: {cores}")
+            self.log_text.append(f"Готово: Применено ядер CPU: {cores}")
         self._refresh_load_status_label()
 
 
@@ -5208,12 +5208,12 @@ class MainWindow(QMainWindow):
 
     def show_flow_field(self):
         if not os.path.exists(WORK_DIR_BASE):
-            self.log_text.append("⚠️ Каталог расчётов не существует. Сначала постройте сетку и запустите расчёт.")
+            self.log_text.append("Внимание: Каталог расчётов не существует. Сначала постройте сетку и запустите расчёт.")
             return
         cases = [d for d in os.listdir(WORK_DIR_BASE)
                  if os.path.isdir(os.path.join(WORK_DIR_BASE, d))]
         if not cases:
-            self.log_text.append("⚠️ Нет ни одной папки расчёта. Запустите расчёт хотя бы раз.")
+            self.log_text.append("Внимание: Нет ни одной папки расчёта. Запустите расчёт хотя бы раз.")
             return
         latest = max(cases, key=lambda d: os.path.getmtime(os.path.join(WORK_DIR_BASE, d)))
         latest_top = os.path.join(WORK_DIR_BASE, latest)
@@ -5249,14 +5249,14 @@ class MainWindow(QMainWindow):
 
         if not surface_file:
             # Подробный отчёт: что реально лежит в обеих папках
-            self.log_text.append("⚠️ Файл поверхности не найден")
-            self.log_text.append(f"   📂 Корневая папка расчёта: {latest_top}")
+            self.log_text.append("Внимание: Файл поверхности не найден")
+            self.log_text.append(f"   Корневая папка расчёта: {latest_top}")
             for d in candidate_dirs:
                 try:
                     on_disk = sorted(os.listdir(d))
                 except Exception as e:
                     on_disk = [f"<не удалось прочитать: {e}>"]
-                self.log_text.append(f"   📂 {os.path.relpath(d, WORK_DIR_BASE) or '.'}/")
+                self.log_text.append(f"   {os.path.relpath(d, WORK_DIR_BASE) or '.'}/")
                 if on_disk:
                     self.log_text.append(f"      {len(on_disk)} файлов:")
                     for f in on_disk[:20]:
@@ -5266,7 +5266,7 @@ class MainWindow(QMainWindow):
                 else:
                     self.log_text.append("      (папка пуста)")
             self.log_text.append(
-                "   💡 Возможные причины:\n"
+                "   Возможные причины:\n"
                 "     1. В mesh.su2 маркер 'airfoil' пустой (MARKER_ELEMS= 0) —\n"
                 "        самолёт не вырезан из сетки.\n"
                 "     2. SU2 упал с ошибкой раньше записи .vtu — откройте\n"
@@ -5292,7 +5292,7 @@ class MainWindow(QMainWindow):
             self.combo_scalar.blockSignals(False)
             self.render_flow_scene()
         except Exception as e:
-            self.log_text.append(f"⚠️ Ошибка чтения поверхности: {e}")
+            self.log_text.append(f"Внимание: Ошибка чтения поверхности: {e}")
         QApplication.restoreOverrideCursor()
 
     def render_flow_scene(self, *args):
@@ -5341,13 +5341,13 @@ class MainWindow(QMainWindow):
                     scalar_name = field
                     valid_data = True
                 else:
-                    self.log_text.append(f"⚠️ Поле {field}: неправильный размер {arr.shape}")
+                    self.log_text.append(f"Внимание: Поле {field}: неправильный размер {arr.shape}")
             if valid_data:
                 self.plotter.add_mesh(surface, scalars=scalar_name, cmap="jet",
                                       show_scalar_bar=True)
             else:
                 self.plotter.add_mesh(surface, color="lightblue", show_edges=True)
-                self.log_text.append(f"⚠️ Не удалось отобразить поле {field}")
+                self.log_text.append(f"Внимание: Не удалось отобразить поле {field}")
         else:
             self.plotter.add_mesh(surface, color="lightblue", show_edges=True)
         self.update_flow_arrow()
@@ -5435,7 +5435,7 @@ class MainWindow(QMainWindow):
         if span > 0 and cr > 0 and ct > 0:
             S = 0.5 * (cr + ct) * span
             self.log_text.append(
-                f"⚙️ Крыло: S={S:.2f}м², λ={span ** 2 / S:.2f}, η={cr / ct:.2f}")
+                f"Крыло: S={S:.2f}м², λ={span ** 2 / S:.2f}, η={cr / ct:.2f}")
 
     # =============================================================
     # ПРАВИЛА
@@ -5448,11 +5448,11 @@ class MainWindow(QMainWindow):
             msg = "\n".join(conflicts)
             QMessageBox.critical(self, "Конфликт правил",
                                  f"Набор правил противоречив:\n\n{msg}")
-            self.log_text.append("❌ Расчёт остановлен: конфликт правил.")
+            self.log_text.append("Ошибка: Расчёт остановлен: конфликт правил.")
             return False
         params = self._collect_current_params()
         result = self.rule_set.check_all(params)
-        self.log_text.append("\n🔎 Проверка правил:")
+        self.log_text.append("\nПроверка правил:")
         for msg in result["messages"]:
             self.log_text.append(msg)
         if not result["passed"]:
@@ -5463,7 +5463,7 @@ class MainWindow(QMainWindow):
             return False
         if result["soft_violations"]:
             self.log_text.append(
-                f"⚠️ Мягких нарушений: {len(result['soft_violations'])}, "
+                f"Внимание: Мягких нарушений: {len(result['soft_violations'])}, "
                 f"штраф={result['penalty']:.3f}")
         return True
 
@@ -5472,7 +5472,7 @@ class MainWindow(QMainWindow):
         if name in PRESETS:
             self.rule_set = PRESETS[name]()
             self.update_rules_table()
-            self.log_text.append(f"✅ Загружен пресет: {name} "
+            self.log_text.append(f"Готово: Загружен пресет: {name} "
                                  f"({len(self.rule_set.rules)} правил)")
 
     def update_rules_table(self):
@@ -5550,7 +5550,7 @@ class MainWindow(QMainWindow):
                         weight=weight_spin.value(), description=desc_edit.text())
             self.rule_set.add(rule)
             self.update_rules_table()
-            self.log_text.append(f"✅ Добавлено правило: {rule.name}")
+            self.log_text.append(f"Готово: Добавлено правило: {rule.name}")
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Не удалось создать правило: {e}")
 
@@ -5574,18 +5574,18 @@ class MainWindow(QMainWindow):
             if rule.name in names:
                 self.rule_set.rules.remove(rule)
         self.log_text.append(
-            f"🗑 Удалено правил: {len(names)} ({', '.join(names)})"
+            f"Удалено правил: {len(names)} ({', '.join(names)})"
         )
 
     def check_rules_consistency(self):
         conflicts = self.rule_set.check_consistency()
         if not conflicts:
-            QMessageBox.information(self, "Проверка", "✅ Конфликтов не найдено.")
-            self.log_text.append("✅ Набор правил непротиворечив.")
+            QMessageBox.information(self, "Проверка", "Готово: Конфликтов не найдено.")
+            self.log_text.append("Готово: Набор правил непротиворечив.")
         else:
             msg = "\n".join(conflicts)
             QMessageBox.warning(self, "Найдены конфликты!", msg)
-            self.log_text.append("⚠️ Конфликты в правилах:")
+            self.log_text.append("Внимание: Конфликты в правилах:")
             for c in conflicts:
                 self.log_text.append(f"   {c}")
 
@@ -5593,7 +5593,7 @@ class MainWindow(QMainWindow):
         params = self._collect_current_params()
         result = self.rule_set.check_all(params)
         self.log_text.append("\n" + "=" * 50)
-        self.log_text.append("🔍 ПРОВЕРКА ТЕКУЩЕЙ ГЕОМЕТРИИ")
+        self.log_text.append("ПРОВЕРКА ТЕКУЩЕЙ ГЕОМЕТРИИ")
         self.log_text.append("=" * 50)
         for msg in result['messages']:
             self.log_text.append(msg)
@@ -5601,14 +5601,14 @@ class MainWindow(QMainWindow):
         if result['passed']:
             QMessageBox.information(
                 self, "Проверка",
-                f"✅ Все жёсткие правила соблюдены!\n\n"
+                f"Готово: Все жёсткие правила соблюдены!\n\n"
                 f"Мягких: {len(result['soft_violations'])}\n"
                 f"Информ.: {len(result['info_violations'])}\n"
                 f"Штраф: {result['penalty']:.3f}")
         else:
             details = "\n".join(f"• {v['rule']} ({v['violation']:.3f})"
                                 for v in result['hard_violations'])
-            QMessageBox.critical(self, "Нарушения!", f"❌ Жёсткие правила:\n\n{details}")
+            QMessageBox.critical(self, "Нарушения!", f"Ошибка: Жёсткие правила:\n\n{details}")
 
     def _collect_current_params(self):
         physics = self.get_physics()
@@ -5638,7 +5638,7 @@ class MainWindow(QMainWindow):
                                               "rules.json", "JSON (*.json)")
         if path:
             self.rule_set.save(path)
-            self.log_text.append(f"💾 Правила сохранены: {path}")
+            self.log_text.append(f"Правила сохранены: {path}")
 
     def load_rule_set(self):
         path, _ = QFileDialog.getOpenFileName(self, "Загрузить правила", "",
@@ -5647,7 +5647,7 @@ class MainWindow(QMainWindow):
             try:
                 self.rule_set = RuleSet.load(path)
                 self.update_rules_table()
-                self.log_text.append(f"📂 Загружено правил: {len(self.rule_set.rules)}")
+                self.log_text.append(f"Загружено правил: {len(self.rule_set.rules)}")
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", str(e))
 
@@ -5740,7 +5740,7 @@ class MainWindow(QMainWindow):
                 try:
                     shutil.rmtree(path)
                 except Exception as e:
-                    self.log_text.append(f"⚠️ Не удалось удалить {d}: {e}")
+                    self.log_text.append(f"Внимание: Не удалось удалить {d}: {e}")
 
     def update_history_table(self):
         self.history_table.setRowCount(0)
@@ -5766,12 +5766,12 @@ class MainWindow(QMainWindow):
         self.w_twist.setValue(rec["twist"])
         self.generate_wing_mesh_parametric(rec["span"], rec["chord_root"],
                                            rec["chord_tip"])
-        self.log_text.append(f"↩️ Откат к версии #{rec['id']}: размах {rec['span']:.2f}м")
+        self.log_text.append(f"Откат к версии #{rec['id']}: размах {rec['span']:.2f}м")
 
     def clear_generation_history(self):
         self.generation_history.clear()
         self.update_history_table()
-        self.log_text.append("🗑 История очищена.")
+        self.log_text.append("История очищена.")
 
     def calculate_aerodynamic_trim(self):
         if not self.all_results:
@@ -5795,7 +5795,7 @@ class MainWindow(QMainWindow):
             f"Потребный угол руля высоты: δe = {elevator_deflection:.2f}°\n"
             f"(для балансировки Cm_total = 0)")
         self.log_text.append(
-            f"⚖️ Балансировка: для Cm={cm:.5f} требуется δe={elevator_deflection:.2f}°")
+            f"Балансировка: для Cm={cm:.5f} требуется δe={elevator_deflection:.2f}°")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Delete:
@@ -5826,7 +5826,7 @@ class MainWindow(QMainWindow):
         for d in dirs_to_delete:
             try:
                 shutil.rmtree(d)
-                print(f"🧹 Удалена временная расчетная папка: {d}")
+                print(f"Удалена временная расчетная папка: {d}")
             except Exception:
                 pass
 
@@ -5935,7 +5935,7 @@ class MainWindow(QMainWindow):
         # Дерево → Global Definitions
         self.tree.setCurrentItem(self.item_global_defs)
 
-        self.log_text.append("🔄 Интерфейс сброшен к начальным значениям.")
+        self.log_text.append("Интерфейс сброшен к начальным значениям.")
         self.project_saved = False
 
 
@@ -5957,7 +5957,7 @@ class MainWindow(QMainWindow):
                 return
             else:
                 self.cleanup_session_data()
-        self.log_text.append("🚪 Закрытие приложения...")
+        self.log_text.append("Закрытие приложения...")
         if hasattr(self, 'session_runner') and self.session_runner \
                 and self.session_runner.isRunning():
             self.session_runner.request_pause()
@@ -6016,8 +6016,8 @@ class MainWindow(QMainWindow):
             from physics import aeroelastic as AE
             res = self._aeroelastic_result()
         except Exception as e:
-            self.ae_w["out"].setText(f"⚠️ Не удалось выполнить оценку: {e}")
-            self.log_text.append(f"⚠️ Аэроупругость: {e}")
+            self.ae_w["out"].setText(f"Внимание: Не удалось выполнить оценку: {e}")
+            self.log_text.append(f"Внимание: Аэроупругость: {e}")
             return
         p = res["props"]
         text = AE.format_report(res) + (
@@ -6034,7 +6034,7 @@ class MainWindow(QMainWindow):
             "по КЭ-модели.")
         self.ae_w["out"].setText(text)
         self.log_text.append(
-            "📈 Аэроупругость: V_F="
+            "Аэроупругость: V_F="
             f"{res['V_F'] and round(res['V_F'], 1)} м/с, V_D="
             f"{res['V_D'] and round(res['V_D'], 1)} м/с, запас="
             f"{res['margin'] and round(res['margin'], 2)}")
@@ -6047,18 +6047,18 @@ class MainWindow(QMainWindow):
             try:
                 res = self._aeroelastic_result()
             except Exception as e:
-                self.ae_w["out"].setText(f"⚠️ {e}")
+                self.ae_w["out"].setText(f"Внимание: {e}")
                 return
             self._last_aeroelastic = res
         diag = res.get("vg_diagram") or []
         if not diag:
-            self.ae_w["out"].setText("⚠️ Нет данных V-g диаграммы")
+            self.ae_w["out"].setText("Внимание: Нет данных V-g диаграммы")
             return
         ax = self.plot_canvas.axes1
         ax.clear()
         ax.grid(True, linestyle="--", alpha=0.5)
         ax.tick_params(labelsize=8)
-        for i, color in ((0, "#1f77b4"), (1, "#d62728")):
+        for i, color in ((0, "#1f77b4"), (1, "#9B2C2C")):
             pts = [(d["modes"][i]["g"], d["V"], d["modes"][i]["freq_hz"])
                    for d in diag if len(d["modes"]) > i]
             if not pts:
@@ -6071,13 +6071,13 @@ class MainWindow(QMainWindow):
             ax.axvline(float(res["V_F"]), color="r", lw=1.3,
                        label=f"V_F={float(res['V_F']):.1f} м/с")
         ax.set_title("V-g диаграмма (g>0 — нарастание колебаний)", fontsize=9,
-                     fontweight="bold", color="#113366")
+                     fontweight="bold", color="#22384A")
         ax.set_xlabel("Структурное демпфирование g", fontsize=8)
         ax.set_ylabel("Скорость, м/с", fontsize=8)
         ax.legend(fontsize=7)
         self.plot_canvas.draw()
         self.bottom_tabs.setCurrentWidget(self.plot_canvas)
-        self.log_text.append("📉 V-g диаграмма построена")
+        self.log_text.append("V-g диаграмма построена")
 
     # =============================================================
     # ПРОЧНОСТЬ (ТЗ, низкий приоритет)
@@ -6100,11 +6100,11 @@ class MainWindow(QMainWindow):
                 safety_factor=w["sf"].value())
             text = ST.format_report(res)
         except Exception as e:
-            w["out"].setText(f"⚠️ Не удалось выполнить расчёт: {e}")
+            w["out"].setText(f"Внимание: Не удалось выполнить расчёт: {e}")
             return
         w["out"].setText(text)
         self.log_text.append(
-            f"🔩 Прочность: σ = {res['sigma'] / 1e6:.1f} МПа, "
+            f"Прочность: σ = {res['sigma'] / 1e6:.1f} МПа, "
             f"τ = {res['tau'] / 1e6:.1f} МПа, запас по σ "
             f"{res['MS_sigma']:+.2f}")
         self._last_structural = res
@@ -6182,10 +6182,10 @@ class MainWindow(QMainWindow):
         try:
             ch = self._polar_chars()
         except Exception as e:
-            self.sp_w["out"].setText(f"⚠️ {e}")
+            self.sp_w["out"].setText(f"Внимание: {e}")
             return
         self.sp_w["out"].setText(self._format_polar_chars(ch))
-        self.log_text.append(f"📊 Поляра: точек {ch.get('n_points')}, "
+        self.log_text.append(f"Поляра: точек {ch.get('n_points')}, "
                              f"e={ch.get('oswald_e') and round(ch['oswald_e'], 3)}, "
                              f"Cl_max={ch.get('cl_max') and round(ch['cl_max'], 3)}")
 
@@ -6193,7 +6193,7 @@ class MainWindow(QMainWindow):
         """Экспорт поляры в CSV (разделитель «;», UTF-8 BOM для Excel)."""
         rows = getattr(self, "_last_polar_rows", None) or self._results_rows()
         if len(rows) < 1:
-            self.sp_w["out"].setText("⚠️ Нет данных для экспорта")
+            self.sp_w["out"].setText("Внимание: Нет данных для экспорта")
             return
         path, _ = QFileDialog.getSaveFileName(
             self, "Сохранить поляру", "polar.csv", "CSV (*.csv)")
@@ -6202,17 +6202,17 @@ class MainWindow(QMainWindow):
         try:
             from postprocessing.report import export_csv
             export_csv(path, rows)
-            self.log_text.append(f"💾 Поляра сохранена: {path}")
-            self.sp_w["out"].append(f"\n💾 Сохранено: {path}")
+            self.log_text.append(f"Поляра сохранена: {path}")
+            self.sp_w["out"].append(f"\nСохранено: {path}")
         except Exception as e:
-            self.sp_w["out"].append(f"\n⚠️ Не удалось сохранить: {e}")
+            self.sp_w["out"].append(f"\nВнимание: Не удалось сохранить: {e}")
 
     def export_analysis_report(self):
         """Отчёт по шаблону (HTML) + CSV с полярой."""
         rows = self._results_rows()
         if len(rows) < 3:
             self.sp_w["out"].setText(
-                "⚠️ В таблице результатов меньше трёх точек — отчёт не "
+                "Внимание: В таблице результатов меньше трёх точек — отчёт не "
                 "сформировать.")
             return
         path, _ = QFileDialog.getSaveFileName(
@@ -6246,10 +6246,10 @@ class MainWindow(QMainWindow):
                 f.write(text)
             csv_path = os.path.splitext(path)[0] + "_polar.csv"
             export_csv(csv_path, rows)
-            self.log_text.append(f"📄 Отчёт сохранён: {path}")
-            self.sp_w["out"].append(f"\n📄 Отчёт: {path}\n💾 Поляра: {csv_path}")
+            self.log_text.append(f"Отчёт сохранён: {path}")
+            self.sp_w["out"].append(f"\nОтчёт: {path}\nПоляра: {csv_path}")
         except Exception as e:
-            self.sp_w["out"].append(f"\n⚠️ Не удалось сформировать отчёт: {e}")
+            self.sp_w["out"].append(f"\nВнимание: Не удалось сформировать отчёт: {e}")
 
     # =============================================================
     # ФОРМАТ КОНФИГУРАЦИИ: ПРЕСЕТЫ (ТЗ)
@@ -6288,7 +6288,7 @@ class MainWindow(QMainWindow):
                 params = self._session_params()
                 if not params:
                     w["out"].setText(
-                        "⚠️ Настройки проекта ещё не созданы — сначала "
+                        "Внимание: Настройки проекта ещё не созданы — сначала "
                         "подготовьте расчёт либо выберите встроенный шаблон.")
                     return
                 description = "Экспорт текущих настроек проекта AeroOpt"
@@ -6296,14 +6296,14 @@ class MainWindow(QMainWindow):
             else:
                 preset = PF.builtin_presets().get(source)
                 if not preset:
-                    w["out"].setText("⚠️ Встроенный шаблон не найден")
+                    w["out"].setText("Внимание: Встроенный шаблон не найден")
                     return
                 params = dict(preset.get("params") or {})
                 description = str(preset.get("description") or "")
                 based_on = source
             check = PF.validate_preset(PF.make_preset(name, params))
             if not check["ok"]:
-                w["out"].setText("⚠️ Пресет не прошёл проверку:\n"
+                w["out"].setText("Внимание: Пресет не прошёл проверку:\n"
                                  + "\n".join("  • " + e
                                               for e in check["errors"]))
                 return
@@ -6315,12 +6315,12 @@ class MainWindow(QMainWindow):
             PF.export_preset(path, name, params, description=description,
                              based_on=based_on)
             w["out"].setText(
-                PF.describe_format() + "\n\n💾 Сохранено: " + path
+                PF.describe_format() + "\n\nСохранено: " + path
                 + f"\nПараметров: {len(params)}\n\nСодержимое:\n"
                 + "\n".join(f"  {k} = {v}" for k, v in sorted(params.items())))
-            self.log_text.append(f"💾 Пресет сохранён: {path}")
+            self.log_text.append(f"Пресет сохранён: {path}")
         except Exception as e:
-            w["out"].setText(f"⚠️ Ошибка экспорта: {e}")
+            w["out"].setText(f"Внимание: Ошибка экспорта: {e}")
 
     def import_config_preset(self):
         """Импорт и проверка пресета."""
@@ -6334,7 +6334,7 @@ class MainWindow(QMainWindow):
         try:
             preset = PF.import_preset(path)
         except Exception as e:
-            w["out"].setText(f"⚠️ Не удалось прочитать пресет: {e}")
+            w["out"].setText(f"Внимание: Не удалось прочитать пресет: {e}")
             return
         self._imported_preset = preset
         w["name"].setText(preset.get("name") or "Импортированный")
@@ -6344,11 +6344,11 @@ class MainWindow(QMainWindow):
                  f"Версия формата: {preset.get('schema_version')}",
                  f"Параметров: {len(params)}"]
         for wn in preset.get("_warnings", []):
-            lines.append(f"⚠️ {wn}")
+            lines.append(f"Внимание: {wn}")
         lines.append("")
         lines += [f"  {k} = {v}" for k, v in sorted(params.items())]
         w["out"].setText("\n".join(lines))
-        self.log_text.append(f"⬇️ Пресет импортирован: {path}")
+        self.log_text.append(f"Пресет импортирован: {path}")
 
     def apply_imported_preset(self):
         """Применяет импортированный пресет к настройкам проекта."""
@@ -6356,7 +6356,7 @@ class MainWindow(QMainWindow):
         w = self.pr_w
         preset = self._imported_preset
         if not preset:
-            w["out"].setText("⚠️ Сначала импортируйте файл пресета")
+            w["out"].setText("Внимание: Сначала импортируйте файл пресета")
             return
         params = dict(preset.get("params") or {})
         try:
@@ -6378,16 +6378,16 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
         text = (f"Применено параметров: {len(applied)}\n"
-                + "\n".join("  ✔ " + a for a in applied))
+                + "\n".join("  Готово: " + a for a in applied))
         if skipped:
             text += (f"\n\nПропущено: {len(skipped)}\n"
-                     + "\n".join("  ⚠ " + s for s in skipped))
+                     + "\n".join("  Внимание: " + s for s in skipped))
         text += ("\n\nЗначения записаны в объект расчёта проекта. Перед "
                  "запуском проверьте их в разделе Solver Settings и в меню "
                  "«SU2»: часть ключей SU2 пишется в config.cfg только при "
                  "подготовке нового расчёта.")
         w["out"].setText(text)
-        self.log_text.append(f"✔️ Пресет «{preset.get('name')}» применён: "
+        self.log_text.append(f"Готово: Пресет «{preset.get('name')}» применён: "
                              f"{len(applied)} параметров")
 
 
@@ -6450,6 +6450,16 @@ def main():
         try:
             from app_logging import get_logger
             get_logger().warning("Меню SU2 не подключено: %s", e)
+        except Exception:
+            pass
+    # Меню «Справка»: условия использования и политика конфиденциальности.
+    try:
+        from ui import legal as _legal
+        _legal.install_menu(window)
+    except Exception as e:
+        try:
+            from app_logging import get_logger
+            get_logger().warning("Меню «Справка» не подключено: %s", e)
         except Exception:
             pass
     return app.exec_()
