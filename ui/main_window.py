@@ -659,6 +659,7 @@ class MainWindow(QMainWindow):
             global_defs, ["Config Presets (Формат конфигурации)"])
         global_defs.setExpanded(True)
         component = QTreeWidgetItem(root_item, ["Component 1 (comp1)"])
+        self.item_component = component
         component.setExpanded(True)
         geom = QTreeWidgetItem(component, ["Geometry 1"])
         self.geom_node = geom
@@ -671,6 +672,7 @@ class MainWindow(QMainWindow):
         geom.setExpanded(True)
         self.item_mesh = QTreeWidgetItem(component, ["Mesh 1"])
         study = QTreeWidgetItem(root_item, ["Study 1"])
+        self.item_study = study
         self.item_solver = QTreeWidgetItem(study, ["Solver Settings"])
         self.item_opt = QTreeWidgetItem(study, ["Multipoint Optimization"])
         # ТЗ: аэроупругость (средний приоритет) и прочность (низкий)
@@ -680,6 +682,7 @@ class MainWindow(QMainWindow):
             study, ["Strength (Прочность корневого сечения)"])
         study.setExpanded(True)
         results_node = QTreeWidgetItem(root_item, ["Results"])
+        self.item_results = results_node
         self.item_trim = QTreeWidgetItem(results_node, ["Trim & Balancing (Балансировка)"])
         self.item_flow_viz = QTreeWidgetItem(results_node, ["Flow Visualization (Поле обтекания)"])
         self.item_history = QTreeWidgetItem(results_node, ["Generation History"])
@@ -851,12 +854,15 @@ class MainWindow(QMainWindow):
         wizard_group = QGroupBox("Помощник импорта (Import Wizard)")
         wiz_lay = QVBoxLayout(wizard_group)
         # Сокращённый текст + кнопка «? Помощь» с подробной подсказкой
-        wiz_short = QLabel("Загрузите фюзеляж или STL, задайте роль и переходите к Mesh.")
+        wiz_short = QLabel("Загрузите геометрию, задайте роль и переходите к Mesh.")
         wiz_short.setStyleSheet("font-size: 10px; color: #2c4257;")
         wiz_lay.addWidget(wiz_short)
         btn_wiz_help = QPushButton("Помощь")
         btn_wiz_help.setToolTip(
-            "Шаг 1: Нажмите «Фюзеляж» или «STL» для импорта компонентов.\n"
+            "Шаг 1: Нажмите «Фюзеляж» или «STL» и выберите файл. Помимо "
+            "STL принимаются CAD-форматы — STEP, IGES, Parasolid, ACIS, "
+            "BREP, NASTRAN, PLY, OBJ, OFF; они триангулируются через "
+            "gmsh автоматически.\n"
             "Шаг 2: В таблице ниже выберите роль детали из выпадающего списка "
             "(для полной модели используйте «Произвольный самолет»/«Другое»).\n"
             "Шаг 3: Выберите в дереве слева узел «Mesh 1» и нажмите "
@@ -1612,7 +1618,7 @@ class MainWindow(QMainWindow):
 
         # Page 14-17: аэроупругость, прочность, спецфункции, пресеты (ТЗ)
         from ui.analysis_pages import (
-            build_aeroelastic_page, build_presets_page,
+            build_aeroelastic_page, build_presets_page, build_info_page,
             build_specials_page, build_structural_page)
         self.page_aeroelastic, self.ae_w = build_aeroelastic_page(
             on_check=self.run_aeroelastic_check,
@@ -1626,6 +1632,47 @@ class MainWindow(QMainWindow):
             on_report=self.export_analysis_report,
             on_csv=self.export_polar_csv)
         self.settings_stack.addWidget(self.page_specials)
+        # Корневые узлы дерева показывают поясняющий текст, а не поля:
+        # настройки живут в дочерних узлах, дублировать их кнопками здесь
+        # незачем. Кнопки перехода стоят в самом низу страницы.
+        def _goto(node):
+            def _h():
+                self.tree.setCurrentItem(node)
+                self.tree.scrollToItem(node)
+            return _h
+        self.page_info_global = build_info_page("global_defs", [
+            ("Условия полёта и правила", "Полётные условия и правила "
+             "проектирования", _goto(self.item_rules)),
+            ("Формат конфигурации", "Именованные пресеты config.cfg",
+             _goto(self.item_presets)),
+        ])
+        self.settings_stack.addWidget(self.page_info_global)
+        self.page_info_component = build_info_page("component", [
+            ("Состав модели", "Список деталей и их роли",
+             _goto(self.item_components)),
+            ("Расчётная сетка", "Построение объёмной сетки",
+             _goto(self.item_mesh)),
+        ])
+        self.settings_stack.addWidget(self.page_info_component)
+        self.page_info_study = build_info_page("study", [
+            ("Настройки решателя", "Тип уравнений, итерации, ядра",
+             _goto(self.item_solver)),
+            ("Перебор вариантов", "Многоточечная оптимизация",
+             _goto(self.item_opt)),
+            ("Аэроупругость", "Флаттер и дивергенция",
+             _goto(self.item_aeroelastic)),
+        ])
+        self.settings_stack.addWidget(self.page_info_study)
+        self.page_info_results = build_info_page("results", [
+            ("Балансировка", "Подбор отклонения руля высоты",
+             _goto(self.item_trim)),
+            ("Поле обтекания", "Распределение давлений по поверхности",
+             _goto(self.item_flow_viz)),
+            ("Поляра и отчёты", "Поляра, наилучшее качество, выгрузка",
+             _goto(self.item_specials)),
+        ])
+        self.settings_stack.addWidget(self.page_info_results)
+
         self.page_presets, self.pr_w = build_presets_page(
             on_export=self.export_config_preset,
             on_import=self.import_config_preset,
@@ -2744,8 +2791,14 @@ class MainWindow(QMainWindow):
         # узел 'Active Parts' больше не существует, но оставленная
         # проверка на parent == self.item_active_bodies теперь не сработает.
         mapping = [
-            (self.item_global_defs, self.page_global_defs,
+            (self.item_global_defs, self.page_info_global,
              "Settings - Global Definitions"),
+            (self.item_component, self.page_info_component,
+             "Settings - Component 1"),
+            (self.item_study, self.page_info_study,
+             "Settings - Study 1"),
+            (self.item_results, self.page_info_results,
+             "Settings - Results"),
             (self.item_rules, self.page_global_defs,
              "Settings - Design Rules"),
             (self.item_components, self.page_components,
@@ -3192,8 +3245,8 @@ class MainWindow(QMainWindow):
     # ЗАГРУЗКА STL
     # =============================================================
     def load_stl_fuselage(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Загрузить фюзеляж", "",
-                                                "STL (*.stl)")
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Загрузить фюзеляж", "", self._geometry_file_filter())
         for p in paths:
             self._add_body(p, "fuselage")
         # КАМЕРУ НЕ СБРАСЫВАЕМ
@@ -3240,9 +3293,21 @@ class MainWindow(QMainWindow):
         self.log_text.append(f"Готово: Сборка импортирована по телам: {len(parts)}")
         return True
 
+    @staticmethod
+    def _geometry_file_filter() -> str:
+        """Фильтр диалога импорта геометрии.
+
+        Приложение поддерживает не только STL: ``cad_to_stl`` триангулирует
+        CAD-модель через gmsh. Прежний фильтр ``"STL (*.stl)"`` это скрывал,
+        и пользователь не мог выбрать STEP или IGES, хотя код их принимал.
+        """
+        cad = " ".join("*" + e for e in CAD_EXTENSIONS)
+        return ("Все поддерживаемые (*.stl %s);;"
+                "STL (*.stl);;CAD (%s);;Все файлы (*)" % (cad, cad))
+
     def add_bodies(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Добавить компоненты", "",
-                                                "STL (*.stl)")
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Добавить компоненты", "", self._geometry_file_filter())
         for p in paths:
             self._add_body(p, "other")
         # КАМЕРУ НЕ СБРАСЫВАЕМ

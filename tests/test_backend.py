@@ -1650,6 +1650,60 @@ check("совет зависит от сравнения рекомендаци�
 _rec = min(11, max(1, int(round(174171 / 25000.0))))
 check("сетка на 174171 узлов -> 7 ядер, а не 1", _rec == 7, _rec)
 
+print("== корневые узлы дерева показывают пояснения, а не поля ==")
+import ui.analysis_pages as _AP
+check("пояснительные страницы описаны для всех четырёх разделов",
+      set(_AP.INFO_PAGES) == {"global_defs", "component", "study", "results"},
+      sorted(_AP.INFO_PAGES))
+for _k, _spec in _AP.INFO_PAGES.items():
+    check("раздел %s: есть заголовок, вступление и разделы" % _k,
+          bool(_spec.get("title")) and bool(_spec.get("lead"))
+          and len(_spec.get("body", [])) >= 2)
+
+
+# Стабы Qt — это MagicMock, раскладка в них не накапливает виджеты,
+# поэтому порядок проверяем по исходнику построителя: распорка должна
+# стоять до блока кнопок.
+_ap_src = open("ui/analysis_pages.py", encoding="utf-8").read()
+_bi = _ap_src.index("def build_info_page")
+_bsrc = _ap_src[_bi:]
+check("в пояснительной странице распорка стоит до блока кнопок",
+      _bsrc.index("lay.addStretch(1)") < _bsrc.index("if actions:"),
+      "addStretch на %d, if actions на %d"
+      % (_bsrc.index("lay.addStretch(1)"), _bsrc.index("if actions:")))
+check("пояснения идут раньше распорки",
+      _bsrc.index("spec[\"body\"]") < _bsrc.index("lay.addStretch(1)"))
+for _k in ("global_defs", "component", "study", "results"):
+    _pg = _AP.build_info_page(_k, [("Перейти", "", None)])
+    check("страница %s строится без ошибки" % _k, _pg is not None)
+check("узел Global Definitions ведёт на пояснение, а не на форму",
+      "(self.item_global_defs, self.page_info_global" in _src)
+for _n in ("item_component", "item_study", "item_results"):
+    check("узел %s связан со страницей пояснений" % _n,
+          ("(self.%s, self.page_info_" % _n) in _src)
+check("Design Rules по-прежнему открывает форму с параметрами",
+      "(self.item_rules, self.page_global_defs" in _src)
+
+print("== импорт принимает не только STL ==")
+import ui.main_window as _MW
+_f = _MW.MainWindow._geometry_file_filter()
+for _ext in (".stl", ".step", ".stp", ".iges", ".igs", ".x_t", ".sat",
+             ".brep", ".nas", ".ply", ".obj", ".off"):
+    check("фильтр импорта содержит %s" % _ext, ("*" + _ext) in _f, _f[:60])
+check("оба диалога импорта используют общий фильтр",
+      _src.count("self._geometry_file_filter()") >= 2,
+      _src.count("self._geometry_file_filter()"))
+# Три диалога экспорта остались на STL — это запись, а не чтение,
+# четвёртое вхождение строки "STL (*.stl)" — упоминание в docstring.
+check("экспорт по-прежнему пишет только STL",
+      _src.count('"STL (*.stl)"') == 4
+      and _src.index("def _geometry_file_filter")
+      < _src.index('f"{role}.stl", "STL (*.stl)"'))
+check("помощник импорта не обещает только STL",
+      "Загрузите геометрию, задайте роль" in _src
+      and "Загрузите фюзеляж или STL, задайте роль" not in _src)
+check("помощник перечисляет CAD-форматы", "STEP, IGES, Parasolid" in _src)
+
 # ---------------------------------------------------------------- summary
 print()
 if FAIL:
