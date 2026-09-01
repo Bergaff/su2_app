@@ -1747,72 +1747,70 @@ print("== произвольный срез симметрии: предупре
 check("предупреждение про XY убрано", "крыло лежит в " not in _src)
 check("предупреждение про YZ убрано", "разрез по размаху" not in _src)
 
-print("== GPU: честная диагностика и запрет на CPU-сборке ==")
+print("== GPU убран из интерфейса, код-заготовка сохранена ==")
+# В расчёт берём только исполняемый код: комментарии и докстринги
+# упоминать GPU могут — это документация для того, кто будет возвращать
+# интерфейс, если в SU2 появится рабочая GPU-сборка.
+import ast as _ast2
+_tree2 = _ast2.parse(_src)
+_str_nodes = [n for n in _ast2.walk(_tree2) if isinstance(n, _ast2.Constant)
+              and isinstance(n.value, str)]
+# докстринги исключаем
+_docstrings = set()
+for _n2 in _ast2.walk(_tree2):
+    if isinstance(_n2, (_ast2.Module, _ast2.FunctionDef,
+                        _ast2.AsyncFunctionDef, _ast2.ClassDef)):
+        _b = getattr(_n2, "body", None)
+        if (_b and isinstance(_b[0], _ast2.Expr)
+                and isinstance(_b[0].value, _ast2.Constant)
+                and isinstance(_b[0].value.value, str)):
+            _docstrings.add(id(_b[0].value))
+_ui_strs = [n.value for n in _str_nodes
+            if id(n) not in _docstrings
+            and ("GPU" in n.value or "ГПУ" in n.value
+                 or "вычислитель" in n.value or "Вычислитель" in n.value)]
+check("в main_window нет пользовательских строк про GPU",
+      _ui_strs == [], _ui_strs[:5])
+
+# Идентификаторов удалённых виджетов в исполняемом коде не осталось.
+_names2 = [n.attr for n in _ast2.walk(_tree2) if isinstance(n, _ast2.Attribute)]
+check("нет combo_device", "combo_device" not in _names2,
+      [a for a in set(_names2) if "combo_device" in a])
+check("нет slider_gpu_load", "slider_gpu_load" not in _names2)
+check("нет lbl_gpu_load_value / lbl_gpu_load_row",
+      "lbl_gpu_load_value" not in _names2 and "lbl_gpu_load_row" not in _names2)
+check("нет lbl_status_gpu", "lbl_status_gpu" not in _names2)
+check("в статус-баре остались ЦПУ и память",
+      "lbl_status_cpu" in _names2 and "lbl_status_memory" in _names2)
+
+check("_current_device жёстко возвращает cpu",
+      "def _current_device" in _src and 'return "cpu"' in _src)
+check("_gpu_load_percent остался и возвращает 0",
+      "def _gpu_load_percent" in _src)
+
+# Старый файл проекта не должен включить GPU-режим в обход интерфейса.
+check("compute_device всегда выставляется в cpu",
+      _src.count('self._compute_device_pending = "cpu"') >= 5,
+      _src.count('self._compute_device_pending = "cpu"'))
+check("присваивания cpu_gpu не осталось",
+      'self._compute_device_pending = "cpu_gpu"' not in _src)
+check("проект сохраняется с compute_device=cpu",
+      '"compute_device": "cpu",' in _src)
+
+# Код-заготовка сохранена: если в SU2 появится рабочая GPU-сборка,
+# вернуть интерфейс можно без переписывания логики.
 _wsrc = open("solver/workers.py", encoding="utf-8").read()
-# «ROCm» в тексте остаётся, но только в фразе «поддержки AMD/ROCm в SU2 нет».
-for _bad in ("-DENABLE_CUDA", "-DENABLE_HIP", "ENABLE_HIP"):
-    check("неверный флаг сборки %s убран из workers.py" % _bad,
-          _bad not in _wsrc)
-    check("неверный флаг сборки %s убран из main_window.py" % _bad,
-          _bad not in _src)
-# Отдельно: нигде не должно остаться утверждения, что SU2 умеет
-# работать через ROCm. rocm-smi в докстринге определения GPU законен.
-check("нет утверждения, что SU2 работает через ROCm",
-      "ROCm/CUDA" not in _src and "ROCm/CUDA" not in _wsrc
-      and "через ROCm" not in _src and "через ROCm" not in _wsrc)
-check("workers.py называет настоящую опцию meson",
-      "-Denable-cuda" in _wsrc)
-check("main_window называет настоящую опцию meson",
-      "-Denable-cuda" in _src)
-check("в workers.py сказано, что поддержки AMD в SU2 нет",
-      "Поддержки AMD/ROCm в SU2 нет" in _wsrc)
-check("выбор GPU проверяется через su2_gpu_capable до запуска",
-      "from solver.gpu_launcher import su2_gpu_capable" in _src
-      and "_cap = su2_gpu_capable(_exe)" in _src)
-check("без поддержки GPU вычислитель возвращается на CPU",
-      'self.combo_device.setCurrentIndex(0)' in _src
-      and 'self._compute_device_pending = "cpu"' in _src)
-_i_chk = _src.index("_cap = su2_gpu_capable(_exe)")
-_i_set = _src.index('self._compute_device_pending = "cpu"', _i_chk)
-check("откат на CPU идёт после проверки, а не до неё", _i_chk < _i_set)
-check("в сообщении названы официальные сборки без GPU",
-      "win64-omp" in _src and "win64-mpi" in _src)
-
-print("== маркеры при резке по произвольной плоскости ==")
-_g = open("mesh/gmsh_generator.py", encoding="utf-8").read()
-check("срез определяется по новым вершинам, а не по расстоянию",
-      "_all_new = ~_old_v.any(axis=1)" in _g)
-check("порог совпадения точек не зависит от шага сетки",
-      "_pt_tol = 1e-7 * float(max(1.0, bbox_size))" in _g
-      and "_on_surf_tol" not in _g)
-check("грань bbox на плоскости симметрии не считается дальним полем",
-      "_skip_lo" in _g and "_skip_hi" in _g)
-check("пропуск грани bbox применяется к каждой оси отдельно",
-      "if _ax not in _skip_lo:" in _g and "if _ax not in _skip_hi:" in _g)
-check("поверхность до резки передаётся в write_su2",
-      "pre_clip_points=_pre_clip_pts" in _g
-      and 'kwargs.get("pre_clip_points"' in _g)
-
-print("== ENABLE_CUDA доходит до config.cfg ==")
-from solver.config_builder import build_su2_config as _bsc
-_ref = (1.120, 9.742, -0.883, 0.0, 0.0)
-_phys = {"mach": 0.176, "pressure": 101325.0, "temperature": 288.15}
-for _sv in ("EULER", "RANS"):
-    _on = _bsc(3.0, _phys, _sv, _ref, markers=["airfoil"], enable_cuda=True)
-    _off = _bsc(3.0, _phys, _sv, _ref, markers=["airfoil"], enable_cuda=False)
-    check("%s: ENABLE_CUDA= YES при включённом GPU" % _sv,
-          any(l.startswith("ENABLE_CUDA= YES") for l in _on.splitlines()))
-    check("%s: ENABLE_CUDA закомментирован без GPU" % _sv,
-          any(l.startswith("% ENABLE_CUDA= NO") for l in _off.splitlines()))
-    check("%s: ENABLE_CUDA ровно один раз (SU2 падает на повторах)" % _sv,
-          sum(1 for l in _on.splitlines() if "ENABLE_CUDA" in l and not l.startswith("%")) == 1)
-import tempfile as _tf2
-import solver.session as _ses
-check("сессия хранит enable_cuda по умолчанию False",
-      getattr(_ses.CalculationSession(_tf2.mkdtemp()), "enable_cuda", None) is False)
-_wsrc2 = open("solver/workers.py", encoding="utf-8").read()
-check("workers выставляет enable_cuda только при реальном GPU-запуске",
-      '_sess.enable_cuda = (launch_mode != "cpu")' in _wsrc2)
+_gsrc_l = open("solver/gpu_launcher.py", encoding="utf-8").read()
+_csrc = open("solver/config_builder.py", encoding="utf-8").read()
+check("solver/gpu_launcher.py на месте",
+      os.path.exists("solver/gpu_launcher.py"))
+check("su2_gpu_capable сохранён", "def su2_gpu_capable" in _gsrc_l)
+check("GPU-ветки в workers.py сохранены", "cpu_gpu" in _wsrc)
+check("проводка ENABLE_CUDA сохранена",
+      "enable_cuda" in _csrc and "ENABLE_CUDA= YES" in _csrc)
+check("неверных флагов сборки CMake не осталось",
+      "-DENABLE_CUDA" not in _wsrc and "-DENABLE_HIP" not in _wsrc
+      and "-DENABLE_CUDA" not in _src and "-DENABLE_HIP" not in _src)
 
 # ---------------------------------------------------------------- summary
 print()

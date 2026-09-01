@@ -1311,39 +1311,27 @@ class MainWindow(QMainWindow):
         cpu_load_lay.addWidget(self.spin_cpu_cores)
         perf_lay.addRow("Нагрузка CPU:", cpu_load_lay)
 
-        # Вычислитель: CPU / CPU + GPU
-        self.combo_device = QComboBox()
-        self.combo_device.addItems([
-            "Только CPU (mpiexec)",
-            "+CPU + GPU (гибридный SU2)",
-        ])
-        self.combo_device.setCurrentIndex(0)
-        self.combo_device.setToolTip(
-            "Только CPU — классический mpiexec (работает на любой машине).\n"
-            "Только CPU — то, что дают официальные сборки SU2.\n"
-            "CPU + GPU — требует SU2, собранного из исходников с meson\n"
-            "setup -Denable-cuda=true (только NVIDIA; поддержки AMD/ROCm\n"
-            "в SU2 нет). В официальных win64-omp/win64-mpi эта опция\n"
-            "выключена, поэтому видеокарта там не используется."
-        )
-        perf_lay.addRow("Вычислитель:", self.combo_device)
-
-        # Слайдер «Нагрузка GPU» (0..100%). Скрывается, если вычислитель = Только CPU.
-        self.slider_gpu_load = QSlider(Qt.Horizontal)
-        self.slider_gpu_load.setRange(0, 100)
-        self.slider_gpu_load.setValue(50)
-        self.slider_gpu_load.setTickPosition(QSlider.TicksBelow)
-        self.slider_gpu_load.setTickInterval(25)
-        self.lbl_gpu_load_value = QLabel("50%")
-        self.lbl_gpu_load_value.setStyleSheet(
-            "color: #2E5A78; font-weight: bold; min-width: 40px;"
-        )
-        gpu_load_lay = QHBoxLayout()
-        gpu_load_lay.addWidget(self.slider_gpu_load, 1)
-        gpu_load_lay.addWidget(self.lbl_gpu_load_value)
-        gpu_load_lay.addStretch()
-        self.lbl_gpu_load_row = QLabel("Нагрузка GPU:")
-        perf_lay.addRow(self.lbl_gpu_load_row, gpu_load_lay)
+        # === Вычислитель и нагрузка GPU из интерфейса убраны ============
+        #
+        # Официальные сборки SU2 (win64-omp, win64-mpi, linux64-omp,
+        # linux64-mpi, macos64, macos64-mpi) видеокарту не используют: в
+        # release-конфигурации SU2 опция -Denable-cuda не включена ни для
+        # одной платформы. А сама поддержка CUDA в SU2 ограничена одним
+        # местом — config_template.cfg: «Use CUDA GPU Acceleration for
+        # FGMRES Linear Solver Only», то есть только произведение матрицы
+        # на вектор во внутреннем цикле линейного решателя.
+        #
+        # Показывать пользователю выбор, который не работает, бессмысленно.
+        # При этом весь служебный слой оставлен на месте: solver/gpu_launcher.py,
+        # GPU-ветки в solver/workers.py, проводка ENABLE_CUDA в
+        # solver/config_builder.py и поля _compute_device_pending /
+        # _gpu_percent_pending. _current_device() жёстко возвращает "cpu",
+        # поэтому код просто не выходит на GPU-ветки. Если в SU2 появится
+        # рабочая GPU-сборка, вернуть интерфейс можно, не переписывая логику.
+        #
+        # self.combo_device, self.slider_gpu_load, self.lbl_gpu_load_value
+        # и self.lbl_gpu_load_row больше не создаются; все обращения к ним
+        # ниже защищены getattr().
 
         # === Опции расчёта: RAMP-разгон ================================
         # Галочки «Плоскость симметрии» больше нет: она дублировала список
@@ -1397,7 +1385,7 @@ class MainWindow(QMainWindow):
         cores_apply_lay = QHBoxLayout()
         self.btn_apply_cores = QPushButton("Готово: Применить")
         self.btn_apply_cores.setToolTip(
-            "Подтвердить выбранные нагрузки CPU/GPU. "
+            "Подтвердить выбранную нагрузку CPU. "
             "Используется при следующем запуске расчёта."
         )
         self.btn_apply_cores.clicked.connect(self.apply_load_level)
@@ -1742,14 +1730,13 @@ class MainWindow(QMainWindow):
         self.lbl_status_time = QLabel("")
         self.lbl_status_time.setStyleSheet("font-weight: bold; color: #2E5A78; margin-right: 15px;")
         sb.addPermanentWidget(self.lbl_status_time)
-        # Живые показатели как в диспетчере задач: ЦПУ, ГПУ, память.
+        # Живые показатели как в диспетчере задач: ЦПУ и память.
+        # ГПУ убран: SU2 считает только на CPU, и счётчик загрузки
+        # видеокарты рядом с показателями расчёта вводил в заблуждение.
         _mono = "font-family: Consolas, monospace; color: #2c4257; margin-right: 12px;"
         self.lbl_status_cpu = QLabel("ЦПУ н/д")
         self.lbl_status_cpu.setStyleSheet(_mono)
         sb.addPermanentWidget(self.lbl_status_cpu)
-        self.lbl_status_gpu = QLabel("ГПУ н/д")
-        self.lbl_status_gpu.setStyleSheet(_mono)
-        sb.addPermanentWidget(self.lbl_status_gpu)
         self.lbl_status_memory = QLabel("Память н/д")
         self.lbl_status_memory.setStyleSheet(_mono)
         sb.addPermanentWidget(self.lbl_status_memory)
@@ -1808,7 +1795,7 @@ class MainWindow(QMainWindow):
             snap = self._system_monitor.snapshot(cores_used=cores_used)
             labels = SystemMonitor.labels(snap)
             self.lbl_status_cpu.setText(labels["cpu"])
-            self.lbl_status_gpu.setText(labels["gpu"])
+            pass  # индикатора ГПУ в статус-баре больше нет
             self.lbl_status_memory.setText(labels["mem"])
             if snap["rss"] is None and not getattr(
                     self, "_psutil_install_attempted", False):
@@ -1816,7 +1803,7 @@ class MainWindow(QMainWindow):
                 self._try_install_psutil()
         except Exception:
             self.lbl_status_cpu.setText("ЦПУ н/д")
-            self.lbl_status_gpu.setText("ГПУ н/д")
+            pass  # индикатора ГПУ в статус-баре больше нет
             self.lbl_status_memory.setText("Память н/д")
 
     # ------------------------------------------------------------------
@@ -2005,7 +1992,8 @@ class MainWindow(QMainWindow):
     def _gpu_load_percent(self) -> int:
         """Текущее значение слайдера нагрузки GPU (0..100)."""
         try:
-            return int(self.slider_gpu_load.value())
+            # Слайдера нагрузки GPU в интерфейсе нет — доля GPU всегда 0.
+            return 0
         except Exception:
             return 0
 
@@ -2041,15 +2029,24 @@ class MainWindow(QMainWindow):
         return max(1, cores)
 
     def _current_device(self) -> str:
-        """'cpu' или 'cpu_gpu' по combo_device."""
+        """Всегда "cpu": выбора вычислителя в интерфейсе нет.
+
+        GPU-ветки в solver/workers.py оставлены, но недостижимы, пока
+        _current_device() возвращает "cpu".
+        """
         try:
-            idx = int(self.combo_device.currentIndex())
+            return "cpu"
+            idx = 0
         except Exception:
             idx = 0
         return "cpu_gpu" if idx == 1 else "cpu"
 
     def _refresh_load_status_label(self):
-        """Обновляет lbl_cores_status: '50% = 4 ядер CPU + 50% GPU (RTX)' и т.п."""
+        """Обновляет lbl_cores_status: 'Применено: 4 ядер CPU (50%)'.
+
+        GPU в индикаторе не показывается: выбора вычислителя в
+        интерфейсе нет, _current_device() всегда возвращает "cpu".
+        """
         if not hasattr(self, "lbl_cores_status"):
             return
         try:
@@ -2057,36 +2054,11 @@ class MainWindow(QMainWindow):
             self.lbl_cpu_load_value.setText(f"{cpu_pct}%")
         except Exception:
             cpu_pct = 50
-        try:
-            gpu_pct = self._gpu_load_percent()
-            self.lbl_gpu_load_value.setText(f"{gpu_pct}%")
-        except Exception:
-            gpu_pct = 0
         cores = self._resolve_cores_for_level()
-        device = self._current_device()
-        parts = [f"Применено: {cores} ядер CPU ({cpu_pct}%)"]
-        if device == "cpu_gpu":
-            gpus = self._detect_gpus()
-            if gpus:
-                gpu_names = ", ".join(g["name"] for g in gpus[:2])
-                if len(gpus) > 2:
-                    gpu_names += f" +{len(gpus) - 2}"
-                parts.append(f"GPU {gpu_pct}% × {len(gpus)} ({gpu_names})")
-            else:
-                parts.append("GPU — не обнаружен")
-        else:
-            # На «Только CPU» скрываем строку GPU
-            pass
         try:
-            self.lbl_cores_status.setText(" · ".join(parts))
-        except Exception:
-            pass
-        # Скрываем/показываем строку «Нагрузка GPU»
-        gpu_visible = (device == "cpu_gpu")
-        try:
-            self.lbl_gpu_load_row.setVisible(gpu_visible)
-            self.slider_gpu_load.setVisible(gpu_visible)
-            self.lbl_gpu_load_value.setVisible(gpu_visible)
+            self.lbl_cores_status.setText(
+                f"Применено: {cores} ядер CPU ({cpu_pct}%)"
+            )
         except Exception:
             pass
 
@@ -2098,12 +2070,8 @@ class MainWindow(QMainWindow):
             self.slider_cpu_load.valueChanged.connect(
                 lambda *_: self._refresh_load_status_label()
             )
-            self.slider_gpu_load.valueChanged.connect(
-                lambda *_: self._refresh_load_status_label()
-            )
-            self.combo_device.currentIndexChanged.connect(
-                lambda *_: self._refresh_load_status_label()
-            )
+            # Слайдера нагрузки GPU и выбора вычислителя в интерфейсе
+            # нет, сигналы от них не подключаются.
             self.spin_cpu_cores.valueChanged.connect(
                 lambda *_: self._refresh_load_status_label()
             )
@@ -2205,75 +2173,16 @@ class MainWindow(QMainWindow):
         device = self._current_device()
         cores = self._resolve_cores_for_level()
         self._cpu_cores_pending = cores
+        # Выбора вычислителя в интерфейсе нет: всегда CPU. Служебные
+        # поля GPU-режима обнулены и оставлены только потому, что их
+        # читает solver/workers.py и файл проекта.
         gpu_info = ""
-        if device == "cpu_gpu":
-            gpus = self._detect_gpus()
-            if not gpus:
-                self.log_text.append(
-                    "Внимание: GPU не обнаружены (нет nvidia-smi / rocm-smi / видеокарты). "
-                    "Будет использован чистый CPU."
-                )
-                device = "cpu"
-                self._compute_device_pending = "cpu"
-                self._gpu_percent_pending = 0
-                self._gpu_percent_last_applied = 0
-            else:
-                names = ", ".join(g["name"] for g in gpus[:2])
-                if len(gpus) > 2:
-                    names += f" (+{len(gpus) - 2})"
-                gpu_info = f" + {len(gpus)} GPU ({names})"
-                self._compute_device_pending = "cpu_gpu"
-                self._gpu_percent_pending = self._gpu_load_percent()
-                self._gpu_percent_last_applied = self._gpu_percent_pending
-        else:
-            self._compute_device_pending = "cpu"
-            self._gpu_percent_pending = 0
-            self._gpu_percent_last_applied = 0
-        # Подсказка, что нужно для реального гибридного запуска
-        if device == "cpu_gpu":
-            # Сразу проверяем, умеет ли найденный SU2_CFD работать с GPU.
-            # Иначе пользователь выставляет процент GPU, ждёт ускорения,
-            # а расчёт идёт на CPU — и предупреждение приходит только
-            # после запуска, трижды подряд.
-            _exe = ""
-            try:
-                _exe = self.txt_su2_path.text().strip()
-            except Exception:
-                _exe = ""
-            try:
-                from solver.gpu_launcher import su2_gpu_capable
-                _cap = su2_gpu_capable(_exe)
-            except Exception:
-                _cap = False
-            if not _cap:
-                self.log_text.append(
-                    "Внимание: найденный SU2_CFD собран без поддержки GPU. "
-                    "Официальные сборки SU2 (win64-omp, win64-mpi) видеокарту "
-                    "не используют: в release-конфигурации SU2 опция "
-                    "-Denable-cuda выключена для всех платформ. "
-                    "Процент GPU на такой расчёт не влияет, вычислитель "
-                    "переключён обратно на «Только CPU»."
-                )
-                try:
-                    self.combo_device.blockSignals(True)
-                    self.combo_device.setCurrentIndex(0)
-                    self.combo_device.blockSignals(False)
-                except Exception:
-                    pass
-                self._compute_device_pending = "cpu"
-                self._gpu_percent_pending = 0
-                self._gpu_percent_last_applied = 0
-                device = "cpu"
-            else:
-                self.log_text.append(
-                    "Гибридный режим: рядом с SU2_CFD найдены библиотеки GPU. "
-                    "solver/workers.py запустит расчёт через `mpiexec -gpu` "
-                    "(Microsoft MPI) или с `OMP_TARGET_OFFLOAD=MANDATORY` "
-                    "(OpenMP offload)."
-                )
+        device = "cpu"
+        self._compute_device_pending = "cpu"
+        self._gpu_percent_pending = 0
+        self._gpu_percent_last_applied = 0
         self.log_text.append(
             f"Готово: Применено: {cores} ядер CPU ({self._cpu_load_percent()}%)"
-            f"{(' · GPU ' + str(self._gpu_load_percent()) + '%' + gpu_info) if device == 'cpu_gpu' else ''}"
         )
         # Обновляем индикатор
         self._refresh_load_status_label()
@@ -2925,9 +2834,10 @@ class MainWindow(QMainWindow):
             "flight": self.flight.to_dict(),
             # Настройки нагрузки (слайдеры)
             "cpu_percent": self._cpu_load_percent() if hasattr(self, "slider_cpu_load") else 50,
-            "gpu_percent": self._gpu_load_percent() if hasattr(self, "slider_gpu_load") else 0,
+            # Поля оставлены для совместимости со старыми файлами проекта.
+            "gpu_percent": 0,
             "cpu_cores_override": self._cpu_cores_override() if hasattr(self, "spin_cpu_cores") else 0,
-            "compute_device": self._current_device() if hasattr(self, "combo_device") else "cpu",
+            "compute_device": "cpu",
             "cpu_cores": self._cpu_cores_pending,
             # Опции расчёта: симметрия, RAMP и турбомодель
             # Галочки больше нет: симметрия включена, если есть плоскости.
@@ -3054,7 +2964,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            self.slider_gpu_load.setValue(max(0, min(100, int(gpu_percent))))
+            pass  # слайдера нагрузки GPU нет, значение из файла не применяем
         except Exception:
             pass
         try:
@@ -3063,7 +2973,7 @@ class MainWindow(QMainWindow):
             pass
         if device in ("cpu", "cpu_gpu"):
             try:
-                self.combo_device.setCurrentIndex(0 if device == "cpu" else 1)
+                pass  # выбора вычислителя в интерфейсе нет
             except Exception:
                 pass
         # === Восстановление опций расчёта: симметрия / RAMP
@@ -4556,11 +4466,11 @@ class MainWindow(QMainWindow):
                     "стартуем новую."
                 )
             elif choice == "resume":
-                # Восстанавливаем из сессии параметры GPU-режима
-                self._compute_device_pending = getattr(
-                    existing, "compute_device", "cpu")
-                self._gpu_percent_pending = int(
-                    getattr(existing, "gpu_percent", 0) or 0)
+                # compute_device и gpu_percent из старой сессии не
+                # восстанавливаем: выбора вычислителя в интерфейсе нет,
+                # иначе проект с "cpu_gpu" включил бы GPU-ветки в обход UI.
+                self._compute_device_pending = "cpu"
+                self._gpu_percent_pending = 0
                 self._cpu_cores_pending = int(
                     getattr(existing, "cpu_cores", self._cpu_cores_pending) or
                     self._cpu_cores_pending
@@ -4568,10 +4478,7 @@ class MainWindow(QMainWindow):
                 self.session = existing
                 self.log_text.append(
                     f"Возобновление сессии: точка "
-                    f"{existing.current_index + 1}/{len(existing.aoa_list)}, "
-                    f"вычислитель {self._compute_device_pending}"
-                    + (f" (GPU {self._gpu_percent_pending}%)"
-                       if self._compute_device_pending == "cpu_gpu" else "")
+                    f"{existing.current_index + 1}/{len(existing.aoa_list)}"
                 )
                 self._launch_session_runner()
                 return
@@ -4677,9 +4584,7 @@ class MainWindow(QMainWindow):
         self.log_text.append(
             f"\nЗапуск сессии ({mode}) в {datetime.now().strftime('%H:%M:%S')}, "
             f"точек: {len(aoa_list)}, ядер: {self._cpu_cores_pending}, "
-            f"решатель: {solver}, сетка: {mesh_quality_now}, "
-            f"вычислитель: {compute_device_now}"
-            + (f" (GPU {gpu_percent_now}%)" if compute_device_now == "cpu_gpu" else "")
+            f"решатель: {solver}, сетка: {mesh_quality_now}"
         )
         # Старт таймера всей сессии — для итогового отчёта «расчёт шёл X секунд»
         self._session_start_time = time.time()
@@ -4766,20 +4671,17 @@ class MainWindow(QMainWindow):
         if not session.paused:
             QMessageBox.warning(self, "Ошибка", "Сессия не находится на паузе.")
             return
-        # Восстанавливаем из сессии параметры GPU-режима (если есть).
-        # Старые сессии без этих полей → defaults "cpu"/0.
-        self._compute_device_pending = getattr(session, "compute_device", "cpu")
-        self._gpu_percent_pending = int(getattr(session, "gpu_percent", 0) or 0)
+        # Вычислитель всегда CPU: GPU-режим из интерфейса убран, и старый
+        # файл сессии не должен его включать.
+        self._compute_device_pending = "cpu"
+        self._gpu_percent_pending = 0
         self._cpu_cores_pending = int(
             getattr(session, "cpu_cores", self._cpu_cores_pending) or
             self._cpu_cores_pending
         )
         self.session = session
         self.log_text.append(
-            f"Возобновление сессии: ядер {self._cpu_cores_pending}, "
-            f"вычислитель {self._compute_device_pending}"
-            + (f" (GPU {self._gpu_percent_pending}%)"
-               if self._compute_device_pending == "cpu_gpu" else "")
+            f"Возобновление сессии: ядер {self._cpu_cores_pending}"
         )
         self._launch_session_runner()
 
@@ -4870,15 +4772,13 @@ class MainWindow(QMainWindow):
             self, "Незавершённый расчёт",
             f"Обнаружена приостановленная сессия ({tmp_session.mode}).\n"
             f"Точка {tmp_session.current_index + 1}/{len(tmp_session.aoa_list)}.\n"
-            f"Вычислитель: {getattr(tmp_session, 'compute_device', 'cpu')}\n\n"
+            "\n"
             "Возобновить расчёт?",
             QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
-            # Восстанавливаем из сессии параметры GPU-режима
-            self._compute_device_pending = getattr(
-                tmp_session, "compute_device", "cpu")
-            self._gpu_percent_pending = int(
-                getattr(tmp_session, "gpu_percent", 0) or 0)
+            # Вычислитель всегда CPU (см. выше).
+            self._compute_device_pending = "cpu"
+            self._gpu_percent_pending = 0
             self._cpu_cores_pending = int(
                 getattr(tmp_session, "cpu_cores", self._cpu_cores_pending) or
                 self._cpu_cores_pending
@@ -6219,9 +6119,9 @@ class MainWindow(QMainWindow):
 
         # Нагрузка CPU/GPU
         self.slider_cpu_load.setValue(50)
-        self.slider_gpu_load.setValue(50)
+        pass  # слайдера нагрузки GPU в интерфейсе нет
         self.spin_cpu_cores.setValue(0)
-        self.combo_device.setCurrentIndex(0)
+        pass  # выбора вычислителя в интерфейсе нет
         self._refresh_load_status_label()
 
         # RAMP. Галочки симметрии больше нет — состояние симметрии
