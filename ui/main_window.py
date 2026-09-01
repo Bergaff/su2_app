@@ -4484,17 +4484,27 @@ class MainWindow(QMainWindow):
                 )
                 self._launch_session_runner()
                 return
-        # Подсказка по числу ядер: для крупных сеток — больше ядер
+        # Подсказка по числу ядер. Прежний делитель 150000 точек на ядро
+        # для сетки в 174 тысячи точек давал рекомендацию «1 ядро» и тут
+        # же советовал нагрузку увеличить — совет противоречил сам себе.
+        # Ориентир для SU2 — порядка 25 тысяч узлов на ядро.
         try:
             npoin = _mesh_npoin(MESH_FILE) or 0
             if npoin > 0:
                 phys = max(1, int(getattr(self, "_cpu_cores_max", 1) or 1))
-                rec = min(phys, max(1, int(round(npoin / 150000.0))))
+                rec = min(phys, max(1, int(round(npoin / 25000.0))))
                 cur = self._resolve_cores_for_level()
+                if rec > cur:
+                    tail = ("Для ускорения увеличьте нагрузку CPU "
+                            "в Solver Settings.")
+                elif rec < cur:
+                    tail = ("Больше ядер здесь не ускорит расчёт: "
+                            "нагрузка упрётся в память и обмен.")
+                else:
+                    tail = "Нагрузка подобрана по размеру сетки."
                 self.log_text.append(
-                    f"Сетка ~{npoin} точек: рекомендуется ≈{rec} ядер "
-                    f"(сейчас {cur}). Для ускорения увеличьте нагрузку CPU "
-                    f"в Solver Settings.")
+                    f"Сетка ~{npoin} узлов: рекомендуется ≈{rec} ядер "
+                    f"(сейчас {cur}). {tail}")
         except Exception:
             pass
         physics = self.get_physics()
