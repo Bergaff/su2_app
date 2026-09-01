@@ -78,7 +78,15 @@ def _edge_index(a, b, uniq_keys, stride, base):
 
 def refine_to_edge_length(vertices, faces, max_edge,
                           max_faces=4_000_000, max_passes=60):
-    """Делит рёбра длиннее ``max_edge``, пока такие есть.
+    """Делит рёбра длиннее цели, пока такие есть.
+
+    ``max_edge`` — число либо массив длиной ``len(faces)`` с целевой
+    длиной для каждого треугольника. Массив нужен потому, что
+    равномерный шаг по всему самолёту не проходит: 0.084 м даёт 385894
+    грани и всё равно не разрешает оперение, а 0.028 м — 3705492.
+    Дозировать сгущение можно только по месту.
+
+    При разрезании потомки наследуют цель родителя.
 
     Возвращает ``(vertices, faces, info)``. В ``info``:
 
@@ -92,7 +100,16 @@ def refine_to_edge_length(vertices, faces, max_edge,
     v = np.asarray(vertices, dtype=float).copy()
     f = np.asarray(faces, dtype=np.int64).copy()
     n0 = len(f)
-    if len(f) == 0 or max_edge <= 0:
+    if len(f) == 0:
+        return v, f, {"passes": 0, "faces_before": n0, "faces_after": len(f),
+                      "capped": False, "reached": True, "max_edge": 0.0}
+    tgt = np.asarray(max_edge, dtype=float)
+    if tgt.ndim == 0:
+        tgt = np.full(len(f), float(tgt))
+    if len(tgt) != len(f):
+        raise ValueError("max_edge: нужно число или массив длиной %d, "
+                         "дано %d" % (len(f), len(tgt)))
+    if float(tgt.max()) <= 0:
         return v, f, {"passes": 0, "faces_before": n0, "faces_after": len(f),
                       "capped": False, "reached": True, "max_edge": 0.0}
 
@@ -102,10 +119,9 @@ def refine_to_edge_length(vertices, faces, max_edge,
         l01 = np.linalg.norm(v[f[:, 1]] - v[f[:, 0]], axis=1)
         l12 = np.linalg.norm(v[f[:, 2]] - v[f[:, 1]], axis=1)
         l20 = np.linalg.norm(v[f[:, 0]] - v[f[:, 2]], axis=1)
-        m01, m12, m20 = l01 > max_edge, l12 > max_edge, l20 > max_edge
+        m01, m12, m20 = l01 > tgt, l12 > tgt, l20 > tgt
         if not (m01.any() or m12.any() or m20.any()):
             break
-        n_pass += 1
 
         # Все рёбра, которые нужно поделить, одним массивом.
         parts = []
@@ -117,6 +133,33 @@ def refine_to_edge_length(vertices, faces, max_edge,
             parts.append(f[m20][:, [2, 0]])
         pairs = np.sort(np.vstack(parts), axis=1)
         uniq = np.unique(pairs, axis=0)
+
+        # Решение «делить ребро» принимается по любому из смежных
+        # треугольников, а не по своему.
+        #
+        # При разной цели у соседей (а именно для этого и нужен массив
+        # tgt) ребро на границе зон получало пометку в одном
+        # треугольнике и не получало в другом: один делился, второй
+        # нет, и возникал T-стык. На замкнутой поверхности это сразу
+        # is_watertight=False — так и вышло в первом прогоне с полем
+        # шагов: 119327 граней, объём сошёлся, а watertight нет.
+        n_v0 = len(v)
+        stride0 = np.int64(2 * n_v0 + 2)
+        marked_keys = np.unique(uniq[:, 0].astype(np.int64) * stride0
+                                + uniq[:, 1].astype(np.int64))
+
+        def _marked(a, b):
+            lo = np.minimum(a, b).astype(np.int64)
+            hi = np.maximum(a, b).astype(np.int64)
+            k = lo * stride0 + hi
+            pos = np.searchsorted(marked_keys, k)
+            np.clip(pos, 0, len(marked_keys) - 1, out=pos)
+            return marked_keys[pos] == k
+
+        m01 = _marked(f[:, 0], f[:, 1])
+        m12 = _marked(f[:, 1], f[:, 2])
+        m20 = _marked(f[:, 2], f[:, 0])
+        n_pass += 1
 
         n_v = len(v)
         m = len(uniq)
@@ -188,13 +231,31 @@ def refine_to_edge_length(vertices, faces, max_edge,
             out.append(np.stack([pab, pbc, pca], axis=1))
 
         f = np.vstack(out).astype(np.int64)
+        # цели потомков: каждый блок out[] соответствует маске s0..s3,
+        # поэтому цель родителя просто повторяется нужное число раз
+        tg = []
+        if s0.any():
+            tg.append(tgt[s0])
+        if s1.any():
+            tg += [tgt[s1], tgt[s1]]
+        if s2.any():
+            tg += [tgt[s2], tgt[s2], tgt[s2]]
+        if s3.any():
+            tg += [tgt[s3]] * 4
+        tgt = np.concatenate(tg)
         if len(f) > max_faces:
             capped = True
             break
 
     st = edge_length_stats(v, f)
+    lv = np.concatenate([
+        np.linalg.norm(v[f[:, 1]] - v[f[:, 0]], axis=1),
+        np.linalg.norm(v[f[:, 2]] - v[f[:, 1]], axis=1),
+        np.linalg.norm(v[f[:, 0]] - v[f[:, 2]], axis=1),
+    ]) if len(f) else np.zeros(1)
+    reached = bool((lv <= tgt.max() * (1.0 + 1e-9)).all()) if len(f) else True
     return v, f, {"passes": n_pass, "faces_before": n0, "faces_after": len(f),
-                  "capped": capped, "reached": bool(st["max"] <= max_edge),
+                  "capped": capped, "reached": reached,
                   "max_edge": st["max"]}
 
 
@@ -301,3 +362,99 @@ def refine_within_budget(bodies, total_budget=600_000,
             break
 
     return results
+
+
+def min_nonzero_extent(vertices) -> float:
+    """Минимальный габарит тела по непустым осям.
+
+    Оси с нулевым размахом игнорируются: плоский лист дал бы 0 и увёл бы
+    желаемый шаг в ноль. Если пустых осей нет — это обычный минимум.
+    """
+    v = np.asarray(vertices, dtype=float)
+    if len(v) == 0:
+        return 0.0
+    ext = v.max(axis=0) - v.min(axis=0)
+    mx = float(ext.max())
+    sig = ext[ext > max(1e-9, 1e-6 * mx)]
+    return float(sig.min()) if len(sig) else mx
+
+
+def target_field_from_bodies(vertices, faces, bodies, divisor=3.0,
+                             growth=0.30, cap_fraction=0.05, default=None,
+                             body_faces=None):
+    """Целевая длина ребра для каждого треугольника объединённой поверхности.
+
+    Равномерный шаг не проходит ни в одну сторону: 0.084 м даёт 385894
+    грани и всё равно не разрешает оперение, 0.028 м — 3705492. Поэтому
+    шаг назначается по месту.
+
+    Но одного «ближайшего тела» мало. При жёстком скачке цели (0.028 м у
+    оперения против 0.40 м у фюзеляжа) конформное разрезание растаскивает
+    мелкий шаг по всей модели: ребро на границе зон делится, если этого
+    хочет хотя бы один из соседей, сосед делится тоже, и так по цепочке.
+    В первом прогоне так вышло 2700594 грани, из них 2699346 на
+    фюзеляже при медианном ребре 0.0153 м, а оперению досталось 624
+    грани — ровно наоборот.
+
+    Поэтому цель растёт с расстоянием:
+
+        candidate_b = dim_b / divisor + growth * dist_b
+        target      = min_b candidate_b,  затем в [floor, cap]
+
+    У поверхности тонкого тела шаг dim/divisor, в ``growth`` метрах на
+    метр он дорастает до крупного. При growth=0.30 переход от 0.028 до
+    0.40 занимает 1.24 м — реальная переходная зона, а не скачок.
+
+    ``bodies``      — вершины исходных (не объединённых) тел.
+    ``cap_fraction`` — верхняя граница шага как доля от габарита модели.
+    ``default``     — шаг, если тел нет вовсе.
+    """
+    v = np.asarray(vertices, dtype=float)
+    f = np.asarray(faces, dtype=np.int64)
+    if len(f) == 0:
+        return np.zeros(0)
+
+    cents = v[f].mean(axis=1)
+    all_ext = (v.max(axis=0) - v.min(axis=0)) if len(v) else np.zeros(3)
+    model_max = float(all_ext.max()) if len(v) else 1.0
+    cap = model_max * cap_fraction
+
+    thin = []
+    for bi, b in enumerate(bodies):
+        b = np.asarray(b, dtype=float)
+        if len(b) == 0:
+            continue
+        sample = b
+        # Расстояние нужно до поверхности тела, а не до его вершин.
+        #
+        # На грубом теле центроид крупной грани лежит на поверхности, но
+        # далеко от любой вершины: у оперения из двух пролётов по 1.4 м
+        # это ~0.39 м, и цель вместо 0.0223 м получалась 0.14 м — тело,
+        # которое нужно резать мельче всех, резалось в шесть раз крупнее.
+        # Поэтому в выборку добавляются центроиды граней.
+        if body_faces is not None and bi < len(body_faces)                 and body_faces[bi] is not None:
+            bf = np.asarray(body_faces[bi], dtype=np.int64)
+            if bf.ndim == 2 and bf.shape[1] >= 3 and len(bf):
+                sample = np.vstack([sample, b[bf[:, :3]].mean(axis=1)])
+        if len(sample) > 20_000:
+            sample = sample[::max(1, len(sample) // 20_000)]
+        thin.append((sample, min_nonzero_extent(b) / divisor))
+    if not thin:
+        d = cap if default is None else float(default)
+        return np.full(len(f), min(max(d, 1e-6), cap))
+
+    tgt = np.full(len(cents), np.inf)
+    chunk = 200_000
+    for start in range(0, len(cents), chunk):
+        sl = slice(start, min(start + chunk, len(cents)))
+        c = cents[sl]
+        best = np.full(len(c), np.inf)
+        for sample, base in thin:
+            d = np.sqrt(((c[:, None, :] - sample[None, :, :]) ** 2
+                         ).sum(axis=2)).min(axis=1)
+            cand = base + growth * d
+            np.minimum(best, cand, out=best)
+        tgt[sl] = best
+
+    out = np.where(np.isfinite(tgt), tgt, cap if default is None else default)
+    return np.clip(out, 1e-6, cap)

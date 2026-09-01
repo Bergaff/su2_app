@@ -212,6 +212,93 @@ check("цель крупнее всех рёбер — без изменений
       len(f2) == len(f) and i2["passes"] == 0)
 
 print()
+print("== целевой шаг на треугольник ==")
+v, f = plate(2.4, 0.70, 0.084, n_span=2)
+n = len(f)
+tgt = np.full(n, 0.5)
+tgt[: n // 2] = 0.05          # половина поверхности мелко, половина крупно
+v2, f2, i2 = sr.refine_to_edge_length(v, f, tgt)
+check("массив целей принят", i2["faces_after"] > n, "%d -> %d" % (n, len(f2)))
+if HAS_TRIMESH:
+    m2 = trimesh.Trimesh(v2, f2, process=False)
+    # Ключевое: при разной цели у соседей ребро на границе зон должно
+    # делиться согласованно. Первая версия помечала ребро по своему
+    # треугольнику, и на границе зон возникал T-стык — watertight False
+    # при сошедшемся объёме.
+    check("конформность при смешанных целях (watertight)", m2.is_watertight)
+    check("объём сохранён при смешанных целях",
+          abs(m2.volume - trimesh.Trimesh(v, f, process=False).volume) < 1e-9,
+          "%.6f" % m2.volume)
+    e = np.sort(np.concatenate([f2[:, [0, 1]], f2[:, [1, 2]],
+                                f2[:, [2, 0]]]), axis=1)
+    _, cnt = np.unique(e, axis=0, return_counts=True)
+    check("у каждого ребра ровно два соседа (нет T-стыков)",
+          bool((cnt == 2).all()),
+          "распределение %s" % dict(zip(*np.unique(cnt, return_counts=True))))
+
+try:
+    sr.refine_to_edge_length(v, f, np.full(n + 1, 0.1))
+    check("несовпадение длины массива целей ловится", False)
+except ValueError:
+    check("несовпадение длины массива целей ловится", True)
+
+print()
+print("== минимальный габарит по непустым осям ==")
+flat = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], dtype=float)
+check("плоский лист: минимум по непустым осям, а не 0",
+      abs(sr.min_nonzero_extent(flat) - 1.0) < 1e-12,
+      "%.6f" % sr.min_nonzero_extent(flat))
+solid = np.array([[0, 0, 0], [2, 0, 0], [0, 1, 0], [0, 0, 0.5]], dtype=float)
+check("обычное тело: минимум из трёх осей",
+      abs(sr.min_nonzero_extent(solid) - 0.5) < 1e-12,
+      "%.6f" % sr.min_nonzero_extent(solid))
+check("пустой вход не роняет", sr.min_nonzero_extent(np.zeros((0, 3))) == 0.0)
+
+print()
+print("== поле целевых шагов ==")
+# крупное тело рядом с тонким: у тонкого шаг мелкий, вдали дорастает
+big = np.array([[-4, -0.6, -0.6], [4, 0.6, 0.6]], dtype=float)
+thin_v, thin_f = plate(2.8, 0.56, 0.067, n_span=2)
+thin_v = thin_v + np.array([3.0, 0.0, 0.0])
+sur_v = np.vstack([big, thin_v])
+sur_f = np.array([[0, 1, 4], [0, 4, 5], [1, 3, 6], [1, 6, 7]], dtype=np.int64)
+tgt = sr.target_field_from_bodies(sur_v, sur_f,
+                                  bodies=[big[:1] * 0 + np.array(
+                                      [[-4, -0.6, -0.6], [4, 0.6, 0.6],
+                                       [4, -0.6, 0.6], [-4, 0.6, 0.6],
+                                       [-4, -0.6, 0.6], [4, 0.6, -0.6]]),
+                                      thin_v])
+check("поле построено по числу треугольников", len(tgt) == len(sur_f))
+check("у тонкого тела шаг мельче, чем у крупного",
+      tgt.min() < tgt.max(), "min=%.4f max=%.4f" % (tgt.min(), tgt.max()))
+# Цель считается как толщина/divisor + growth*расстояние, поэтому
+# проверять надо формулу, а не число: у треугольников выше их центроиды
+# стоят в ~0.25 м от тонкого тела и член роста даёт 0.0223 + 0.30*0.25
+# = 0.097. Берём треугольник, лежащий прямо на тонком теле, — там
+# расстояние ноль и цель обязана быть ровно толщина/3.
+_on = thin_f[0]
+sur_f2 = np.array([list(_on)], dtype=np.int64)
+sur_v2 = thin_v
+t_on = sr.target_field_from_bodies(sur_v2, sur_f2,
+                                   bodies=[np.array([[-4., -0.6, -0.6],
+                                                     [4., 0.6, 0.6]]),
+                                           thin_v],
+                                   body_faces=[None, thin_f])
+check("на поверхности тонкого тела цель равна толщина/3",
+      abs(float(t_on[0]) - 0.067 / 3.0) < 1e-9,
+      "%.6f против %.6f" % (t_on[0], 0.067 / 3.0))
+check("вдали от тонкого тела цель дорастает",
+      tgt.max() > 0.067 / 3.0 * 2,
+      "max=%.4f" % tgt.max())
+check("шаг ограничен сверху", tgt.max() <= 8.0 * 0.05 + 1e-9,
+      "%.4f" % tgt.max())
+check("пустой список тел не роняет",
+      len(sr.target_field_from_bodies(sur_v, sur_f, bodies=[])) == len(sur_f))
+check("пустая поверхность возвращает пустой массив",
+      len(sr.target_field_from_bodies(np.zeros((0, 3)),
+                                      np.zeros((0, 3), int), [big])) == 0)
+
+print()
 print("Пройдено: %d" % _passed)
 if _failed:
     print("ПРОВАЛЕНО ТЕСТОВ: %d → %s" % (len(_failed), _failed))

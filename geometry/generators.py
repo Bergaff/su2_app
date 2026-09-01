@@ -424,14 +424,30 @@ def generate_vertical_stabilizer_geometry(airfoil_manager, airfoil_name, height,
     """ВО: лофт корень→конец по высоте."""
     sweep = math.radians(sweep_deg)
     sweep_offset = height * math.tan(sweep)
-    rx, rz = generate_naca4_section(chord_root, airfoil_name.replace("NACA", ""), 0.0)
-    tx, tz = generate_naca4_section(chord_tip, airfoil_name.replace("NACA", ""), 0.0)
+    # ry/ty — координата толщины профиля. Для киля она откладывается
+    # по Y, а лофт идёт по Z (высоте).
+    #
+    # Раньше координата толщины уходила в глобальный Z, а Y у обоих
+    # сечений был жёстко нулём:
+    #     points.append([rx[i], 0.0, rz[i] + z_offset])
+    #     points.append([tx[i] + sweep_offset, 0.0, tz[i] + z_offset + height])
+    # Киль получался плоским листом нулевой толщины. Последствия:
+    #   - размах по Y ровно 0, поэтому при выборе шага уплотнения такое
+    #     тело давало min_dim=0 и в refine_within_budget забирало весь
+    #     бюджет граней (501932 из 600000), оставляя фюзеляж без
+    #     уплотнения;
+    #   - лист не является объёмом, поэтому trimesh.boolean.union падает
+    #     с "Not all meshes are volumes!" — объединить компоненты в одну
+    #     замкнутую поверхность для сеточника не удаётся;
+    #   - у киля нет объёма и, значит, никаких структурных характеристик.
+    rx, ry = generate_naca4_section(chord_root, airfoil_name.replace("NACA", ""), 0.0)
+    tx, ty = generate_naca4_section(chord_tip, airfoil_name.replace("NACA", ""), 0.0)
     n = len(rx)
     points = []
     for i in range(n):
-        points.append([rx[i], 0.0, rz[i] + z_offset])
+        points.append([rx[i], ry[i], z_offset])
     for i in range(n):
-        points.append([tx[i] + sweep_offset, 0.0, tz[i] + z_offset + height])
+        points.append([tx[i] + sweep_offset, ty[i], z_offset + height])
     faces = _loft_sections(n, 2)
     bottom_c = len(points)
     points.append(_centroid(points, 0, n))
