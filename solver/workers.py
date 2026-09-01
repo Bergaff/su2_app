@@ -438,9 +438,13 @@ class SU2Worker:
             )
             self.log_cb(
                 "Процент GPU в настройках на такой расчёт не влияет. "
-                "Для задействования видеокарты нужна сборка SU2 с "
-                "-DENABLE_CUDA=ON (NVIDIA) или -DENABLE_HIP=ON (AMD) "
-                "и запуск через mpiexec."
+                "Официальные сборки SU2 (win64-omp, win64-mpi, linux64-omp, "
+                "linux64-mpi) видеокарту не используют: в release-конфигурации "
+                "SU2 опция -Denable-cuda не включена ни для одной платформы. "
+                "Для GPU нужен SU2, собранный из исходников с meson "
+                "setup -Denable-cuda=true, и только под NVIDIA. "
+                "Поддержки AMD/ROCm в SU2 нет — опции HIP в meson_options.txt "
+                "не существует."
             )
             self.compute_device = "cpu"
             cmd, env_overlay, launch_mode = self._build_cmd(exe)

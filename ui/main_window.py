@@ -1320,9 +1320,11 @@ class MainWindow(QMainWindow):
         self.combo_device.setCurrentIndex(0)
         self.combo_device.setToolTip(
             "Только CPU — классический mpiexec (работает на любой машине).\n"
-            "CPU + GPU — гибридный режим: часть матриц на GPU через "
-            "ROCm/CUDA (нужен SU2, собранный с -DENABLE_CUDA=ON или -DENABLE_HIP=ON). "
-            "Если GPU не найден — автоматический откат на чистый CPU."
+            "Только CPU — то, что дают официальные сборки SU2.\n"
+            "CPU + GPU — требует SU2, собранного из исходников с meson\n"
+            "setup -Denable-cuda=true (только NVIDIA; поддержки AMD/ROCm\n"
+            "в SU2 нет). В официальных win64-omp/win64-mpi эта опция\n"
+            "выключена, поэтому видеокарта там не используется."
         )
         perf_lay.addRow("Вычислитель:", self.combo_device)
 
@@ -2229,13 +2231,46 @@ class MainWindow(QMainWindow):
             self._gpu_percent_last_applied = 0
         # Подсказка, что нужно для реального гибридного запуска
         if device == "cpu_gpu":
-            self.log_text.append(
-                "Гибридный режим: SU2_CFD должен быть собран с "
-                "-DENABLE_CUDA=ON (NVIDIA) или -DENABLE_HIP=ON (AMD), "
-                "а solver/workers.py — формировать команду с "
-                "`mpiexec -gpu` (Microsoft MPI) или "
-                "`OMP_TARGET_OFFLOAD=MANDATORY` (OpenMP offload)."
-            )
+            # Сразу проверяем, умеет ли найденный SU2_CFD работать с GPU.
+            # Иначе пользователь выставляет процент GPU, ждёт ускорения,
+            # а расчёт идёт на CPU — и предупреждение приходит только
+            # после запуска, трижды подряд.
+            _exe = ""
+            try:
+                _exe = self.txt_su2_path.text().strip()
+            except Exception:
+                _exe = ""
+            try:
+                from solver.gpu_launcher import su2_gpu_capable
+                _cap = su2_gpu_capable(_exe)
+            except Exception:
+                _cap = False
+            if not _cap:
+                self.log_text.append(
+                    "Внимание: найденный SU2_CFD собран без поддержки GPU. "
+                    "Официальные сборки SU2 (win64-omp, win64-mpi) видеокарту "
+                    "не используют: в release-конфигурации SU2 опция "
+                    "-Denable-cuda выключена для всех платформ. "
+                    "Процент GPU на такой расчёт не влияет, вычислитель "
+                    "переключён обратно на «Только CPU»."
+                )
+                try:
+                    self.combo_device.blockSignals(True)
+                    self.combo_device.setCurrentIndex(0)
+                    self.combo_device.blockSignals(False)
+                except Exception:
+                    pass
+                self._compute_device_pending = "cpu"
+                self._gpu_percent_pending = 0
+                self._gpu_percent_last_applied = 0
+                device = "cpu"
+            else:
+                self.log_text.append(
+                    "Гибридный режим: рядом с SU2_CFD найдены библиотеки GPU. "
+                    "solver/workers.py запустит расчёт через `mpiexec -gpu` "
+                    "(Microsoft MPI) или с `OMP_TARGET_OFFLOAD=MANDATORY` "
+                    "(OpenMP offload)."
+                )
         self.log_text.append(
             f"Готово: Применено: {cores} ядер CPU ({self._cpu_load_percent()}%)"
             f"{(' · GPU ' + str(self._gpu_load_percent()) + '%' + gpu_info) if device == 'cpu_gpu' else ''}"
@@ -2533,6 +2568,24 @@ class MainWindow(QMainWindow):
         self._update_symmetry_3d()
         suffix = f" (смещение {offset:+.2f}м)" if abs(offset) > 0.001 else ""
         self.log_text.append(f"Готово: Добавлена плоскость {axis.upper()}{suffix}")
+        # У самолёта единственная настоящая плоскость симметрии — XZ
+        # (Y=0, слева-направо). XY (Z=0) режет модель по горизонтали и
+        # отсекает всю нижнюю половину фюзеляжа и крыла, YZ (X=0) — по
+        # размаху. В обоих случаях остаётся незамкнутая оболочка: маркер
+        # стенки теряет почти все треугольники, и SU2 расходится.
+        if axis == "xy":
+            self.log_text.append(
+                "Внимание: XY — это разрез по горизонтали (Z=0). Для самолёта "
+                "он отсечёт нижнюю половину фюзеляжа и крыла: крыло лежит в "
+                "этой плоскости. Плоскостью симметрии самолёта является XZ. "
+                "Если XY добавлена по ошибке — удалите её."
+            )
+        elif axis == "yz":
+            self.log_text.append(
+                "Внимание: YZ — это разрез по размаху (X=0). Самолёт по этой "
+                "плоскости не симметричен: нос и хвост окажутся разрезаны. "
+                "Плоскостью симметрии самолёта является XZ."
+            )
         # Резка выполняется при генерации сетки, поэтому уже построенная
         # сетка плоскости не знает: считалась бы полная модель.
         if getattr(self, "mesh_ready", False):

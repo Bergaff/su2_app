@@ -1730,6 +1730,58 @@ check("разбиение стоит после резки и до извлеч�
       _i_clip < _i_tet < _i_ext,
       "clip %d, filter %d, extract %d" % (_i_clip, _i_tet, _i_ext))
 
+print("== маркер симметрии не съедает стенку самолёта ==")
+_gsrc3 = open("mesh/gmsh_generator.py", encoding="utf-8").read()
+check("нормаль грани считается по вершинам треугольника",
+      "np.cross(_e1, _e2)" in _gsrc3)
+check("в симметрию идут только грани с нормалью вдоль плоскости",
+      "_dot > 0.99" in _gsrc3)
+_i_sym = _gsrc3.index("sym_mask[plane] = sym_mask[plane] & (_dot > 0.99)")
+_i_wall = _gsrc3.index("airfoil_tris.append(line)")
+check("фильтр по нормали стоит до записи в маркер стенки",
+      _i_sym < _i_wall, "sym %d, wall %d" % (_i_sym, _i_wall))
+check("толщина полосы tol считается от габарита области",
+      "tol = bbox_size * 0.002" in _gsrc3)
+
+print("== предупреждение о нерасчётных плоскостях симметрии ==")
+check("XY сопровождается предупреждением про крыло в плоскости",
+      'if axis == "xy":' in _src and "крыло лежит в " in _src)
+check("YZ сопровождается предупреждением про разрез по размаху",
+      'elif axis == "yz":' in _src and "разрез по размаху" in _src)
+check("XZ не помечается как ошибочная плоскость",
+      "Плоскостью симметрии самолёта является XZ" in _src)
+
+print("== GPU: честная диагностика и запрет на CPU-сборке ==")
+_wsrc = open("solver/workers.py", encoding="utf-8").read()
+# «ROCm» в тексте остаётся, но только в фразе «поддержки AMD/ROCm в SU2 нет».
+for _bad in ("ENABLE_CUDA", "ENABLE_HIP", "-DENABLE_"):
+    check("неверный флаг сборки %s убран из workers.py" % _bad,
+          _bad not in _wsrc)
+    check("неверный флаг сборки %s убран из main_window.py" % _bad,
+          _bad not in _src)
+# Отдельно: нигде не должно остаться утверждения, что SU2 умеет
+# работать через ROCm. rocm-smi в докстринге определения GPU законен.
+check("нет утверждения, что SU2 работает через ROCm",
+      "ROCm/CUDA" not in _src and "ROCm/CUDA" not in _wsrc
+      and "через ROCm" not in _src and "через ROCm" not in _wsrc)
+check("workers.py называет настоящую опцию meson",
+      "-Denable-cuda" in _wsrc)
+check("main_window называет настоящую опцию meson",
+      "-Denable-cuda" in _src)
+check("в workers.py сказано, что поддержки AMD в SU2 нет",
+      "Поддержки AMD/ROCm в SU2 нет" in _wsrc)
+check("выбор GPU проверяется через su2_gpu_capable до запуска",
+      "from solver.gpu_launcher import su2_gpu_capable" in _src
+      and "_cap = su2_gpu_capable(_exe)" in _src)
+check("без поддержки GPU вычислитель возвращается на CPU",
+      'self.combo_device.setCurrentIndex(0)' in _src
+      and 'self._compute_device_pending = "cpu"' in _src)
+_i_chk = _src.index("_cap = su2_gpu_capable(_exe)")
+_i_set = _src.index('self._compute_device_pending = "cpu"', _i_chk)
+check("откат на CPU идёт после проверки, а не до неё", _i_chk < _i_set)
+check("в сообщении названы официальные сборки без GPU",
+      "win64-omp" in _src and "win64-mpi" in _src)
+
 # ---------------------------------------------------------------- summary
 print()
 if FAIL:

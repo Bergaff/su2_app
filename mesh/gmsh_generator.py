@@ -182,12 +182,30 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
     faces_raw = np.asarray(surface.faces)
     n_surf_cells = surface.n_cells
 
+    # === Нормали граней нужны, чтобы отличить настоящий срез от полосы
+    # поверхности тела, случайно попавшей в окрестность плоскости.
+    # surface.cell_normals здесь не годится: classify_and_append получает
+    # массив индексов ВЕРШИН каждого треугольника, а не номера ячеек.
+    # Нормаль считается прямо по вершинам — это не зависит от порядка
+    # ячеек и работает в обеих ветках разбора faces.
+
     def classify_and_append(tri_idx_array):
         if len(tri_idx_array) == 0:
             return
         tri_idx_array = np.asarray(tri_idx_array)
         tri_pts = surf_pts[tri_idx_array]
         centroids = tri_pts.mean(axis=1)
+        tri_normals = None
+        try:
+            _e1 = tri_pts[:, 1, :] - tri_pts[:, 0, :]
+            _e2 = tri_pts[:, 2, :] - tri_pts[:, 0, :]
+            _cr = np.cross(_e1, _e2)
+            _ln = np.linalg.norm(_cr, axis=1)
+            _ok = _ln > 1e-12
+            if _ok.all():
+                tri_normals = _cr / _ln[:, None]
+        except Exception:
+            tri_normals = None
         is_out = (
             (np.abs(centroids[:, 0] - x_min) < tol) | (np.abs(centroids[:, 0] - x_max) < tol) |
             (np.abs(centroids[:, 1] - y_min) < tol) | (np.abs(centroids[:, 1] - y_max) < tol) |
@@ -213,6 +231,32 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
                     sym_mask[plane] = np.abs(centroids[:, 1] - p_offset) < tol
                 elif p_name == "yz":
                     sym_mask[plane] = np.abs(centroids[:, 0] - p_offset) < tol
+
+        # === Отсекаем полосу поверхности тела, попавшую в окрестность
+        # плоскости по одной только координате.
+        #
+        # tol считается от габарита расчётной области (~81 м для этого
+        # самолёта), то есть tol ~ 0.16 м. В такую полосу вокруг Y=0
+        # попадает верх и низ фюзеляжа (R=0.60 м): их нормали смотрят
+        # вверх и вниз, а не вдоль плоскости. Раньше эти треугольники
+        # уходили в MARKER_SYM, в стенке самолёта появлялась щель вдоль
+        # всего фюзеляжа, и SU2 расходился.
+        #
+        # У настоящего среза после clip() нормаль точно параллельна
+        # нормали плоскости. Требование |n . n_plane| > 0.99 отделяет
+        # срез от поверхности тела и ничего не ломает для тонких
+        # поверхностей, лежащих в самой плоскости (киль): их средняя
+        # плоскость действительно является плоскостью симметрии.
+        if sym_mask and tri_normals is not None:
+            _plane_normals = {"xy": (0.0, 0.0, 1.0),
+                              "xz": (0.0, 1.0, 0.0),
+                              "yz": (1.0, 0.0, 0.0)}
+            for plane in list(sym_mask.keys()):
+                _pn = _plane_normals.get(str(plane).split(":", 1)[0])
+                if _pn is None:
+                    continue
+                _dot = np.abs(tri_normals @ np.asarray(_pn))
+                sym_mask[plane] = sym_mask[plane] & (_dot > 0.99)
         # =================================================================
         mapped = point_map[tri_idx_array]
         for k in range(len(mapped)):
