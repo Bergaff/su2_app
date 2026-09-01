@@ -599,6 +599,29 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                 continue
             if not isinstance(clipped, pv.UnstructuredGrid):
                 clipped = pv.UnstructuredGrid(clipped)
+            # clip() режет тетраэдры плоскостью и на срезе получает призмы
+            # (тип ячейки 13). Дальше код собирает сетку через
+            # extract_cells(grid, cell_type=10), то есть берёт только
+            # тетраэдры — призмы молча терялись, и вдоль плоскости
+            # симметрии в сетке оставались дыры. SU2 на такой сетке
+            # расходился к ~170-й итерации. Разбиваем всё на тетраэдры.
+            try:
+                import vtk as _vtk
+                _f = _vtk.vtkDataSetTriangleFilter()
+                _f.SetInputData(clipped)
+                _f.SetTetrahedraOnly(1)
+                _f.Update()
+                _t = pv.UnstructuredGrid(_f.GetOutput())
+                if _t.n_cells > 0:
+                    _n_before_tet = clipped.n_cells
+                    clipped = _t
+                    if _t.n_cells != _n_before_tet:
+                        print(f"   Симметрия {plane}: ячейки на срезе "
+                              f"разбиты на тетраэдры, {_n_before_tet} -> "
+                              f"{_t.n_cells}")
+            except Exception as _e:
+                print(f"   Симметрия {plane}: не удалось разбить призмы на "
+                      f"тетраэдры ({_e}), сетка может содержать дыры")
             if clipped.n_cells < 10:
                 print(f"   Симметрия {plane}: после резки почти не осталось "
                       "ячеек, сетка оставлена полной")

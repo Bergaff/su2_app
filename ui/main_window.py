@@ -1343,25 +1343,17 @@ class MainWindow(QMainWindow):
         self.lbl_gpu_load_row = QLabel("Нагрузка GPU:")
         perf_lay.addRow(self.lbl_gpu_load_row, gpu_load_lay)
 
-        # === Опции расчёта: симметрия и RAMP-разгон ======================
+        # === Опции расчёта: RAMP-разгон ================================
+        # Галочки «Плоскость симметрии» больше нет: она дублировала список
+        # плоскостей на странице Mesh 1. Симметрия включена тогда и только
+        # тогда, когда добавлена хотя бы одна плоскость.
         opts_lay = QHBoxLayout()
-        self.chk_use_symmetry = QCheckBox("Плоскость симметрии")
-        # По умолчанию выключено: сетка режется только тогда, когда
-        # плоскость реально задана ниже, а не по факту галочки.
-        self.chk_use_symmetry.setChecked(False)
-        self.chk_use_symmetry.setToolTip(
-            "Если геометрия симметрична (как почти все самолёты), SU2\n"
-            "посчитает только половину модели — ускорение ~1.8x.\n"
-            "Действует вместе с плоскостями симметрии ниже: сетка\n"
-            "обрезается только по тем плоскостям, которые добавлены."
-        )
         self.chk_use_ramp_aoa = QCheckBox("RAMP-разгон AoA")
         self.chk_use_ramp_aoa.setChecked(False)
         self.chk_use_ramp_aoa.setToolTip(
             "Плавно наращивать угол атаки от 0° до нужного за 100 итераций.\n"
             "Улучшает сходимость на жёстких моделях (высокие AoA, закрылки)."
         )
-        opts_lay.addWidget(self.chk_use_symmetry)
         opts_lay.addWidget(self.chk_use_ramp_aoa)
         opts_lay.addStretch()
         perf_lay.addRow(opts_lay)
@@ -1371,8 +1363,10 @@ class MainWindow(QMainWindow):
         sym_group = QGroupBox("Плоскости симметрии")
         sym_lay = QVBoxLayout(sym_group)
         sym_info = QLabel(
-            "Плоскости рисуются в 3D-окне. Одновременно можно включить\n"
-            "несколько — SU2 посчитает только симметричную часть модели."
+            "Плоскости рисуются в 3D-окне. Добавленная плоскость — это и\n"
+            "есть включённая симметрия: сетка обрежется по ней, и SU2\n"
+            "посчитает только половину модели. Плоскость нужно добавить\n"
+            "ДО построения сетки, иначе резка не выполнится."
         )
         sym_info.setStyleSheet("color: #4A4A4A; font-size: 10px;")
         sym_lay.addWidget(sym_info)
@@ -1394,7 +1388,7 @@ class MainWindow(QMainWindow):
         # Список плоскостей в виде списка словарей:
         # [{"axis": "xy", "enabled": True, "actor": ...}, ...]
         self._symmetry_planes = []
-        lay9.addWidget(sym_group)
+        lay8.addWidget(sym_group)
         # ================================================================
 
         # Кнопка применения + индикатор
@@ -2900,8 +2894,8 @@ class MainWindow(QMainWindow):
             "compute_device": self._current_device() if hasattr(self, "combo_device") else "cpu",
             "cpu_cores": self._cpu_cores_pending,
             # Опции расчёта: симметрия, RAMP и турбомодель
-            "use_symmetry": bool(getattr(self, "chk_use_symmetry", None) and
-                                self.chk_use_symmetry.isChecked()),
+            # Галочки больше нет: симметрия включена, если есть плоскости.
+            "use_symmetry": bool(self.get_symmetry_planes()),
             # T1-визуал: список плоскостей симметрии (XY/XZ/YZ) из 3D-инструмента
             "symmetry_planes": list(self.get_symmetry_planes()),
             "use_ramp_aoa": bool(getattr(self, "chk_use_ramp_aoa", None) and
@@ -3038,11 +3032,9 @@ class MainWindow(QMainWindow):
                 pass
         # === Восстановление опций расчёта: симметрия / RAMP
         #               и выбор турбомодели (SA/SST) =====================
-        if "use_symmetry" in data and hasattr(self, "chk_use_symmetry"):
-            try:
-                self.chk_use_symmetry.setChecked(bool(data["use_symmetry"]))
-            except Exception:
-                pass
+        # data["use_symmetry"] из старых проектов читаем только как
+        # признак того, что плоскости были; сам список восстанавливается
+        # ниже из data["symmetry_planes"].
         # T1-визуал: восстановление плоскостей симметрии (XY/XZ/YZ)
         # Плоскости берём только из сохранённого списка: раньше при
         # use_symmetry=True без списка подставлялся "xz", и проект
@@ -4158,13 +4150,11 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.lbl_su2_status.setText("Генерация расчетной сетки...")
         self.lbl_su2_status.setStyleSheet("color: #2E5A78; font-style: italic;")
-        # === T1: пробрасываем плоскости симметрии в MeshWorker ==========
-        # Источник — список плоскостей из 3D-инструмента. Если список
-        # пуст, fallback на старый флаг chk_use_symmetry (XZ).
+        # === Плоскости симметрии пробрасываются в MeshWorker ============
+        # Источник — список плоскостей из 3D-инструмента.
+        # Симметрия включена тогда и только тогда, когда плоскость
+        # добавлена: отдельной галочки больше нет.
         sym_planes_for_mesh = list(self.get_symmetry_planes())
-        if not sym_planes_for_mesh and getattr(self, "chk_use_symmetry", None) \
-                and self.chk_use_symmetry.isChecked():
-            sym_planes_for_mesh = ["xz"]
         use_sym_for_mesh = bool(sym_planes_for_mesh)
         try:
             self._mesh_worker = MeshWorker(
@@ -4600,11 +4590,8 @@ class MainWindow(QMainWindow):
         gpu_percent_now = getattr(self, "_gpu_percent_pending", 0)
         # === Флаги симметрии / RAMP / турбомодель =========================
         # Источник истины для симметрии — список плоскостей из 3D-инструмента.
-        # Старый чекбокс chk_use_symmetry используем как «добавить XZ по умолчанию».
+        # Галочки нет: симметрия включена, если добавлена плоскость.
         symmetry_planes_now = list(self.get_symmetry_planes())
-        if not symmetry_planes_now and getattr(self, "chk_use_symmetry", None) \
-                and self.chk_use_symmetry.isChecked():
-            symmetry_planes_now = ["xz"]
         use_symmetry_now = bool(symmetry_planes_now)
         use_ramp_aoa_now = bool(
             getattr(self, "chk_use_ramp_aoa", None)
@@ -6201,8 +6188,8 @@ class MainWindow(QMainWindow):
         self.combo_device.setCurrentIndex(0)
         self._refresh_load_status_label()
 
-        # Симметрия / RAMP
-        self.chk_use_symmetry.setChecked(True)
+        # RAMP. Галочки симметрии больше нет — состояние симметрии
+        # определяется списком плоскостей, который чистится ниже.
         self.chk_use_ramp_aoa.setChecked(False)
 
         # Плоскости симметрии (3D)

@@ -1477,8 +1477,6 @@ check("в MeshWorker не осталось подстановки xz по умо
 _gg_src = open("mesh/gmsh_generator.py", encoding="utf-8").read()
 check("генератор не подставляет xz по умолчанию",
       'symmetry_planes = ["xz"] if use_symmetry' not in _gg_src)
-check("галочка симметрии по умолчанию выключена",
-      "self.chk_use_symmetry.setChecked(False)" in _src)
 check("загрузчик проекта не подставляет плоскость задним числом",
       'planes_to_restore = ["xz"]' not in _src)
 
@@ -1703,6 +1701,34 @@ check("помощник импорта не обещает только STL",
       "Загрузите геометрию, задайте роль" in _src
       and "Загрузите фюзеляж или STL, задайте роль" not in _src)
 check("помощник перечисляет CAD-форматы", "STEP, IGES, Parasolid" in _src)
+
+print("== симметрия: галочки нет, плоскости на странице Mesh 1 ==")
+check("чекбокса «Плоскость симметрии» больше нет",
+      "chk_use_symmetry" not in _src, _src.count("chk_use_symmetry"))
+_i_l8 = _src.index("lay8 = QVBoxLayout(self.page_mesh)")
+_i_l9 = _src.index("lay9 = QVBoxLayout(self.page_solver)")
+_i_sym = _src.index("lay8.addWidget(sym_group)")
+check("группа плоскостей симметрии лежит на странице Mesh 1",
+      _i_l8 < _i_sym, "lay8 на %d, addWidget на %d" % (_i_l8, _i_sym))
+check("на странице Solver группы плоскостей больше нет",
+      "lay9.addWidget(sym_group)" not in _src)
+check("сохранение проекта определяет симметрию по списку плоскостей",
+      '"use_symmetry": bool(self.get_symmetry_planes())' in _src)
+check("в сбросе проекта нет обращения к удалённой галочке",
+      "setChecked(True)" not in _src[_src.index("def reset_project"):]
+      if "def reset_project" in _src else True)
+check("подсказка требует добавить плоскость до построения сетки",
+      "ДО построения сетки" in _src)
+_gsrc2 = open("mesh/gmsh_generator.py", encoding="utf-8").read()
+check("после резки призмы разбиваются на тетраэдры",
+      "vtkDataSetTriangleFilter" in _gsrc2
+      and "SetTetrahedraOnly(1)" in _gsrc2)
+_i_clip = _gsrc2.index("grid.clip(")
+_i_tet = _gsrc2.index("vtkDataSetTriangleFilter")
+_i_ext = _gsrc2.index("extract_cells(grid, cell_type=10)", _i_tet)
+check("разбиение стоит после резки и до извлечения тетраэдров",
+      _i_clip < _i_tet < _i_ext,
+      "clip %d, filter %d, extract %d" % (_i_clip, _i_tet, _i_ext))
 
 # ---------------------------------------------------------------- summary
 print()
