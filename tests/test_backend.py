@@ -1561,6 +1561,86 @@ try:
 except ImportError:
     print("  (vtk недоступен, проверка актёра пропущена)")
 
+print("== ГПУ: честная проверка сборки SU2 ==")
+import tempfile as _tf
+from solver.gpu_launcher import su2_gpu_capable
+check("пустой путь к SU2 -> GPU не поддержан", su2_gpu_capable("") is False)
+check("несуществующий SU2 -> GPU не поддержан",
+      su2_gpu_capable("/нет/такого/SU2_CFD.exe") is False)
+_d = _tf.mkdtemp()
+import os as _os
+_os.makedirs(_os.path.join(_d, "bin"), exist_ok=True)
+_exe = _os.path.join(_d, "bin", "SU2_CFD.exe")
+open(_exe, "w").close()
+check("SU2 без библиотек CUDA/HIP -> GPU не поддержан",
+      su2_gpu_capable(_exe) is False)
+open(_os.path.join(_d, "bin", "cudart64_12.dll"), "w").close()
+check("появился cudart64_12.dll -> GPU поддержан",
+      su2_gpu_capable(_exe) is True)
+_wsrc2 = open("solver/workers.py", encoding="utf-8").read()
+check("лог запуска проверяет поддержку GPU до обещаний",
+      "su2_gpu_capable(exe)" in _wsrc2)
+
+print("== контраст текста кнопок (WCAG AA) ==")
+
+
+def _lum(h):
+    h = h.lstrip("#")
+    r, g, b = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+    f = lambda c: c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+
+
+def _contrast(a, b):
+    la, lb = _lum(a), _lum(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+_qss = _src[_src.index("QPushButton {"):_src.index("QTableWidget {")]
+_dis = _qss[_qss.index("QPushButton:disabled"):]
+# Важно: «color:» матчится и внутри «background-color:», поэтому
+# у свойства цвета текста стоит отрицательный просмотр назад.
+_FG = r"(?<!-)color:\s*(#[0-9A-Fa-f]{6})"
+_BG = r"background-color:\s*(#[0-9A-Fa-f]{6})"
+_dis_fg = _re.search(_FG, _dis).group(1)
+_dis_bg = _re.search(_BG, _dis).group(1)
+_r = _contrast(_dis_fg, _dis_bg)
+check("текст отключённой кнопки читается (>=4.5:1)", _r >= 4.5,
+      "%.2f:1 (%s на %s)" % (_r, _dis_fg, _dis_bg))
+_btn = _qss[:_qss.index("QPushButton:hover")]
+_b_fg = _re.search(_FG, _btn).group(1)
+_b_bg = _re.search(_BG, _btn).group(1)
+check("текст обычной кнопки читается (>=4.5:1)",
+      _contrast(_b_fg, _b_bg) >= 4.5,
+      "%.2f:1" % _contrast(_b_fg, _b_bg))
+
+print("== панель настроек не меняет ширину ==")
+check("стек страниц не растягивает панель",
+      "self.settings_stack.setSizePolicy(QSizePolicy.Ignored" in _src)
+check("широкое содержимое уходит в прокрутку",
+      "_settings_scroll" in _src
+      and "addWidget(self._settings_scroll)" in _src)
+check("у панели настроек есть предельная ширина",
+      "self.settings_container.setMaximumWidth" in _src)
+
+print("== Config Presets в Global Definitions ==")
+_i_gd = _src.index("global_defs = QTreeWidgetItem")
+_i_res = _src.index("results_node = QTreeWidgetItem")
+check("узел пресетов создан внутри Global Definitions",
+      _i_gd < _src.index("self.item_presets = QTreeWidgetItem") < _i_res)
+check("в Results узла пресетов больше нет",
+      "item_presets" not in _src[_i_res:_src.index("self.tree.setCurrentItem")])
+
+print("== плоскость симметрии помечает сетку устаревшей ==")
+_i_add = _src.index("def _add_symmetry_plane")
+_i_rem = _src.index("def _remove_symmetry_plane")
+_i_reb = _src.index("def _rebuild_symmetry_list")
+check("добавление плоскости инвалидирует сетку",
+      "invalidate_mesh" in _src[_i_add:_i_rem])
+check("удаление плоскости инвалидирует сетку",
+      "invalidate_mesh" in _src[_i_rem:_i_reb])
+
 # ---------------------------------------------------------------- summary
 print()
 if FAIL:

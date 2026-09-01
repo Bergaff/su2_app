@@ -31,6 +31,7 @@ from solver.gpu_launcher import (
     is_openmp_offload_unavailable,
     detect_mpi_implementation,
     gpu_config_args,
+    su2_gpu_capable,
 )
 # ======================================================================
 
@@ -426,6 +427,23 @@ class SU2Worker:
         cmd, env_overlay, launch_mode = self._build_cmd(exe)
 
         # === ПАТЧ: лог GPU-режима =========================================
+        if launch_mode != "cpu" and not su2_gpu_capable(exe):
+            # Стандартные сборки SU2 с su2code.org идут без CUDA/HIP.
+            # OMP_TARGET_OFFLOAD=MANDATORY в них ничего никуда не
+            # выгружает, а прежняя надпись «Гибридный режим: GPU 82%»
+            # обещала то, чего на самом деле не происходило.
+            self.log_cb(
+                "Внимание: рядом с SU2_CFD нет библиотек CUDA/HIP — эта "
+                "сборка SU2 считает только на CPU."
+            )
+            self.log_cb(
+                "Процент GPU в настройках на такой расчёт не влияет. "
+                "Для задействования видеокарты нужна сборка SU2 с "
+                "-DENABLE_CUDA=ON (NVIDIA) или -DENABLE_HIP=ON (AMD) "
+                "и запуск через mpiexec."
+            )
+            self.compute_device = "cpu"
+            cmd, env_overlay, launch_mode = self._build_cmd(exe)
         if launch_mode != "cpu":
             self.log_cb(
                 f"Гибридный режим ({launch_mode}): GPU {self.gpu_percent}%, "

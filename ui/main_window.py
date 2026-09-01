@@ -53,7 +53,7 @@ from PyQt5.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QFormLayout, QRadioButton, QButtonGroup,
     QTabWidget, QLineEdit, QDialog, QDialogButtonBox, QMenu,
     QSplitter, QScrollArea, QTreeWidget, QTreeWidgetItem, QStackedWidget,
-    QToolTip, QSlider, QInputDialog,
+    QToolTip, QSlider, QInputDialog, QSizePolicy, QFrame,
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject, QLockFile, QStandardPaths
 from PyQt5.QtGui import QColor, QFont, QMouseEvent
@@ -433,9 +433,12 @@ class MainWindow(QMainWindow):
             QPushButton:hover { background-color: #E2E5E9; border-color: #2E5A78; }
             QPushButton:pressed { background-color: #D2D7DC; border-color: #26485F; }
             QPushButton:disabled {
-                background-color: #E2E5E9 !important;
-                border-color: #CBD5E1 !important;
-                color: #94A3B8 !important;
+                /* Контраст текста к фону держим не ниже 4.5:1 (WCAG AA):
+                   прежний #94A3B8 по #E2E5E9 давал 2.03:1 — надпись на
+                   отключённой кнопке было не разобрать. */
+                background-color: #E9EBEE !important;
+                border-color: #C3CBD5 !important;
+                color: #5C6B7A !important;
             }
             QTableWidget {
                 background-color: #FBFBFC; border: 1px solid #C3CBD5;
@@ -650,6 +653,10 @@ class MainWindow(QMainWindow):
         self.item_global_defs = global_defs
         # Узел 'Flight Conditions' больше не нужен — страница объединена
         self.item_rules = QTreeWidgetItem(global_defs, ["Design Rules (Правила проектирования)"])
+        # «Формат конфигурации» — это настройка расчёта, а не результат,
+        # поэтому узел живёт в Global Definitions.
+        self.item_presets = QTreeWidgetItem(
+            global_defs, ["Config Presets (Формат конфигурации)"])
         global_defs.setExpanded(True)
         component = QTreeWidgetItem(root_item, ["Component 1 (comp1)"])
         component.setExpanded(True)
@@ -679,13 +686,12 @@ class MainWindow(QMainWindow):
         # ТЗ: «Спецфункции» и «Формат конфигурации»
         self.item_specials = QTreeWidgetItem(
             results_node, ["Special Functions (Поляра и отчёты)"])
-        self.item_presets = QTreeWidgetItem(
-            results_node, ["Config Presets (Формат конфигурации)"])
         results_node.setExpanded(True)
 
         # 2. Панель настроек (посередине)
         self.settings_container = QWidget()
         self.settings_container.setMinimumWidth(320)
+        self.settings_container.setMaximumWidth(420)
         settings_outer_lay = QVBoxLayout(self.settings_container)
         settings_outer_lay.setContentsMargins(0, 0, 0, 0)
         settings_outer_lay.setSpacing(0)
@@ -698,7 +704,19 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.lbl_settings_header)
         settings_outer_lay.addWidget(header_widget)
         self.settings_stack = QStackedWidget()
-        settings_outer_lay.addWidget(self.settings_stack)
+        # Страницы с длинными подписями кнопок (например «Формат
+        # конфигурации») растягивали стек, и вся панель настроек
+        # разъезжалась при переключении. Стек больше не влияет на
+        # ширину панели, а широкое содержимое уходит в прокрутку.
+        self.settings_stack.setSizePolicy(QSizePolicy.Ignored,
+                                          QSizePolicy.Preferred)
+        self._settings_scroll = QScrollArea()
+        self._settings_scroll.setWidgetResizable(True)
+        self._settings_scroll.setFrameShape(QFrame.NoFrame)
+        self._settings_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded)
+        self._settings_scroll.setWidget(self.settings_stack)
+        settings_outer_lay.addWidget(self._settings_scroll)
         self.left_panel_splitter.addWidget(self.settings_container)
         self.left_panel_splitter.setSizes([260, 340])
 
@@ -2474,6 +2492,10 @@ class MainWindow(QMainWindow):
         self._update_symmetry_3d()
         suffix = f" (смещение {offset:+.2f}м)" if abs(offset) > 0.001 else ""
         self.log_text.append(f"Готово: Добавлена плоскость {axis.upper()}{suffix}")
+        # Резка выполняется при генерации сетки, поэтому уже построенная
+        # сетка плоскости не знает: считалась бы полная модель.
+        if getattr(self, "mesh_ready", False):
+            self.invalidate_mesh("добавлена плоскость симметрии")
 
     def _remove_symmetry_plane(self, axis: str):
         """Удаляет плоскость симметрии."""
@@ -2490,6 +2512,8 @@ class MainWindow(QMainWindow):
         self._update_symmetry_3d()
         self._apply_symmetry_view()
         self.log_text.append(f"Удалена плоскость {axis.upper()}")
+        if getattr(self, "mesh_ready", False):
+            self.invalidate_mesh("удалена плоскость симметрии")
 
     def _rebuild_symmetry_list(self):
         while self.sym_list_layout.count():
