@@ -192,20 +192,33 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
 
     # Индекс по поверхности до резки: расстояние до неё показывает,
     # существовала ли грань раньше.
-    _pre_tree = None
-    if pre_clip_points is not None:
-        try:
-            _pre_tree = cKDTree(np.asarray(pre_clip_points, dtype=float))
-        except Exception:
-            _pre_tree = None
-    # Порог «грань лежала на поверхности до резки». Берётся от шага
-    # сетки, а не от габарита области: настоящая поверхность тела имеет
-    # расстояние ~0, а срез отстоит от неё на долю толщины тела.
+    # Индекс точек, существовавших до резки.
+    #
+    # scipy.spatial.cKDTree здесь не используется намеренно: он
+    # импортируется под try/except, и при его отсутствии проверка
+    # происхождения молча отключалась — симметрия снова начинала
+    # съедать поверхность тела, без единого сообщения в логе.
+    #
+    # Точность не нужна: clip() копирует исходные точки в выходную
+    # сетку побитово и лишь ДОБАВЛЯЕТ новые на секущей плоскости.
+    # Поэтому достаточно точного сравнения квантованных координат.
     # Допуск «эта точка существовала до резки». Берётся от габарита
     # области и делается заведомо меньше шага сетки: координаты
     # совпадающих точек отличаются только плавающей ошибкой.
     _pt_tol = 1e-7 * float(max(1.0, bbox_size))
-
+    _pre_keys = None
+    _pt_scale = 1.0 / max(_pt_tol, 1e-12)
+    if pre_clip_points is not None:
+        try:
+            _pq = np.round(np.asarray(pre_clip_points, dtype=float)
+                           * _pt_scale).astype(np.int64)
+            _pre_keys = set(map(tuple, _pq))
+        except Exception:
+            _pre_keys = None
+    # Порог «грань лежала на поверхности до резки». Берётся от шага
+    # сетки, а не от габарита области: настоящая поверхность тела имеет
+    # расстояние ~0, а срез отстоит от неё на долю толщины тела.
+    # Допуск «эта точка существовала до резки». Берётся от габарита
     def classify_and_append(tri_idx_array):
         if len(tri_idx_array) == 0:
             return
@@ -328,10 +341,12 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
         #
         # Именно это позволяет резать модель по любой плоскости, а не
         # только по «удобной» XZ.
-        if sym_mask and _pre_tree is not None:
+        if sym_mask and _pre_keys is not None:
             try:
-                _dv, _ = _pre_tree.query(tri_pts.reshape(-1, 3), k=1)
-                _old_v = (_dv < _pt_tol).reshape(len(tri_idx_array), 3)
+                _qv = np.round(tri_pts.reshape(-1, 3)
+                               * _pt_scale).astype(np.int64)
+                _old_v = np.array([tuple(_v) in _pre_keys for _v in _qv],
+                                  dtype=bool).reshape(len(tri_idx_array), 3)
                 _all_new = ~_old_v.any(axis=1)
                 for plane in list(sym_mask.keys()):
                     sym_mask[plane] = sym_mask[plane] & _all_new
@@ -493,6 +508,9 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
     try:
         report(2, "Загрузка поверхностей")
         body_meshes = []
+        # Минимальный габарит каждого тела — нужен для проверки
+        # разрешающей способности фоновой сетки (см. ниже).
+        body_thinness = []
         n_files = max(1, len(stl_paths))
         for fi, path in enumerate(stl_paths):
             check_cancel()
@@ -503,6 +521,13 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                 if m.n_cells > 0:
                     body_meshes.append(m)
                     print(f"   Готово: {os.path.basename(path)}: {m.n_cells} граней")
+                    try:
+                        _ext = np.asarray(m.points).max(axis=0) - \
+                            np.asarray(m.points).min(axis=0)
+                        body_thinness.append(
+                            (os.path.basename(path), float(np.min(_ext))))
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"   x Ошибка обработки {path}: {e}")
             report(2 + int(6 * (fi + 1) / n_files), "Загрузка поверхностей")
@@ -542,6 +567,51 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
 
         h_near = max(h_near, body_size * 0.015)
         h_far = max(h_far, h_near * 3.0)
+
+        # === Проверка разрешающей способности ============================
+        #
+        # Сетка строится вырезанием ячеек фона: ячейка удаляется, если её
+        # ЦЕНТР попал внутрь тела. Значит тело thinner одного шага фона
+        # может не попасть в сетку вовсе — и не потому, что сетка грубая,
+        # а потому, что так легли узлы.
+        #
+        # На полном самолёте при качестве «Средняя» h_near считается от
+        # размаха (body_size ~ 9 м) и равен ~0.135 м, а толщина ГО, ВО и
+        # руля (хорда 0.70 м, профиль 12%) — 0.084 м, то есть 0.62 шага.
+        # Крыло в корне (1.44 м, NACA2412) — 0.173 м, 1.28 шага.
+        #
+        # Молча выдавать такую сетку нельзя: SU2 на ней расходится, и
+        # пользователь узнаёт об этом только через десять минут счёта.
+        # Поэтому считаем и печатаем явно.
+        if body_thinness:
+            print("   Проверка разрешающей способности (шаг у тела "
+                  f"{h_near:.4f} м):")
+            _worst = []
+            for _name, _t in sorted(body_thinness, key=lambda x: x[1]):
+                _cells = _t / h_near if h_near > 0 else 0.0
+                if _cells < 1.0:
+                    _verdict = "НЕ РАЗРЕШАЕТСЯ — элемент может отсутствовать в сетке"
+                elif _cells < 3.0:
+                    _verdict = "на пределе — поверхность будет ступенчатой"
+                else:
+                    _verdict = "разрешается"
+                print(f"      {_name}: мин. габарит {_t:.4f} м = "
+                      f"{_cells:.2f} шага — {_verdict}")
+                if _cells < 3.0:
+                    _worst.append((_name, _t, _cells))
+            if _worst:
+                _n_bad = sum(1 for _, _, c in _worst if c < 1.0)
+                print("   Внимание: сетка строится вырезанием ячеек фона и "
+                      "не облегает поверхность. Элемент тоньше одного шага "
+                      "фона попадает в сетку как ступенчатая пластина в одну "
+                      "ячейку или не попадает вовсе — расчёт на такой сетке "
+                      "расходится независимо от настроек решателя.")
+                if _n_bad:
+                    print(f"   Компонентов тоньше одного шага: {_n_bad}. "
+                          "Нужен шаг у тела не более "
+                          f"{min(t for _, t, _ in _worst) / 3.0:.4f} м "
+                          "(3 шага на самый тонкий элемент), либо сетка, "
+                          "облегающая поверхность (gmsh по STL).")
 
         report(15, "Построение осей фоновой сетки")
 

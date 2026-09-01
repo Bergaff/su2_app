@@ -1812,6 +1812,24 @@ check("неверных флагов сборки CMake не осталось",
       "-DENABLE_CUDA" not in _wsrc and "-DENABLE_HIP" not in _wsrc
       and "-DENABLE_CUDA" not in _src and "-DENABLE_HIP" not in _src)
 
+print("== проверка происхождения не зависит от scipy ==")
+# cKDTree импортируется под try/except: при отсутствии scipy проверка
+# происхождения молча отключалась, и симметрия снова съедала стенку.
+_gm2 = open("mesh/gmsh_generator.py", encoding="utf-8").read()
+_i_sym_block = _gm2.index("def classify_and_append")
+_i_sym_end = _gm2.index("if len(airfoil_tris) == 0:")
+_sym_code = _gm2[_i_sym_block:_i_sym_end]
+check("в классификации маркеров нет cKDTree",
+      "cKDTree" not in _sym_code)
+check("индекс точек до резки строится без внешних библиотек",
+      "_pre_keys = set(map(tuple, _pq))" in _gm2)
+check("_pt_tol определён до использования",
+      _gm2.index("_pt_tol = 1e-7 * float(max(1.0, bbox_size))")
+      < _gm2.index("_pt_scale = 1.0 / max(_pt_tol, 1e-12)"))
+check("отчёт о разрешающей способности на месте",
+      "Проверка разрешающей способности" in _gm2
+      and "НЕ РАЗРЕШАЕТСЯ" in _gm2)
+
 # ---------------------------------------------------------------- summary
 print()
 if FAIL:
