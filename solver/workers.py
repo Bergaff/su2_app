@@ -448,6 +448,14 @@ class SU2Worker:
             )
             self.compute_device = "cpu"
             cmd, env_overlay, launch_mode = self._build_cmd(exe)
+        # ENABLE_CUDA пишется в config.cfg только когда GPU-режим реально
+        # состоялся: сборка умеет CUDA и команда построена под GPU.
+        try:
+            _sess = getattr(self, "session", None)
+            if _sess is not None:
+                _sess.enable_cuda = (launch_mode != "cpu")
+        except Exception:
+            pass
         if launch_mode != "cpu":
             self.log_cb(
                 f"Гибридный режим ({launch_mode}): GPU {self.gpu_percent}%, "

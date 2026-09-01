@@ -27,6 +27,10 @@ class CalculationSession:
         self.finished = False
         self.results = []
         self.case_dirs = []
+        # True — писать в config.cfg ENABLE_CUDA= YES. Выставляется только
+        # когда SU2_CFD реально собран с поддержкой CUDA: иначе SU2
+        # завершится с ошибкой «ENABLE_CUDA is set to YES».
+        self.enable_cuda = False
 
     # ------------------------------------------------------------------
     def start_new(self, mode, solver, physics, ref_data, active_markers,

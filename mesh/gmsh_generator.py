@@ -130,6 +130,7 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
 
     T1: kwargs['use_symmetry'] — добавить маркер symmetry_plane на Y=0.
     """
+    pre_clip_points = kwargs.get("pre_clip_points", None)
     vol_pts = np.asarray(grid.points)
     n_points = len(vol_pts)
     tetras = extract_cells(grid, cell_type=10)
@@ -189,6 +190,22 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
     # Нормаль считается прямо по вершинам — это не зависит от порядка
     # ячеек и работает в обеих ветках разбора faces.
 
+    # Индекс по поверхности до резки: расстояние до неё показывает,
+    # существовала ли грань раньше.
+    _pre_tree = None
+    if pre_clip_points is not None:
+        try:
+            _pre_tree = cKDTree(np.asarray(pre_clip_points, dtype=float))
+        except Exception:
+            _pre_tree = None
+    # Порог «грань лежала на поверхности до резки». Берётся от шага
+    # сетки, а не от габарита области: настоящая поверхность тела имеет
+    # расстояние ~0, а срез отстоит от неё на долю толщины тела.
+    # Допуск «эта точка существовала до резки». Берётся от габарита
+    # области и делается заведомо меньше шага сетки: координаты
+    # совпадающих точек отличаются только плавающей ошибкой.
+    _pt_tol = 1e-7 * float(max(1.0, bbox_size))
+
     def classify_and_append(tri_idx_array):
         if len(tri_idx_array) == 0:
             return
@@ -206,11 +223,46 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
                 tri_normals = _cr / _ln[:, None]
         except Exception:
             tri_normals = None
-        is_out = (
-            (np.abs(centroids[:, 0] - x_min) < tol) | (np.abs(centroids[:, 0] - x_max) < tol) |
-            (np.abs(centroids[:, 1] - y_min) < tol) | (np.abs(centroids[:, 1] - y_max) < tol) |
-            (np.abs(centroids[:, 2] - z_min) < tol) | (np.abs(centroids[:, 2] - z_max) < tol)
-        )
+        # Граница области определяется по bbox сетки. Но после резки по
+        # плоскости симметрии соответствующая грань bbox совпадает с этой
+        # плоскостью: при резке по Z=0 остаётся z>0, и z_min становится
+        # равным 0. Тогда всё, что лежит в пределах tol от плоскости,
+        # попадает в is_out и уходит в MARKER_FAR.
+        #
+        # На самолёте это съедает крыло целиком: полутолщина крыла
+        # ~0.075 м, а tol считается от габарита области с дальним полем
+        # и равен ~0.176 м. Маркер стенки оставался почти пустым
+        # (airfoil=470 при 4504 до резки), и SU2 расходился.
+        #
+        # Поэтому грань bbox, совпавшую с активной плоскостью симметрии,
+        # дальней границей не считаем.
+        _sym_axis = {"xy": 2, "xz": 1, "yz": 0}
+        _skip_lo = set()
+        _skip_hi = set()
+        for _pl in (symmetry_planes or []):
+            _pn2 = str(_pl).split(":", 1)[0].strip().lower()
+            _ax = _sym_axis.get(_pn2)
+            if _ax is None:
+                continue
+            _off = 0.0
+            if ":" in str(_pl):
+                try:
+                    _off = float(str(_pl).split(":", 1)[1])
+                except Exception:
+                    _off = 0.0
+            _lo = (x_min, y_min, z_min)[_ax]
+            _hi = (x_max, y_max, z_max)[_ax]
+            if abs(_lo - _off) < tol:
+                _skip_lo.add(_ax)
+            if abs(_hi - _off) < tol:
+                _skip_hi.add(_ax)
+        is_out = np.zeros(len(centroids), dtype=bool)
+        for _ax, (_lo, _hi) in enumerate(
+                ((x_min, x_max), (y_min, y_max), (z_min, z_max))):
+            if _ax not in _skip_lo:
+                is_out |= np.abs(centroids[:, _ax] - _lo) < tol
+            if _ax not in _skip_hi:
+                is_out |= np.abs(centroids[:, _ax] - _hi) < tol
         # === T1: плоскости симметрии (XY=Z=0, XZ=Y=0, YZ=X=0) =========
         # Проверяем для каждой включённой плоскости — если треугольник
         # лежит на этой плоскости, относим к соответствующему маркеру.
@@ -257,6 +309,34 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
                     continue
                 _dot = np.abs(tri_normals @ np.asarray(_pn))
                 sym_mask[plane] = sym_mask[plane] & (_dot > 0.99)
+
+        # === Второй признак: все три вершины грани созданы самой резкой.
+        #
+        # Одной нормали мало. Киль стоит в плоскости XZ, крыло лежит в
+        # плоскости XY — у их треугольников нормаль тоже вдоль плоскости,
+        # и по одной геометрии они попадают в срез.
+        #
+        # Отличить их можно по происхождению, а не по расстоянию. clip()
+        # создаёт новые точки ровно на секущей плоскости; у поверхности
+        # тела вершины существовали и до резки. Поэтому настоящий срез —
+        # это грань, у которой ВСЕ вершины новые.
+        #
+        # Расстояние до поверхности до резки здесь не годится: его порог
+        # пришлось бы брать от шага сетки, а шаг на границе области в
+        # десятки раз больше шага у тела, и порог оказывается больше
+        # толщины крыла.
+        #
+        # Именно это позволяет резать модель по любой плоскости, а не
+        # только по «удобной» XZ.
+        if sym_mask and _pre_tree is not None:
+            try:
+                _dv, _ = _pre_tree.query(tri_pts.reshape(-1, 3), k=1)
+                _old_v = (_dv < _pt_tol).reshape(len(tri_idx_array), 3)
+                _all_new = ~_old_v.any(axis=1)
+                for plane in list(sym_mask.keys()):
+                    sym_mask[plane] = sym_mask[plane] & _all_new
+            except Exception:
+                pass
         # =================================================================
         mapped = point_map[tri_idx_array]
         for k in range(len(mapped)):
@@ -618,6 +698,23 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
 
         print(f"   После вырезания: {grid.n_cells} тетраэдров")
 
+        # === Поверхность ДО резки: нужна, чтобы отличить настоящий срез
+        # от поверхности тела, которая оказалась в плоскости симметрии.
+        #
+        # Геометрией их не разделить. Киль стоит в плоскости XZ, крыло
+        # лежит в плоскости XY — у их треугольников и координата на
+        # плоскости, и нормаль вдоль неё, ровно как у среза. Единственный
+        # надёжный признак: эти треугольники существовали до резки, а
+        # срез появился в результате резки.
+        _pre_clip_pts = None
+        try:
+            _pre_surf = grid.extract_surface(algorithm="dataset_surface")
+            _pre_clip_pts = np.asarray(_pre_surf.points, dtype=float)
+            if _pre_clip_pts.shape[0] < 4:
+                _pre_clip_pts = None
+        except Exception:
+            _pre_clip_pts = None
+
         # === Плоскость симметрии: реально режем модель пополам ============
         # Без этого симметрия только писала маркер на полной сетке, то есть
         # считался весь самолёт, а MARKER_SYM оставался пустым. Резка
@@ -785,7 +882,9 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
             # === T1: пробрасываем use_symmetry в write_su2 =============
             write_su2(grid, surface, su2_path,
                       use_symmetry=use_symmetry,
-                      symmetry_planes=symmetry_planes)
+                      symmetry_planes=symmetry_planes,
+                      pre_clip_points=_pre_clip_pts
+                      if bool(symmetry_planes) else None)
             # ============================================================
         except RuntimeError as e:
             # ИСПРАВЛЕНО: пробрасываем наверх, а не теряем в логе

@@ -78,7 +78,8 @@ def _sym_marker_names(planes):
 def build_euler_config(p: Mapping, markers=None, restart: bool = False,
                       mesh_quality=None,
                       use_symmetry: bool = False,
-                      symmetry_planes: list = None) -> str:
+                      symmetry_planes: list = None,
+                      enable_cuda: bool = False) -> str:
     restart_str = "YES" if restart else "NO"
     body_markers = format_marker_list(markers)
     inner_iter = _inner_iter_for_quality(mesh_quality)
@@ -95,6 +96,12 @@ def build_euler_config(p: Mapping, markers=None, restart: bool = False,
     else:
         sym_line = "% MARKER_SYM= ( symmetry_xy symmetry_xz symmetry_yz )  # выключено"
     # ==================================================================
+
+    # ENABLE_CUDA включает в SU2 GPU-ветку произведения матрицы на вектор
+    # (CMatrixVectorProduct.hpp). Без неё видеокарта не используется,
+    # даже если SU2_CFD собран с -Denable-cuda=true.
+    cuda_line = ("ENABLE_CUDA= YES" if enable_cuda
+                 else "% ENABLE_CUDA= NO   # выключено")
 
     return f"""SOLVER= EULER
 MATH_PROBLEM= DIRECT
@@ -114,6 +121,7 @@ REF_ORIGIN_MOMENT_X= {float(p['ox']):.12g}
 REF_ORIGIN_MOMENT_Y= {float(p['oy']):.12g}
 REF_ORIGIN_MOMENT_Z= {float(p['oz']):.12g}
 MARKER_EULER= {body_markers}
+{cuda_line}
 MARKER_FAR= ( farfield )
 {sym_line}
 MARKER_MONITORING= {body_markers}
@@ -154,7 +162,8 @@ def build_rans_config(p: Mapping, markers=None, restart: bool = False,
                       turb_model: str = "SA",
                       use_symmetry: bool = False,
                       symmetry_planes: list = None,
-                      use_ramp_aoa: bool = False) -> str:
+                      use_ramp_aoa: bool = False,
+                      enable_cuda: bool = False) -> str:
     """Шаблон config.cfg для RANS.
 
     Параметры:
@@ -169,6 +178,10 @@ def build_rans_config(p: Mapping, markers=None, restart: bool = False,
     body_markers = format_marker_list(markers)
     heatflux_markers = _format_marker_value_pairs(markers, 0.0)
     inner_iter = _inner_iter_for_quality(mesh_quality)
+
+    # === ENABLE_CUDA: GPU-ветка произведения матрицы на вектор =========
+    cuda_line = "ENABLE_CUDA= YES" if enable_cuda else "% ENABLE_CUDA= NO   # выключено"
+    # ====================================================================
 
     # === T1: MARKER_SYM — плоскости симметрии ========================
     if symmetry_planes is None and use_symmetry:
@@ -232,6 +245,7 @@ REF_ORIGIN_MOMENT_X= {float(p['ox']):.12g}
 REF_ORIGIN_MOMENT_Y= {float(p['oy']):.12g}
 REF_ORIGIN_MOMENT_Z= {float(p['oz']):.12g}
 {ramp_block}
+{cuda_line}
 MARKER_HEATFLUX= {heatflux_markers}
 MARKER_FAR= ( farfield )
 {sym_line}
@@ -311,7 +325,8 @@ def build_su2_config(aoa: float, physics: Mapping, solver: str,
                      use_symmetry: bool = False,
                      symmetry_planes: list = None,
                      turb_model: str = "SA",
-                     use_ramp_aoa: bool = False) -> str:
+                     use_ramp_aoa: bool = False,
+                     enable_cuda: bool = False) -> str:
     """Строит полный текст ``config.cfg`` для одной расчётной точки.
 
     Параметры T1+T4:
@@ -319,6 +334,18 @@ def build_su2_config(aoa: float, physics: Mapping, solver: str,
         symmetry_planes — список плоскостей ["xy", "xz", "yz"].
         turb_model      — "SA" (по умолчанию) или "SST" (Menter SST).
         use_ramp_aoa    — плавный разгон AoA от 0° до нужного за 100 итераций.
+        enable_cuda     — писать в config.cfg ``ENABLE_CUDA= YES``.
+
+    Про ``ENABLE_CUDA``: это реальная опция SU2 (CConfig.cpp,
+    ``addBoolOption("ENABLE_CUDA", Enable_Cuda, false)``). Она включает
+    GPU-ветку в ``CMatrixVectorProduct.hpp`` — вызов
+    ``matrix.GPUMatrixVectorProduct`` вместо ``matrix.MatrixVectorProduct``.
+    Без неё SU2 не трогает видеокарту, даже если собран с CUDA.
+
+    Если написать ``ENABLE_CUDA= YES``, а SU2_CFD собран без
+    ``-Denable-cuda=true``, SU2 завершится с ошибкой «ENABLE_CUDA is set
+    to YES / Please compile with CUDA options enabled in Meson». Поэтому
+    опция включается только после проверки сборки решателя.
     """
     if physics is None:
         raise ValueError("physics не задан")
@@ -348,10 +375,11 @@ def build_su2_config(aoa: float, physics: Mapping, solver: str,
             use_symmetry=use_symmetry,
             symmetry_planes=symmetry_planes,
             use_ramp_aoa=use_ramp_aoa,
+            enable_cuda=enable_cuda,
         )
     if solver_name.startswith("EULER") or "EULER" in solver_name:
         return build_euler_config(
-            p, markers=markers, restart=restart,
+            p, markers=markers, restart=restart, enable_cuda=enable_cuda,
             mesh_quality=mesh_quality,
             use_symmetry=use_symmetry,
             symmetry_planes=symmetry_planes,
@@ -368,7 +396,8 @@ def write_su2_config(path: str, aoa: float, physics: Mapping, solver: str,
                      use_symmetry: bool = False,
                      symmetry_planes: list = None,
                      turb_model: str = "SA",
-                     use_ramp_aoa: bool = False) -> str:
+                     use_ramp_aoa: bool = False,
+                     enable_cuda: bool = False) -> str:
     """Записывает конфигурацию и возвращает полный путь к ``config.cfg``.
 
     Параметры T1+T4 пробрасываются в build_su2_config.
@@ -396,6 +425,7 @@ def write_su2_config(path: str, aoa: float, physics: Mapping, solver: str,
         symmetry_planes=symmetry_planes,
         turb_model=turb_model,
         use_ramp_aoa=use_ramp_aoa,
+        enable_cuda=enable_cuda,
     )
 
     with open(cfg_path, "w", encoding="utf-8", newline="\n") as stream:
@@ -478,6 +508,7 @@ def write_case_config(case_dir: str, aoa: float, session) -> str:
         symmetry_planes=enabled_planes,
         turb_model=turb_model,
         use_ramp_aoa=use_ramp_aoa,
+        enable_cuda=bool(getattr(session, "enable_cuda", False)),
     )
 
 
