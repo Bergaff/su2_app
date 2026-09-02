@@ -17,3 +17,9 @@ results/
 cases/
 mesh.su2
 mesh_preview.vtk
+
+# временные файлы TetGen
+_skipped.face
+_skipped.node
+*.face
+*.node

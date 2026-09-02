@@ -62,6 +62,89 @@ def _cap_faces(start_idx, n_points, center_idx):
     return faces
 
 
+def _ring_chord_steps(ring_a, ring_b):
+    """Длины хордовых рёбер между двумя контурами (по точке i -> i+1)."""
+    n = len(ring_a)
+    out = []
+    for i in range(n):
+        j = (i + 1) % n
+        da = math.dist(ring_a[i], ring_a[j])
+        db = math.dist(ring_b[i], ring_b[j])
+        out.append(0.5 * (da + db))
+    return out
+
+
+def _loft_rings(rings, cap_aspect=3.0):
+    """Лофт последовательности контуров с адаптивным числом сечений.
+
+    Это то, из-за чего сетка оперения получалась непригодной. Прежний
+    ``_loft_sections`` соединял соседние контуры ОДНИМ поясом четырёхуголь-
+    ников: у ГО на размахе 2.8 м выходило две панели по 1.4 м при шаге
+    точек хорды около 0.015 м, то есть соотношение сторон 90:1. После
+    триангуляции это иглы: измерено на готовом ГО — максимальное ребро
+    1.4277 м при минимальном 4.6e-04 м. Такая поверхность не принимает
+    уплотнение без вырожденных треугольников, и объёмный сеточник её
+    отвергает.
+
+    Здесь между каждой парой контуров вставляется столько промежуточных
+    сечений, чтобы отношение пролёта к медианному хордовому шагу не
+    превышало ``cap_aspect``. Сечения получаются линейной интерполяцией,
+    поэтому для прямого лофта поверхность не меняется вовсе — меняется
+    только её триангуляция.
+
+    Промежуточных сечений столько же у всех хордовых полос пары: если
+    брать своё число на полосу, на стыках появляются висячие узлы
+    (T-пересечения) и поверхность перестаёт быть замкнутой.
+
+    ``rings`` — список контуров одинаковой длины, каждый замкнут неявно.
+    Возвращает ``(points, faces)`` в формате pyvista (плоский список).
+    """
+    pts = []
+    faces = []
+    for k in range(len(rings) - 1):
+        a, b = rings[k], rings[k + 1]
+        n = len(a)
+        steps = _ring_chord_steps(a, b)
+        d_med = float(np.median(steps)) if steps else 0.0
+        d_span = float(np.mean([math.dist(a[i], b[i]) for i in range(n)]))
+        if d_med > 0.0 and d_span > 0.0:
+            m = int(math.ceil(d_span / max(cap_aspect * d_med, 1e-12)))
+        else:
+            m = 1
+        m = max(1, m)
+        # Кольца пары: t = 0 .. m. Первое берём из уже накопленных точек,
+        # чтобы не дублировать вершины на стыке контуров.
+        base = []
+        for t in range(m + 1):
+            w = t / m
+            if t == 0 and pts:
+                base.append(list(range(len(pts) - n, len(pts))))
+                continue
+            row = []
+            for i in range(n):
+                row.append(len(pts))
+                pts.append([a[i][0] + (b[i][0] - a[i][0]) * w,
+                            a[i][1] + (b[i][1] - a[i][1]) * w,
+                            a[i][2] + (b[i][2] - a[i][2]) * w])
+            base.append(row)
+        for t in range(m):
+            r0, r1 = base[t], base[t + 1]
+            for i in range(n):
+                j = (i + 1) % n
+                p00, p01, p11, p10 = r0[i], r0[j], r1[j], r1[i]
+                # Диагональ выбираем короткую: у четырёхугольника 1.4 x 0.015
+                # разрез по длинной диагонали даёт две иглы, по короткой —
+                # два нормальных треугольника.
+                if (math.dist(pts[p00], pts[p11])
+                        <= math.dist(pts[p01], pts[p10])):
+                    faces.append([3, p00, p01, p11])
+                    faces.append([3, p00, p11, p10])
+                else:
+                    faces.append([3, p00, p01, p10])
+                    faces.append([3, p01, p11, p10])
+    return pts, faces
+
+
 def _loft_sections(n, section_count, with_caps=True):
     """Каркас faces для лофта одинаковых секций по n точек."""
     faces = []
@@ -306,17 +389,18 @@ def _mech_panel_mesh(span_part, chord_ref, sweep_offset_end, naca_code,
                     pts_row = [pos_x - slide_ratio * chord_ref + xr, y,
                                pos_z - 0.02 * chord_ref + zr]
                     (pts_in if y_abs == y_start_ratio else pts_out).append(pts_row)
-        points = pts_in + pts_out
-        faces = []
-        for i in range(n - 1):
-            faces.append([4, i, i + 1, n + i + 1, n + i])
-        faces.append([4, n - 1, 0, n, 2 * n - 1])
-        c1 = len(points)
+        # Два контура на всю ширину панели давали четырёхугольники шириной
+        # в десятки сантиметров при хордовом шаге около сантиметра. Тот же
+        # адаптивный лофт, что и у оперения.
+        points, faces = _loft_rings([pts_in, pts_out])
+        n_loft = len(points)
+        last_start = n_loft - n
+        c1 = n_loft
         points.append(_centroid(points, 0, n))
         faces.extend(_cap_faces(0, n, c1))
         c2 = len(points)
-        points.append(_centroid(points, n, n))
-        faces.extend(_cap_faces(n, n, c2))
+        points.append(_centroid(points, last_start, n))
+        faces.extend(_cap_faces(last_start, n, c2))
         return points, faces
 
     p1, f1 = make_half(+1)
@@ -395,23 +479,28 @@ def generate_tail_surface(airfoil_manager, airfoil_name, span, chord_root,
     half_span = span / 2.0
     sweep = math.radians(sweep_deg)
     sweep_offset = half_span * math.tan(sweep)
-    rx, rz = generate_naca4_section(chord_root, airfoil_name.replace("NACA", ""), 0.0)
-    tx, tz = generate_naca4_section(chord_tip, airfoil_name.replace("NACA", ""), 0.0)
+    rx, rz = generate_naca4_section(chord_root, airfoil_name.replace("NACA", ""),
+                                    0.0, n=n_chord)
+    tx, tz = generate_naca4_section(chord_tip, airfoil_name.replace("NACA", ""),
+                                    0.0, n=n_chord)
     n = len(rx)
-    points = []
-    for i in range(n):
-        points.append([tx[i] + sweep_offset + x_offset, -half_span, tz[i] + z_offset])
-    for i in range(n):
-        points.append([rx[i] + x_offset, 0.0, rz[i] + z_offset])
-    for i in range(n):
-        points.append([tx[i] + sweep_offset + x_offset, +half_span, tz[i] + z_offset])
-    faces = _loft_sections(n, 3)
-    left_c = len(points)
+    tip_l = [[tx[i] + sweep_offset + x_offset, -half_span, tz[i] + z_offset]
+             for i in range(n)]
+    root = [[rx[i] + x_offset, 0.0, rz[i] + z_offset] for i in range(n)]
+    tip_r = [[tx[i] + sweep_offset + x_offset, +half_span, tz[i] + z_offset]
+             for i in range(n)]
+    points, faces = _loft_rings([tip_l, root, tip_r])
+    # Начало последнего контура фиксируем ДО добавления центроидов: после
+    # первого append len(points) сдвигается, и правая крышка уходит на
+    # центроид левой (проверено: 4 граничных ребра длиной 2.803 м).
+    n_loft = len(points)
+    last_start = n_loft - n
+    left_c = n_loft
     points.append(_centroid(points, 0, n))
     faces.extend(_cap_faces(0, n, left_c))
     right_c = len(points)
-    points.append(_centroid(points, 2 * n, n))
-    faces.extend(_cap_faces(2 * n, n, right_c))
+    points.append(_centroid(points, last_start, n))
+    faces.extend(_cap_faces(last_start, n, right_c))
     flat = [v for f in faces for v in f]
     mesh = pv.PolyData(np.array(points), np.array(flat)).triangulate().clean(tolerance=1e-6)
     mesh.compute_normals(auto_orient_normals=True, inplace=True)
@@ -440,21 +529,22 @@ def generate_vertical_stabilizer_geometry(airfoil_manager, airfoil_name, height,
     #     с "Not all meshes are volumes!" — объединить компоненты в одну
     #     замкнутую поверхность для сеточника не удаётся;
     #   - у киля нет объёма и, значит, никаких структурных характеристик.
-    rx, ry = generate_naca4_section(chord_root, airfoil_name.replace("NACA", ""), 0.0)
-    tx, ty = generate_naca4_section(chord_tip, airfoil_name.replace("NACA", ""), 0.0)
+    rx, ry = generate_naca4_section(chord_root, airfoil_name.replace("NACA", ""),
+                                    0.0, n=n_chord)
+    tx, ty = generate_naca4_section(chord_tip, airfoil_name.replace("NACA", ""),
+                                    0.0, n=n_chord)
     n = len(rx)
-    points = []
-    for i in range(n):
-        points.append([rx[i], ry[i], z_offset])
-    for i in range(n):
-        points.append([tx[i] + sweep_offset, ty[i], z_offset + height])
-    faces = _loft_sections(n, 2)
-    bottom_c = len(points)
+    bottom = [[rx[i], ry[i], z_offset] for i in range(n)]
+    top = [[tx[i] + sweep_offset, ty[i], z_offset + height] for i in range(n)]
+    points, faces = _loft_rings([bottom, top])
+    n_loft = len(points)
+    last_start = n_loft - n
+    bottom_c = n_loft
     points.append(_centroid(points, 0, n))
     faces.extend(_cap_faces(0, n, bottom_c))
     top_c = len(points)
-    points.append(_centroid(points, n, n))
-    faces.extend(_cap_faces(n, n, top_c))
+    points.append(_centroid(points, last_start, n))
+    faces.extend(_cap_faces(last_start, n, top_c))
     flat = [v for f in faces for v in f]
     mesh = pv.PolyData(np.array(points), np.array(flat)).triangulate().clean(tolerance=1e-6)
     mesh.compute_normals(auto_orient_normals=True, inplace=True)
