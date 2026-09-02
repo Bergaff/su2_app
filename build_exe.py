@@ -271,15 +271,37 @@ def build():
     # trimesh и manifold3d нужны ему для объединения тел в замкнутую
     # поверхность перед триангуляцией. Если чего-то нет, генератор сам
     # откатится на картезианский фон.
+    _mesh_missing = []
     try:
         import importlib.util
         for _pkg in ("tetgen", "trimesh", "manifold3d"):
-            if importlib.util.find_spec(_pkg) is not None:
+            try:
+                _found = importlib.util.find_spec(_pkg) is not None
+            except Exception:
+                _found = False
+            if _found:
                 cmd.append(f"--collect-all={_pkg}")
                 print(f"Готово: {_pkg} найден — собираю с нативными "
                       "библиотеками.")
+            else:
+                _mesh_missing.append(_pkg)
     except Exception:
-        pass
+        _mesh_missing = ["tetgen", "trimesh", "manifold3d"]
+
+    # Без них mesh/bodyfit_tetgen не работает и генератор молча строит
+    # картезианский фон: сетка не облегает поверхность, тонкие элементы
+    # превращаются в ступеньку, и SU2 на такой сетке расходится. Раньше
+    # отсутствие пакетов просто пропускалось, и пользователь узнавал об
+    # этом только по расходимости — поэтому здесь это говорится вслух.
+    if _mesh_missing:
+        print()
+        print("ВНИМАНИЕ: не установлены %s." % ", ".join(_mesh_missing))
+        print("  Телооблекающая сетка (TetGen) в сборке работать НЕ будет,")
+        print("  генератор откатится на картезианский фон. Расчёт на такой")
+        print("  сетке может расходиться независимо от настроек решателя.")
+        print("  Установка:  python -m pip install %s"
+              % " ".join(_mesh_missing))
+        print()
 
     # Если динамически импортируются и другие сторонние пакеты — добавляй
     # их так же здесь, например:  cmd.append("--collect-all=<пакет>")

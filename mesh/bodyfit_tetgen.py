@@ -84,6 +84,20 @@ def tetgen_available():
     return bool(HAS_TETGEN and HAS_TRIMESH and HAS_SCIPY and HAS_PYVISTA)
 
 
+def tetgen_missing():
+    """Чего не хватает для телооблекающей сетки. Для честного сообщения."""
+    miss = []
+    if not HAS_TETGEN:
+        miss.append("tetgen")
+    if not HAS_TRIMESH:
+        miss.append("trimesh")
+    if not HAS_SCIPY:
+        miss.append("scipy")
+    if not HAS_PYVISTA:
+        miss.append("pyvista")
+    return miss
+
+
 def _load_surface_refine():
     """Загрузить mesh/surface_refine.py по пути файла (без mesh/__init__)."""
     try:
@@ -389,8 +403,10 @@ def build_body_fitted_grid(body_meshes, body_min, body_max, margin,
     или None, если путь недоступен либо сетка не облегает поверхность.
     """
     if not tetgen_available():
-        log("   Внимание: TetGen/trimesh недоступны, строится "
-            "картезианская сетка фона")
+        _miss = tetgen_missing()
+        log("   Внимание: телооблекающая сетка недоступна — не хватает %s. "
+            "Строится картезианская сетка фона."
+            % (", ".join(_miss) if _miss else "зависимостей"))
         return None
 
     body_pts, body_faces = union_surfaces(body_meshes, log=log)

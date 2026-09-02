@@ -271,6 +271,53 @@ def main():
           "ниже допустимого минимума" not in "\n".join(_norm_log),
           "\n".join(_norm_log)[:90])
 
+    # ---------------------------------------------------------------
+    # Причина отката на картезианский фон обязана доходить до лога.
+    # Раньше отказ импорта mesh.bodyfit_tetgen проглатывался голым
+    # except, и пользователь получал сетку без объяснений.
+    print()
+    print("== причина отката на картезианский фон видна в логе ==")
+    import types as _t2
+
+    class _Boom(_t2.ModuleType):
+        def __getattr__(self, name):
+            raise ImportError("No module named 'tetgen'")
+
+    _real = sys.modules.get("mesh.bodyfit_tetgen")
+    sys.modules["mesh.bodyfit_tetgen"] = _Boom("mesh.bodyfit_tetgen")
+    try:
+        _imp_log = []
+        _buf4 = io.StringIO()
+        with redirect_stdout(_buf4):
+            _gm.generate_mesh_impl([fus, tail], quality_text="Средняя",
+                                   log_cb=_imp_log.append)
+    finally:
+        if _real is None:
+            sys.modules.pop("mesh.bodyfit_tetgen", None)
+        else:
+            sys.modules["mesh.bodyfit_tetgen"] = _real
+    _imp_joined = "\n".join(_imp_log)
+    check("отказ импорта модуля попал в лог",
+          "телооблекающая сетка недоступна" in _imp_joined, _imp_joined[:90])
+    check("в сообщении сказано, чем это грозит",
+          "не облегает" in _imp_joined)
+
+    import mesh.bodyfit_tetgen as _BF
+    check("tetgen_missing перечисляет tetgen при его отсутствии",
+          _BF.tetgen_available() is True or "tetgen" in _BF.tetgen_missing(),
+          str(_BF.tetgen_missing()))
+    _keep = (_BF.HAS_TETGEN, _BF.HAS_TRIMESH, _BF.HAS_SCIPY, _BF.HAS_PYVISTA)
+    _BF.HAS_TETGEN, _BF.HAS_TRIMESH = False, True
+    try:
+        check("tetgen_missing называет именно отсутствующий пакет",
+              _BF.tetgen_missing() == ["tetgen"], str(_BF.tetgen_missing()))
+    finally:
+        (_BF.HAS_TETGEN, _BF.HAS_TRIMESH,
+         _BF.HAS_SCIPY, _BF.HAS_PYVISTA) = _keep
+    check("tetgen_missing пуст, когда всё на месте",
+          _BF.tetgen_available() is False or _BF.tetgen_missing() == [],
+          str(_BF.tetgen_missing()))
+
     print()
     print("Пройдено: %d" % _passed)
     if _failed:

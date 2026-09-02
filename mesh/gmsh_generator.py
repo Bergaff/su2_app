@@ -636,13 +636,26 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         # картезианском пути без потери функционала.
         _bf = None
         build_body_fitted_grid = None
+        _bf_import_error = None
         try:
             try:
                 from mesh.bodyfit_tetgen import build_body_fitted_grid
             except ImportError:
                 from bodyfit_tetgen import build_body_fitted_grid
-        except Exception:
+        except Exception as _e:
             build_body_fitted_grid = None
+            _bf_import_error = "%s: %s" % (type(_e).__name__, _e)
+        if build_body_fitted_grid is None:
+            # Раньше здесь стоял голый `except: ... = None`, и пользователь
+            # получал картезианскую сетку без единого слова о том, что
+            # телооблекающий путь не сработал и почему. В собранном exe
+            # stdout не виден, так что объяснение обязано идти в лог.
+            say("Внимание: телооблекающая сетка недоступна ("
+                "%s). Строится картезианская сетка фона — она поверхность "
+                "тела не облегает, тонкие элементы разрешаются ступенькой, "
+                "и расчёт на такой сетке может расходиться независимо от "
+                "настроек решателя."
+                % (_bf_import_error or "модуль mesh.bodyfit_tetgen не найден"))
         if build_body_fitted_grid is not None:
             report(14, "Телооблекающая сетка (TetGen)")
             try:
