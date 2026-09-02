@@ -569,18 +569,25 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         print("Создание фоновой сетки с локальным сгущением...")
 
         # Параметры сетки
+        # Значение пресета и абсолютный пол запоминаются отдельно:
+        # предупреждение о применённом поле должно сравнивать пресет с
+        # тем порогом, который его действительно поднял.
         if "Грубая" in quality_text:
-            h_near = max(body_size * 0.045, 0.08)
+            _preset = body_size * 0.045
+            _abs_floor = 0.08
             h_far = body_size * 0.75
             margin = body_size * 2.8
         elif "Точная" in quality_text:
-            h_near = max(body_size * 0.018, 0.04)
+            _preset = body_size * 0.018
+            _abs_floor = 0.04
             h_far = body_size * 0.45
             margin = body_size * 4.0
         else:
-            h_near = max(body_size * 0.015, 0.05)
+            _preset = body_size * 0.015
+            _abs_floor = 0.05
             h_far = body_size * 0.55
             margin = body_size * 3.2
+        h_near = max(_preset, _abs_floor)
 
         # Пол шага у тела: 1.5% от габарита модели.
         #
@@ -592,14 +599,20 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         # 0.015 (проверено: 130548 точек фона и 701567 тетраэдров во всех
         # трёх случаях). Поэтому ограничение применяется до печати и
         # сообщается явно.
-        _h_floor = body_size * 0.015
-        _h_requested = h_near
-        if h_near < _h_floor:
-            h_near = _h_floor
-            print(f"   Внимание: запрашиваемый шаг у тела "
-                  f"{_h_requested:.4f} м ниже допустимого минимума "
-                  f"{_h_floor:.4f} м (1.5% от габарита модели "
-                  f"{body_size:.2f} м). Применён минимум.")
+        # Раньше здесь стояло `_h_floor = body_size * 0.015` и проверка
+        # `h_near < _h_floor`. Она не срабатывала никогда: h_near уже
+        # посчитан как max(пресет, 0.05/0.08/0.04), а пресет «Средней»
+        # и есть body_size*0.015, так что h_near >= _h_floor при любом
+        # размере. Предупреждение о применённом поле было мёртвым кодом,
+        # и на модели в 0.065 м шаг у тела молча становился 0.0500 м —
+        # 77% длины всей детали.
+        if _preset < _abs_floor:
+            say(f"Внимание: запрашиваемый шаг у тела {_preset:.5f} м "
+                f"ниже допустимого минимума {_abs_floor:.4f} м — при "
+                f"габарите модели {body_size:.4f} м это {_abs_floor / max(body_size, 1e-12) * 100:.0f}% "
+                f"её размера. Применён минимум, сетка будет очень грубой. "
+                f"Проверьте масштаб модели: возможно, CAD-файл в "
+                f"миллиметрах, а расчёт идёт в метрах.")
         h_far = max(h_far, h_near * 3.0)
 
         print(f"   Шаг около тела: {h_near:.4f} м")

@@ -211,6 +211,66 @@ def main():
     _MW._connect_mesh_log(_ui, _NoSig())
     check("_connect_mesh_log терпит воркер без log_signal", True)
 
+    # ---------------------------------------------------------------
+    # Абсолютный пол шага у тела (0.05/0.08/0.04 м) на мелкой модели
+    # перевешивает пресет, и сетка становится непригодной. Раньше
+    # условие `h_near < _h_floor` не срабатывало никогда — h_near уже
+    # посчитан как max(пресет, пол), а пресет «Средней» равен
+    # body_size*0.015, то есть самому _h_floor. Предупреждение было
+    # мёртвым кодом: на модели 0.065 м шаг молча становился 0.0500 м.
+    print()
+    print("== предупреждение о применённом поле шага ==")
+    tiny = os.path.join(workdir, "tiny.stl")
+    pv.Box(bounds=(0, 0.065, 0, 0.019, 0, 0.0015)).triangulate().save(tiny)
+    _stub2 = _types.ModuleType("mesh.bodyfit_tetgen")
+    _stub2.build_body_fitted_grid = lambda *a, **k: None
+    _saved2 = sys.modules.get("mesh.bodyfit_tetgen")
+    sys.modules["mesh.bodyfit_tetgen"] = _stub2
+    try:
+        _tiny_log = []
+        _buf2 = io.StringIO()
+        with redirect_stdout(_buf2):
+            _ok2, _msg2 = _gm.generate_mesh_impl(
+                [tiny], quality_text="Средняя", log_cb=_tiny_log.append)
+    finally:
+        if _saved2 is None:
+            sys.modules.pop("mesh.bodyfit_tetgen", None)
+        else:
+            sys.modules["mesh.bodyfit_tetgen"] = _saved2
+    _tiny_joined = "\n".join(_tiny_log)
+    # На модели 0.065 м генератор закономерно отказывает: при шаге
+    # 0.05 м центр ни одной ячейки не попадает в пластину толщиной
+    # 0.0015 м. Отказ правильный, а предупреждение объясняет причину
+    # до него, а не после.
+    check("на модели 0.065 м генератор честно отказывает",
+          _ok2 is False and "не вырезана" in str(_msg2), str(_msg2)[:80])
+    check("предупреждение о применённом поле шага напечатано",
+          "ниже допустимого минимума" in _tiny_joined, _tiny_joined[:90])
+    check("в предупреждении названа доля размера модели",
+          "%" in _tiny_joined and "габарите модели" in _tiny_joined)
+    check("предупреждение подсказывает проверить масштаб",
+          "масштаб" in _tiny_joined)
+
+    # Негативный контроль: на модели нормального размера пол не
+    # применяется, и предупреждения быть не должно.
+    _stub3 = _types.ModuleType("mesh.bodyfit_tetgen")
+    _stub3.build_body_fitted_grid = lambda *a, **k: None
+    sys.modules["mesh.bodyfit_tetgen"] = _stub3
+    try:
+        _norm_log = []
+        _buf3 = io.StringIO()
+        with redirect_stdout(_buf3):
+            _gm.generate_mesh_impl([fus, tail], quality_text="Средняя",
+                                   log_cb=_norm_log.append)
+    finally:
+        if _saved2 is None:
+            sys.modules.pop("mesh.bodyfit_tetgen", None)
+        else:
+            sys.modules["mesh.bodyfit_tetgen"] = _saved2
+    check("на модели 8 м пол не применяется и не пугает зря",
+          "ниже допустимого минимума" not in "\n".join(_norm_log),
+          "\n".join(_norm_log)[:90])
+
     print()
     print("Пройдено: %d" % _passed)
     if _failed:
