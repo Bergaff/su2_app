@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import sys
 import csv
+import io
 import math
 import json
 import time
@@ -1719,6 +1720,10 @@ class MainWindow(QMainWindow):
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         log_lay_in.addWidget(self.log_text)
+        self.btn_clear_log = QPushButton("Очистить лог")
+        self.btn_clear_log.setToolTip("Удаляет все сообщения из окна лога")
+        self.btn_clear_log.clicked.connect(self.clear_log)
+        log_lay_in.addWidget(self.btn_clear_log)
         self.bottom_tabs.addTab(tab_log_inner, "Сообщения / Лог (Messages)")
         tab_results_inner = QWidget()
         res_lay_in = QVBoxLayout(tab_results_inner)
@@ -1726,10 +1731,22 @@ class MainWindow(QMainWindow):
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["AoA", "Cl", "Cd", "Cm", "K", "Статус"])
         res_lay_in.addWidget(self.table)
+        _res_btns = QHBoxLayout()
+        self.btn_copy_csv = QPushButton("Скопировать CSV")
+        self.btn_copy_csv.setToolTip(
+            "Копирует результаты в буфер обмена в формате CSV:\n"
+            "AoA,Cl,Cd,Cm,L/D\n"
+            "Точки с ошибкой расчёта не копируются: у них нет "
+            "достоверных Cl/Cd/Cm.")
+        self.btn_copy_csv.clicked.connect(self.copy_polar_csv)
+        self.btn_copy_csv.setEnabled(False)
+        _res_btns.addWidget(self.btn_copy_csv)
         self.btn_save_csv = QPushButton("Экспорт поляры CSV")
         self.btn_save_csv.clicked.connect(self.save_polar_csv)
         self.btn_save_csv.setEnabled(False)
-        res_lay_in.addWidget(self.btn_save_csv)
+        _res_btns.addWidget(self.btn_save_csv)
+        _res_btns.addStretch(1)
+        res_lay_in.addLayout(_res_btns)
         self.bottom_tabs.addTab(tab_results_inner, "Таблица результатов (Results)")
         self.plot_canvas = AeroPlotCanvas(self, width=5, height=3)
         self.bottom_tabs.addTab(self.plot_canvas, "2D Аэро Графики (Aero Plots)")
@@ -4766,6 +4783,7 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         self._clock_end()
         self.btn_save_csv.setEnabled(True)
+        self.btn_copy_csv.setEnabled(True)
         self.btn_show_flow.setEnabled(True)
         n_ok = sum(1 for r in self.all_results if not r.get("error"))
         n_fail = len(self.all_results) - n_ok
@@ -5443,6 +5461,46 @@ class MainWindow(QMainWindow):
     # =============================================================
     # ЭКСПОРТ / ВИЗУАЛИЗАЦИЯ
     # =============================================================
+    def polar_csv_text(self, lineterminator="\r\n"):
+        """Поляра как текст CSV с заголовком AoA,Cl,Cd,Cm,L/D.
+
+        Один и тот же текст уходит и в файл («Экспорт поляры CSV»), и в
+        буфер обмена («Скопировать CSV»), поэтому содержимое файла и
+        вставки всегда совпадает. Точки с ошибкой пропускаются: у них
+        нет достоверных Cl/Cd/Cm.
+        """
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=["AoA", "Cl", "Cd", "Cm", "L/D"],
+                           lineterminator=lineterminator)
+        w.writeheader()
+        for r in self.all_results:
+            if not r.get('error', True):
+                cl, cd = r.get('cl', 0), r.get('cd', 0)
+                w.writerow({"AoA": r.get('aoa', 0), "Cl": cl, "Cd": cd,
+                            "Cm": r.get('cm', 0),
+                            "L/D": cl / cd if cd > 0.001 else 0})
+        return buf.getvalue()
+
+    def copy_polar_csv(self):
+        """Скопировать поляру в буфер обмена (AoA,Cl,Cd,Cm,L/D)."""
+        if not self.all_results:
+            return
+        # \n, а не \r\n: в файл CSV переводы строк пишет csv-модуль, а при
+        # вставке из буфера в блокнот или таблицу лишние \r только мешают.
+        text = self.polar_csv_text(lineterminator="\n")
+        n_rows = text.count("\n") - 1
+        if n_rows <= 0:
+            self.log_text.append(
+                "Внимание: копировать нечего — все точки завершены с ошибкой.")
+            return
+        QApplication.clipboard().setText(text)
+        self.log_text.append(
+            f"Готово: скопировано строк: {n_rows} (AoA,Cl,Cd,Cm,L/D)")
+
+    def clear_log(self):
+        """Очистить окно лога."""
+        self.log_text.clear()
+
     def save_polar_csv(self):
         if not self.all_results:
             return
@@ -5450,14 +5508,7 @@ class MainWindow(QMainWindow):
         path = os.path.join(
             RESULTS_DIR, f"polar_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
         with open(path, 'w', newline='', encoding='utf-8') as f:
-            w = csv.DictWriter(f, fieldnames=["AoA", "Cl", "Cd", "Cm", "L/D"])
-            w.writeheader()
-            for r in self.all_results:
-                if not r.get('error', True):
-                    cl, cd = r.get('cl', 0), r.get('cd', 0)
-                    w.writerow({"AoA": r.get('aoa', 0), "Cl": cl, "Cd": cd,
-                                "Cm": r.get('cm', 0),
-                                "L/D": cl / cd if cd > 0.001 else 0})
+            f.write(self.polar_csv_text())
         QMessageBox.information(self, "Готово", f"Сохранено: {path}")
 
     def show_flow_field(self):
