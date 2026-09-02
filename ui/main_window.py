@@ -908,6 +908,21 @@ class MainWindow(QMainWindow):
         self.btn_heal_stl.clicked.connect(self.heal_selected_stl)
         self.btn_heal_stl.setEnabled(False)
         lay3.addWidget(self.btn_heal_stl)
+        self.btn_union_bodies = QPushButton("Объединить пересекающиеся тела")
+        self.btn_union_bodies.setToolTip(
+            "Разрезает тела по линиям пересечения и отбрасывает то, что "
+            "оказалось внутри другого тела: из набора деталей получается "
+            "одна замкнутая оболочка.\n\n"
+            "Результат показывается вместо отдельных деталей и "
+            "сохраняется как unified_model.stl. Список компонентов не "
+            "меняется, повторное нажатие возвращает раздельный вид.\n\n"
+            "На расчётную сетку это не влияет: сетка и так строится по "
+            "объединённой поверхности.")
+        self.btn_union_bodies.clicked.connect(self.union_bodies)
+        lay3.addWidget(self.btn_union_bodies)
+        self.unified_mesh = None
+        self.unified_actor = None
+        self.unified_path = None
         self.bodies_table = QTableWidget(0, 2)
         self.bodies_table.setHorizontalHeaderLabels(["Компонент", "Роль"])
         self.bodies_table.horizontalHeader().setStretchLastSection(True)
@@ -3430,6 +3445,118 @@ class MainWindow(QMainWindow):
                     self.log_text.append(
                         f"Область генерации адаптирована под деталь '{b['name']}'.")
                 break
+
+    def union_bodies(self):
+        """Объединить пересекающиеся тела в одну замкнутую оболочку.
+
+        Крыло входит в фюзеляж, ГО пересекается с элеватором, киль стоит
+        на фюзеляже. Пока тела лежат рядом как есть, внутри модели
+        остаются внутренние стенки: в 3D они просвечивают сквозь обшивку,
+        а в экспортированном STL детали пересекаются насквозь.
+
+        Булево объединение разрезает поверхности по линиям пересечения и
+        отбрасывает то, что оказалось внутри другого тела.
+
+        Список компонентов не меняется — объединение нужно для просмотра
+        и экспорта. На расчётную сетку это не влияет: сетка и так
+        строится по объединённой поверхности (mesh/bodyfit_tetgen.py),
+        поэтому повторное нажатие просто возвращает раздельный вид.
+        """
+        # Повторное нажатие — вернуть раздельный вид.
+        if self.unified_actor is not None:
+            try:
+                self.plotter.remove_actor(self.unified_actor)
+            except Exception:
+                pass
+            self.unified_actor = None
+            self.unified_mesh = None
+            for b in self.bodies:
+                if b.get("actor") and b.get("visible", True):
+                    try:
+                        b["actor"].SetVisibility(True)
+                    except Exception:
+                        pass
+            try:
+                self.plotter.render()
+            except Exception:
+                pass
+            self.log_text.append("Тела снова показаны раздельно.")
+            return
+
+        meshes = [b["mesh"] for b in self.bodies
+                  if b.get("mesh") is not None and b.get("visible", True)]
+        if len(meshes) < 2:
+            self.log_text.append(
+                "Внимание: для объединения нужно хотя бы два видимых тела.")
+            return
+
+        try:
+            from geometry.solid_union import union_stats
+        except Exception as e:
+            self.log_text.append(
+                f"Внимание: объединение недоступно ({type(e).__name__}: {e})")
+            return
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            st = union_stats(meshes, log=self.log_text.append)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            self.log_text.append(
+                f"Внимание: объединить тела не удалось "
+                f"({type(e).__name__}: {e})")
+            return
+        QApplication.restoreOverrideCursor()
+
+        merged = st.get("mesh")
+        if merged is None:
+            self.log_text.append(
+                "Внимание: объединение не дало замкнутой поверхности. "
+                "Проверьте, что каждое тело замкнуто — открытые оболочки "
+                "(без заглушек на торцах) объединить нельзя.")
+            return
+
+        self.log_text.append(
+            f"Готово: объединено тел: {st['n_bodies']}, "
+            f"граней было {st['facets_in']}, стало {st['facets_out']}")
+        if st["volume_in"] > 0:
+            self.log_text.append(
+                f"Объём тел по отдельности {st['volume_in']:.4f}, "
+                f"после обрезки {st['volume_out']:.4f} — вырезано "
+                f"{st['overlap']:.4f} пересечений")
+
+        try:
+            os.makedirs(WORK_DIR_BASE, exist_ok=True)
+            self.unified_path = os.path.join(WORK_DIR_BASE,
+                                             "unified_model.stl")
+            merged.save(self.unified_path)
+            self.log_text.append(
+                f"Готово: объединённая модель сохранена: {self.unified_path}")
+        except Exception as e:
+            self.log_text.append(
+                f"Внимание: не удалось сохранить unified_model.stl: {e}")
+
+        for b in self.bodies:
+            if b.get("actor"):
+                try:
+                    b["actor"].SetVisibility(False)
+                except Exception:
+                    pass
+        try:
+            self.unified_actor = self.plotter.add_mesh(
+                merged, color="#2E5A78", opacity=0.95, show_edges=False)
+            self.unified_mesh = merged
+            self.plotter.render()
+        except Exception as e:
+            self.unified_actor = None
+            self.log_text.append(
+                f"Внимание: не удалось показать объединённую модель: {e}")
+            for b in self.bodies:
+                if b.get("actor") and b.get("visible", True):
+                    try:
+                        b["actor"].SetVisibility(True)
+                    except Exception:
+                        pass
 
     def remove_body(self):
         selected_ranges = self.bodies_table.selectedRanges()

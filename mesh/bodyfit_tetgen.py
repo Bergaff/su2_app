@@ -42,6 +42,7 @@ None, и вызывающий код остаётся на прежнем кар
 """
 from __future__ import annotations
 
+import os
 import numpy as np
 
 try:
@@ -83,84 +84,67 @@ def tetgen_available():
     return bool(HAS_TETGEN and HAS_TRIMESH and HAS_SCIPY and HAS_PYVISTA)
 
 
-def to_triangles(mesh):
-    """Привести поверхность к (points[N,3] float64, faces[M,3] int64)."""
-    if not HAS_PYVISTA:
-        return None, None
-    m = mesh if isinstance(mesh, pv.PolyData) else pv.PolyData(mesh)
+def _load_solid_union():
+    """Загрузить geometry/solid_union.py по пути файла.
+
+    Обычный `from geometry.solid_union import ...` исполняет
+    geometry/__init__.py, а тот тянет PyQt5 через stl_healer. В фоновом
+    процессе генерации сетки и в тестах это лишняя зависимость.
+    """
     try:
-        m = m.triangulate()
+        import importlib.util
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "geometry", "solid_union.py")
+        spec = importlib.util.spec_from_file_location(
+            "solid_union_standalone", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
     except Exception:
-        pass
-    faces_raw = np.asarray(m.faces)
-    if faces_raw.size == 0:
-        return None, None
-    if faces_raw.ndim == 1:
-        stride = int(faces_raw[0]) + 1
-        if stride < 4 or len(faces_raw) % stride != 0:
+        return None
+
+
+_su = _load_solid_union()
+
+if _su is not None:
+    to_triangles = _su.to_triangles
+else:
+    def to_triangles(mesh):
+        """Привести поверхность к (points[N,3], faces[M,3]) — запасной вариант."""
+        if not HAS_PYVISTA:
             return None, None
-        faces = faces_raw.reshape(-1, stride)[:, 1:]
-    else:
-        faces = faces_raw
-    if faces.shape[1] != 3:
-        return None, None
-    return np.asarray(m.points, dtype=float), np.ascontiguousarray(
-        faces, dtype=np.int64)
+        m = mesh if isinstance(mesh, pv.PolyData) else pv.PolyData(mesh)
+        try:
+            m = m.triangulate()
+        except Exception:
+            pass
+        faces_raw = np.asarray(m.faces)
+        if faces_raw.size == 0:
+            return None, None
+        if faces_raw.ndim == 1:
+            stride = int(faces_raw[0]) + 1
+            if stride < 4 or len(faces_raw) % stride != 0:
+                return None, None
+            faces = faces_raw.reshape(-1, stride)[:, 1:]
+        else:
+            faces = faces_raw
+        if faces.shape[1] != 3:
+            return None, None
+        return np.asarray(m.points, dtype=float), np.ascontiguousarray(
+            faces, dtype=np.int64)
 
 
 def union_surfaces(body_meshes, log=print):
-    """Слить поверхности тел в одну замкнутую.
+    """Слить поверхности тел в одну замкнутую (общая реализация).
 
-    Возвращает (points, faces) или None. Замкнутость обязательна: иначе
-    TetGen не сможет отделить внутренность тела от расчётной области.
+    Пересечения разрешаются булевым объединением: части тел, оказавшиеся
+    внутри других тел, вырезаются. Подробное обоснование и замеры — в
+    geometry/solid_union.py. Возвращает (points, faces) или None.
     """
-    if not HAS_TRIMESH:
-        return None, None
-    parts = []
-    for m in body_meshes:
-        pts, fcs = to_triangles(m)
-        if pts is None or len(fcs) == 0:
-            continue
-        parts.append(trimesh.Trimesh(vertices=pts, faces=fcs, process=True))
-    if not parts:
-        return None, None
-
-    if len(parts) == 1:
-        merged = parts[0]
-    else:
-        merged = None
-        for engine in ("manifold", "blender", None):
-            try:
-                if engine is None:
-                    merged = trimesh.boolean.union(parts)
-                else:
-                    merged = trimesh.boolean.union(parts, engine=engine)
-                if merged is not None and len(merged.faces) > 0:
-                    log("   Готово: тела объединены (движок %s)" %
-                        (engine or "по умолчанию"))
-                    break
-            except Exception as e:
-                log("   Внимание: объединение движком %s не удалось (%s)" %
-                    (engine or "по умолчанию", e))
-                merged = None
-        if merged is None:
-            log("   Внимание: объединить тела не удалось, "
-                "телообтекающая сетка не строится")
-            return None, None
-
-    if not getattr(merged, "is_watertight", False):
-        try:
-            merged.fill_holes()
-        except Exception:
-            pass
-    if not getattr(merged, "is_watertight", False):
-        log("   Внимание: объединённая поверхность не замкнута "
-            "(%d граней), телообтекающая сетка не строится"
-            % len(merged.faces))
-        return None, None
-
-    return (np.asarray(merged.vertices, dtype=float),
-            np.ascontiguousarray(merged.faces, dtype=np.int64))
+    if _su is not None:
+        return _su.union_meshes(body_meshes, log=log)
+    return None, None
 
 
 def farfield_bounds(body_min, body_max, margin):
