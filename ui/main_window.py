@@ -1349,6 +1349,20 @@ class MainWindow(QMainWindow):
             "Улучшает сходимость на жёстких моделях (высокие AoA, закрылки)."
         )
         opts_lay.addWidget(self.chk_use_ramp_aoa)
+
+        self.chk_cfl_aggressive = QCheckBox("Быстрый CFL (до 1000)")
+        self.chk_cfl_aggressive.setChecked(False)
+        self.chk_cfl_aggressive.setToolTip(
+            "Поднять потолок адаптивного CFL с 5 до 1000.\n"
+            "Это главный рычаг скорости: неявная схема EULER_IMPLICIT при\n"
+            "CFL 5 идёт очень мелким шагом. Официальный туториал SU2 по\n"
+            "невязкому обтеканию ONERA M6 использует ( 0.1, 2.0, 100.0, 1e10 ).\n\n"
+            "Включать только когда расчёт устойчиво сходится: на сетке,\n"
+            "которая не разрешает геометрию, высокий CFL не ускоряет\n"
+            "расчёт, а роняет его быстрее. При расходимости детектор\n"
+            "застоя прервёт точку и предложит вернуться к осторожному CFL."
+        )
+        opts_lay.addWidget(self.chk_cfl_aggressive)
         opts_lay.addStretch()
         perf_lay.addRow(opts_lay)
         # =================================================================
@@ -4550,6 +4564,17 @@ class MainWindow(QMainWindow):
         # Если сигнатура старой версии — kwarg просто проигнорируется
         # и мы допишем атрибутами ниже.
         start_new_kwargs = {"cpu_cores": self._cpu_cores_pending}
+        # Число компонентов и узлов сетки нужны для оценки потолка
+        # итераций: одиночное крыло и самолёт из пяти компонентов с
+        # механизацией не должны получать одинаковые 6000.
+        n_bodies_now = len([b for b in getattr(self, "bodies", []) or []
+                            if b.get("mesh") is not None])
+        try:
+            n_points_now = _mesh_npoin(MESH_FILE) or 0
+        except Exception:
+            n_points_now = 0
+        cfl_fast_now = bool(getattr(self, "chk_cfl_aggressive", None)
+                            and self.chk_cfl_aggressive.isChecked())
         try:
             import inspect
             sig = inspect.signature(self.session.start_new)
@@ -4560,6 +4585,9 @@ class MainWindow(QMainWindow):
                 ("symmetry_planes", symmetry_planes_now),
                 ("use_ramp_aoa", use_ramp_aoa_now),
                 ("turb_model", turb_model_now),
+                ("n_bodies", n_bodies_now),
+                ("n_points", n_points_now),
+                ("cfl_aggressive", cfl_fast_now),
             ]:
                 if key in sig.parameters:
                     start_new_kwargs[key] = value

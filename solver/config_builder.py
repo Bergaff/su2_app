@@ -35,6 +35,77 @@ def _format_marker_value_pairs(markers: Optional[Iterable[str]],
     return f"( {', '.join(pairs)} )"
 
 
+# Потолок CFL. Формат CFL_ADAPT_PARAM в SU2 —
+# (коэффициент вниз, коэффициент вверх, CFL минимум, CFL максимум).
+#
+# Старое значение ( 0.5, 1.2, 0.5, 5.0 ) не давало CFL подняться выше 5.0.
+# Для неявной схемы EULER_IMPLICIT это крайне робкий шаг: официальный
+# туториал SU2 по невязкому обтеканию ONERA M6 — тот же класс задач —
+# использует ( 0.1, 2.0, 100.0, 1e10 ), а туториал по соплу
+# ( 0.1, 2.0, 10.0, 1000.0 ). То есть прежний потолок был в 20 раз ниже
+# минимума из туториала.
+#
+# Агрессивный вариант включается отдельным флагом, а не подменяет
+# осторожный по умолчанию: на сетке, которая не разрешает геометрию,
+# высокий CFL не ускоряет расчёт, а роняет его быстрее. Пока маркер
+# airfoil берётся из лестницы объёмной сетки, безопаснее остаться на 5.0.
+CFL_PARAM_SAFE = "( 0.5, 1.2, 0.5, 5.0 )"
+CFL_PARAM_FAST = "( 0.1, 2.0, 10.0, 1000.0 )"
+
+
+def inner_iter_estimate(mesh_quality=None, n_bodies=1, n_points=0,
+                        is_rans=False):
+    """Оценка потолка итераций и пояснение, из чего она получилась.
+
+    Прежняя привязка была только к качеству сетки: Грубая 2000, Средняя
+    6000, Точная 12000 — и не зависела от того, что именно считается.
+    Одиночное крыло получало те же 6000 итераций, что и самолёт из пяти
+    компонентов с механизацией, хотя сошёлось бы за пятую часть.
+
+    Здесь число компонентов — главный множитель, а размер сетки влияет
+    слабо (в четвёртой степени), потому что сам по себе он плохой
+    прогнозатор: грубая сетка сложной формы требует больше итераций, чем
+    мелкая сетка простого тела. RANS добавляет полтора раза — уравнения
+    турбулентности сходятся медленнее.
+
+    Важно, что это ПОТОЛОК, а не цель. Сходящийся расчёт останавливается
+    сам на CONV_RESIDUAL_MINVAL, а расходящийся теперь прерывается
+    детектором застоя в solver/workers.py. Поэтому значение можно брать с
+    запасом: оно почти не влияет на время успешного расчёта.
+
+    Возвращает (число, пояснение).
+    """
+    base = _inner_iter_for_quality(mesh_quality)
+
+    nb = max(1, int(n_bodies or 1))
+    # Один компонент — множитель 1.0, дальше +0.15 за каждый, потолок 1.8.
+    complexity = min(1.8, 1.0 + 0.15 * (nb - 1))
+
+    np_ = max(0, int(n_points or 0))
+    if np_ > 0:
+        # Зависимость намеренно слабая: размер сетки — плохой прогнозатор,
+        # грубая сетка сложной формы требует больше итераций, чем мелкая
+        # сетка простого тела. Степень 0.12 и узкий коридор 0.90..1.25
+        # дают поправку, а не вторую привязку к сетке.
+        mesh_factor = float(min(1.25, max(0.90, (np_ / 100000.0) ** 0.12)))
+    else:
+        mesh_factor = 1.0
+
+    turb = 1.5 if is_rans else 1.0
+
+    value = int(round(base * complexity * mesh_factor * turb / 500.0) * 500)
+    # Жёсткий потолок: при «Точной» на семи компонентах с RANS оценка
+    # уходит за 48 тысяч, а столько не нужен ни один осмысленный прогон.
+    value = max(500, min(20000, value))
+
+    parts = ["база %d" % base, "компонентов %d (x%.2f)" % (nb, complexity)]
+    if np_ > 0:
+        parts.append("узлов %d (x%.2f)" % (np_, mesh_factor))
+    if is_rans:
+        parts.append("RANS (x1.5)")
+    return value, ", ".join(parts)
+
+
 def _inner_iter_for_quality(mesh_quality) -> int:
     """Подбор INNER_ITER в зависимости от качества сетки.
 
@@ -79,10 +150,17 @@ def build_euler_config(p: Mapping, markers=None, restart: bool = False,
                       mesh_quality=None,
                       use_symmetry: bool = False,
                       symmetry_planes: list = None,
-                      enable_cuda: bool = False) -> str:
+                      enable_cuda: bool = False,
+                      n_bodies: int = 0, n_points: int = 0,
+                      cfl_aggressive: bool = False) -> str:
     restart_str = "YES" if restart else "NO"
     body_markers = format_marker_list(markers)
-    inner_iter = _inner_iter_for_quality(mesh_quality)
+    if n_bodies or n_points:
+        inner_iter, inner_why = inner_iter_estimate(
+            mesh_quality, n_bodies=n_bodies, n_points=n_points, is_rans=False)
+    else:
+        inner_iter, inner_why = _inner_iter_for_quality(mesh_quality), ""
+    cfl_param = CFL_PARAM_FAST if cfl_aggressive else CFL_PARAM_SAFE
     # === T1: MARKER_SYM — плоскости симметрии ========================
     # Если включены плоскости (XY/XZ/YZ) и в сетке есть
     # соответствующие маркеры, SU2 посчитает только симметричную
@@ -134,7 +212,7 @@ ENTROPY_FIX_COEFF= 0.005
 NUM_METHOD_GRAD= WEIGHTED_LEAST_SQUARES
 CFL_NUMBER= 1.0
 CFL_ADAPT= YES
-CFL_ADAPT_PARAM= ( 0.5, 1.2, 0.5, 5.0 )
+CFL_ADAPT_PARAM= {cfl_param}
 TIME_DISCRE_FLOW= EULER_IMPLICIT
 LINEAR_SOLVER= FGMRES
 LINEAR_SOLVER_PREC= ILU
@@ -163,7 +241,9 @@ def build_rans_config(p: Mapping, markers=None, restart: bool = False,
                       use_symmetry: bool = False,
                       symmetry_planes: list = None,
                       use_ramp_aoa: bool = False,
-                      enable_cuda: bool = False) -> str:
+                      enable_cuda: bool = False,
+                      n_bodies: int = 0, n_points: int = 0,
+                      cfl_aggressive: bool = False) -> str:
     """Шаблон config.cfg для RANS.
 
     Параметры:
@@ -177,7 +257,12 @@ def build_rans_config(p: Mapping, markers=None, restart: bool = False,
     restart_str = "YES" if restart else "NO"
     body_markers = format_marker_list(markers)
     heatflux_markers = _format_marker_value_pairs(markers, 0.0)
-    inner_iter = _inner_iter_for_quality(mesh_quality)
+    if n_bodies or n_points:
+        inner_iter, inner_why = inner_iter_estimate(
+            mesh_quality, n_bodies=n_bodies, n_points=n_points, is_rans=True)
+    else:
+        inner_iter, inner_why = _inner_iter_for_quality(mesh_quality), ""
+    cfl_param = CFL_PARAM_FAST if cfl_aggressive else CFL_PARAM_SAFE
 
     # === ENABLE_CUDA: GPU-ветка произведения матрицы на вектор =========
     cuda_line = "ENABLE_CUDA= YES" if enable_cuda else "% ENABLE_CUDA= NO   # выключено"
@@ -259,7 +344,7 @@ ENTROPY_FIX_COEFF= 0.005
 NUM_METHOD_GRAD= WEIGHTED_LEAST_SQUARES
 CFL_NUMBER= 1.0
 CFL_ADAPT= YES
-CFL_ADAPT_PARAM= ( 0.5, 1.2, 0.5, 5.0 )
+CFL_ADAPT_PARAM= {cfl_param}
 TIME_DISCRE_FLOW= EULER_IMPLICIT
 TIME_DISCRE_TURB= EULER_IMPLICIT
 LINEAR_SOLVER= FGMRES
@@ -326,7 +411,9 @@ def build_su2_config(aoa: float, physics: Mapping, solver: str,
                      symmetry_planes: list = None,
                      turb_model: str = "SA",
                      use_ramp_aoa: bool = False,
-                     enable_cuda: bool = False) -> str:
+                     enable_cuda: bool = False,
+                     n_bodies: int = 0, n_points: int = 0,
+                     cfl_aggressive: bool = False) -> str:
     """Строит полный текст ``config.cfg`` для одной расчётной точки.
 
     Параметры T1+T4:
@@ -376,6 +463,8 @@ def build_su2_config(aoa: float, physics: Mapping, solver: str,
             symmetry_planes=symmetry_planes,
             use_ramp_aoa=use_ramp_aoa,
             enable_cuda=enable_cuda,
+            n_bodies=n_bodies, n_points=n_points,
+            cfl_aggressive=cfl_aggressive,
         )
     if solver_name.startswith("EULER") or "EULER" in solver_name:
         return build_euler_config(
@@ -383,6 +472,8 @@ def build_su2_config(aoa: float, physics: Mapping, solver: str,
             mesh_quality=mesh_quality,
             use_symmetry=use_symmetry,
             symmetry_planes=symmetry_planes,
+            n_bodies=n_bodies, n_points=n_points,
+            cfl_aggressive=cfl_aggressive,
         )
 
     raise ValueError(f"Неподдерживаемый решатель SU2: {solver!r}")
@@ -393,6 +484,8 @@ def write_su2_config(path: str, aoa: float, physics: Mapping, solver: str,
                      restart: bool = False,
                      mesh_filename: str = "mesh.su2",
                      mesh_quality=None,
+                     n_bodies: int = 0, n_points: int = 0,
+                     cfl_aggressive: bool = False,
                      use_symmetry: bool = False,
                      symmetry_planes: list = None,
                      turb_model: str = "SA",
@@ -421,6 +514,8 @@ def write_su2_config(path: str, aoa: float, physics: Mapping, solver: str,
         restart=restart,
         mesh_filename=mesh_filename,
         mesh_quality=mesh_quality,
+        n_bodies=n_bodies, n_points=n_points,
+        cfl_aggressive=cfl_aggressive,
         use_symmetry=use_symmetry,
         symmetry_planes=symmetry_planes,
         turb_model=turb_model,
@@ -459,6 +554,11 @@ def write_case_config(case_dir: str, aoa: float, session) -> str:
     mesh_quality = getattr(session, "mesh_quality", None)
     turb_model = str(getattr(session, "turb_model", "SA") or "SA")
     use_ramp_aoa = bool(getattr(session, "use_ramp_aoa", False))
+    # Оценка потолка итераций и агрессивный CFL. getattr с нулями и False —
+    # старые сессии без этих полей работают ровно как раньше.
+    n_bodies = int(getattr(session, "n_bodies", 0) or 0)
+    n_points = int(getattr(session, "n_points", 0) or 0)
+    cfl_aggressive = bool(getattr(session, "cfl_aggressive", False))
 
     # T1: собираем список плоскостей симметрии. Берём из session.symmetry_planes,
     # если нет — обратная совместимость: session.use_symmetry=True → ["xz"].

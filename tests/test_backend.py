@@ -1946,6 +1946,115 @@ check("новый результат не наследует прежний ви
       _w7.plotter.on_render[-1] == "сброшенный",
       _w7.plotter.on_render[-1])
 
+# --------------------------------------- динамический потолок итераций
+print("== INNER_ITER зависит от сложности, а не только от сетки ==")
+from solver.config_builder import inner_iter_estimate as _iie
+from solver.config_builder import (CFL_PARAM_SAFE, CFL_PARAM_FAST,
+                                   build_su2_config as _bsc)
+
+_i1, _w1 = _iie("Средняя", n_bodies=1, n_points=90000)
+_i5, _w5 = _iie("Средняя", n_bodies=5, n_points=97000)
+check("один компонент получает меньше итераций, чем пять",
+      _i1 < _i5, "%d против %d" % (_i1, _i5))
+check("один компонент остаётся на прежнем базовом значении",
+      _i1 == 6000, _i1)
+check("пояснение называет число компонентов", "компонентов 5" in _w5, _w5)
+check("без данных о сложности работает прежняя схема",
+      _iie("Средняя")[0] == 6000 and _iie("Грубая")[0] == 2000)
+check("RANS увеличивает оценку",
+      _iie("Средняя", n_bodies=5, n_points=97000, is_rans=True)[0] > _i5)
+check("есть жёсткий потолок 20000",
+      _iie("Точная", n_bodies=7, n_points=900000, is_rans=True)[0] <= 20000)
+check("есть жёсткий пол 500",
+      _iie("Грубая", n_bodies=1, n_points=1)[0] >= 500)
+check("размер сетки влияет слабо",
+      abs(_iie("Средняя", n_bodies=1, n_points=50000)[0]
+          - _iie("Средняя", n_bodies=1, n_points=400000)[0]) <= 2000,
+      "%d против %d" % (_iie("Средняя", n_bodies=1, n_points=50000)[0],
+                        _iie("Средняя", n_bodies=1, n_points=400000)[0]))
+
+
+def _cfg(**kw):
+    return _bsc(3.0, {"rho": 1.225, "speed": 60.0, "mu": 1.7894e-5},
+                "EULER", (1.12, 9.742, 0, 0, 0),
+                mesh_quality="Средняя", **kw)
+
+
+print()
+print("== потолок CFL переключается флагом ==")
+check("по умолчанию осторожный CFL 5.0",
+      CFL_PARAM_SAFE in _cfg(), _cfg().count("CFL_ADAPT_PARAM"))
+check("флаг даёт быстрый CFL",
+      CFL_PARAM_FAST in _cfg(cfl_aggressive=True))
+check("оценка итераций доходит до config.cfg",
+      "INNER_ITER= %d" % _i5 in _cfg(n_bodies=5, n_points=97000))
+check("RANS-ветка тоже принимает параметры",
+      CFL_PARAM_FAST in _bsc(
+          3.0, {"rho": 1.225, "speed": 60.0, "mu": 1.7894e-5}, "RANS",
+          (1.12, 9.742, 0, 0, 0), mesh_quality="Средняя",
+          n_bodies=5, n_points=97000, cfl_aggressive=True))
+
+print()
+print("== детектор застоя на реальных прогонах ==")
+from solver.workers import stall_verdict as _sv
+from solver.workers import stall_patience_for
+
+
+def _run(trace, patience=1000):
+    best_rms, best_iter, why = None, 0, None
+    for it, rms in trace:
+        best_rms, best_iter, why = _sv(it, rms, best_rms, best_iter,
+                                       patience=patience)
+        if why:
+            return it, why
+    return None, None
+
+
+# Прогон импортированного крыла: 0.410 -> 0.760 за 4500 итераций,
+# 35 минут 26 секунд, сессия отчиталась «1 успешных».
+_wing = [(0, 0.410), (1500, 0.615), (3000, 0.715), (4500, 0.760)]
+_dense = [(i, 0.410 + 0.35 * i / 4500.0) for i in range(0, 4501, 50)]
+_it, _why = _run(_dense)
+check("крыло с растущей невязкой прерывается досрочно", _it is not None,
+      "дошло до конца")
+check("прерывается задолго до 4500 итераций",
+      _it is not None and _it < 2500, "итерация %s" % _it)
+check("причина объясняет, что невязка не улучшалась",
+      _why is not None and "не улучшалась" in _why, str(_why)[:60])
+
+# Прогон полного самолёта: -1.494 на старте, 11.06 на 265-й. Там SU2
+# сам обрывает расчёт по своему порогу 10^20, но детектор обязан сработать
+# раньше, если лимит итераций короткий и терпение соответственно меньше.
+_full = [(i, -1.494 + 12.5 * i / 265.0) for i in range(0, 266, 5)]
+_it2, _ = _run(_full, patience=stall_patience_for(500))
+check("расходящийся самолёт прерывается до 265-й итерации",
+      _it2 is not None and _it2 < 265, "итерация %s" % _it2)
+check("терпение сокращается вместе с лимитом итераций",
+      stall_patience_for(500) < stall_patience_for(6000),
+      "%d против %d" % (stall_patience_for(500), stall_patience_for(6000)))
+check("терпение не уходит ниже 150",
+      stall_patience_for(100) == 150, stall_patience_for(100))
+check("терпение не уходит выше 1000",
+      stall_patience_for(100000) == 1000, stall_patience_for(100000))
+
+# Нормально сходящийся расчёт прерван быть не должен.
+_good = [(i, 2.0 - 0.004 * i) for i in range(0, 6001, 100)]
+_it3, _ = _run(_good)
+check("сходящийся расчёт не прерывается", _it3 is None,
+      "прерван на %s" % _it3)
+
+# Колебания адаптивного CFL вокруг падающего тренда — тоже не застой.
+_osc = [(i, 2.0 - 0.002 * i + (0.15 if (i // 100) % 2 else 0.0))
+        for i in range(0, 6001, 100)]
+_it4, _ = _run(_osc)
+check("колебания CFL не принимаются за застой", _it4 is None,
+      "прерван на %s" % _it4)
+
+check("NaN не считается застоем",
+      _sv(5000, float("nan"), -3.0, 100)[2] is None)
+check("первая итерация задаёт基准 минимум".replace("基准", "базовый"),
+      _sv(0, 1.5, None, 0)[:2] == (1.5, 0))
+
 # ---------------------------------------------------------------- summary
 print()
 if FAIL:
