@@ -266,6 +266,21 @@ def build():
     except Exception:
         pass
 
+    # TetGen — телооблекающая сетка (mesh/bodyfit_tetgen.py). Пакет несёт
+    # нативную библиотеку тетраэдрального разбиения, поэтому collect-all.
+    # trimesh и manifold3d нужны ему для объединения тел в замкнутую
+    # поверхность перед триангуляцией. Если чего-то нет, генератор сам
+    # откатится на картезианский фон.
+    try:
+        import importlib.util
+        for _pkg in ("tetgen", "trimesh", "manifold3d"):
+            if importlib.util.find_spec(_pkg) is not None:
+                cmd.append(f"--collect-all={_pkg}")
+                print(f"Готово: {_pkg} найден — собираю с нативными "
+                      "библиотеками.")
+    except Exception:
+        pass
+
     # Если динамически импортируются и другие сторонние пакеты — добавляй
     # их так же здесь, например:  cmd.append("--collect-all=<пакет>")
 

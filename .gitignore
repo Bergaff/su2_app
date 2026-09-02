@@ -23,3 +23,6 @@ _skipped.face
 _skipped.node
 *.face
 *.node
+
+# артефакты тестов
+tests/_tmp_*/

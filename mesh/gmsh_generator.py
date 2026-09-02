@@ -585,199 +585,239 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         print(f"   Шаг вдали:      {h_far:.4f} м")
         print(f"   Margin:         {margin:.2f} м")
 
-        # === Проверка разрешающей способности ============================
+        # === Телооблекающая сетка (TetGen) =============================
         #
-        # Сетка строится вырезанием ячеек фона: ячейка удаляется, если её
-        # ЦЕНТР попал внутрь тела. Значит тело thinner одного шага фона
-        # может не попасть в сетку вовсе — и не потому, что сетка грубая,
-        # а потому, что так легли узлы.
+        # Картазианский фон ниже поверхность тела не облегает: ячейка
+        # удаляется, если её ЦЕНТР попал внутрь, поэтому границей
+        # расчётной области оказывается ступенька из граней фоновых
+        # тетраэдров, и маркер airfoil в mesh.su2 собирается с этой
+        # ступеньки. Для тонких элементов (ГО, ВО, руль) ступенька
+        # профиль не описывает вовсе, и SU2 на такой сетке расходится
+        # независимо от настроек решателя.
         #
-        # На полном самолёте при качестве «Средняя» h_near считается от
-        # размаха (body_size ~ 9 м) и равен ~0.135 м, а толщина ГО, ВО и
-        # руля (хорда 0.70 м, профиль 12%) — 0.084 м, то есть 0.62 шага.
-        # Крыло в корне (1.44 м, NACA2412) — 0.173 м, 1.28 шага.
-        #
-        # Молча выдавать такую сетку нельзя: SU2 на ней расходится, и
-        # пользователь узнаёт об этом только через десять минут счёта.
-        # Поэтому считаем и печатаем явно.
-        if body_thinness:
-            print("   Проверка разрешающей способности (шаг у тела "
-                  f"{h_near:.4f} м):")
-            _worst = []
-            for _name, _t in sorted(body_thinness, key=lambda x: x[1]):
-                _cells = _t / h_near if h_near > 0 else 0.0
-                if _cells < 1.0:
-                    _verdict = "НЕ РАЗРЕШАЕТСЯ — элемент может отсутствовать в сетке"
-                elif _cells < 3.0:
-                    _verdict = "на пределе — поверхность будет ступенчатой"
-                else:
-                    _verdict = "разрешается"
-                print(f"      {_name}: мин. габарит {_t:.4f} м = "
-                      f"{_cells:.2f} шага — {_verdict}")
-                if _cells < 3.0:
-                    _worst.append((_name, _t, _cells))
-            if _worst:
-                _n_bad = sum(1 for _, _, c in _worst if c < 1.0)
-                print("   Внимание: сетка строится вырезанием ячеек фона и "
-                      "не облегает поверхность. Элемент тоньше одного шага "
-                      "фона попадает в сетку как ступенчатая пластина в одну "
-                      "ячейку или не попадает вовсе — расчёт на такой сетке "
-                      "расходится независимо от настроек решателя.")
-                if _n_bad:
-                    print(f"   Компонентов тоньше одного шага: {_n_bad}. "
-                          "Нужен шаг у тела не более "
-                          f"{min(t for _, t, _ in _worst) / 3.0:.4f} м "
-                          "(3 шага на самый тонкий элемент), либо сетка, "
-                          "облегающая поверхность (gmsh по STL).")
-
-        report(15, "Построение осей фоновой сетки")
-
-        def make_clustered_axis(bmin, bmax, margin_minus, margin_plus,
-                                h_near_axis, h_far_axis):
-            domain_min = bmin - margin_minus
-            domain_max = bmax + margin_plus
-            inner_min = bmin - 2.0 * h_near_axis
-            inner_max = bmax + 2.0 * h_near_axis
-            inner_min = max(inner_min, domain_min)
-            inner_max = min(inner_max, domain_max)
-
-            left_len = max(inner_min - domain_min, 0.0)
-            n_left = max(2, int(np.ceil(left_len / h_far_axis)))
-            left = np.linspace(domain_min, inner_min, n_left + 1)
-
-            center = np.arange(inner_min, inner_max + 0.5 * h_near_axis,
-                               h_near_axis)
-            if len(center) == 0 or center[-1] < inner_max:
-                center = np.append(center, inner_max)
-
-            right_len = max(domain_max - inner_max, 0.0)
-            n_right = max(2, int(np.ceil(right_len / h_far_axis)))
-            right = np.linspace(inner_max, domain_max, n_right + 1)
-
-            axis = np.unique(np.concatenate([left, center, right]))
-            axis.sort()
-            return axis
-
-        xs = make_clustered_axis(body_min[0], body_max[0],
-                                 margin * 0.8, margin * 1.2,
-                                 h_near, h_far)
-        report(17, "Построение осей фоновой сетки (X)")
-
-        ys = make_clustered_axis(body_min[1], body_max[1],
-                                 margin, margin,
-                                 h_near, h_far)
-        report(19, "Построение осей фоновой сетки (Y)")
-
-        zs = make_clustered_axis(body_min[2], body_max[2],
-                                 margin, margin,
-                                 h_near, h_far)
-        report(21, "Построение осей фоновой сетки (Z)")
-
-        nx = len(xs) - 1
-        ny = len(ys) - 1
-        nz = len(zs) - 1
-        approx_tets = nx * ny * nz * 5
-        print(f"   Разрешение:     {nx} x {ny} x {nz}")
-        print(f"   Примерно тетр.: {approx_tets}")
-
-        check_cancel()
-        report(24, "Генерация узлов фоновой сетки")
-
-        xv, yv, zv = np.meshgrid(xs, ys, zs, indexing='ij')
-        points = np.column_stack([xv.ravel(), yv.ravel(), zv.ravel()])
-        print(f"   Точек фона: {len(points)}")
-
-        check_cancel()
-        report(30, "Разбиение на тетраэдры")
-
-        ii, jj, kk = np.meshgrid(np.arange(nx), np.arange(ny), np.arange(nz),
-                                 indexing='ij')
-
-        def idx(i, j, k):
-            return (i * (ny + 1) + j) * (nz + 1) + k
-
-        corners = np.stack([
-            idx(ii, jj, kk).ravel(),
-            idx(ii + 1, jj, kk).ravel(),
-            idx(ii + 1, jj + 1, kk).ravel(),
-            idx(ii, jj + 1, kk).ravel(),
-            idx(ii, jj, kk + 1).ravel(),
-            idx(ii + 1, jj, kk + 1).ravel(),
-            idx(ii + 1, jj + 1, kk + 1).ravel(),
-            idx(ii, jj + 1, kk + 1).ravel(),
-        ], axis=1)
-
-        pattern = np.array([
-            [0, 1, 2, 6],
-            [0, 2, 3, 6],
-            [0, 5, 1, 6],   # было [0,1,5,6]
-            [0, 4, 5, 6],
-            [0, 3, 7, 6],
-            [0, 7, 4, 6],   # было [0,4,7,6]
-        ], dtype=np.int64)
-
-        cells_arr = corners[:, pattern].reshape(-1, 4)
-        n_tets = len(cells_arr)
-        print(f"   Тетраэдров до вырезания: {n_tets}")
-
-        check_cancel()
-        report(40, "Сборка объёмной сетки")
-
-        cell_array = np.hstack([
-            np.full((n_tets, 1), 4, dtype=np.int64),
-            cells_arr
-        ]).ravel()
-        celltypes = np.full(n_tets, pv.CellType.TETRA, dtype=np.uint8)
-        grid = pv.UnstructuredGrid(cell_array, celltypes, points)
-        report(44, "Расчёт центров ячеек")
-
-        cell_centers = grid.cell_centers().points
-        centers_poly = pv.PolyData(cell_centers)
-        keep_mask = np.ones(len(cell_centers), dtype=bool)
-        print("Вырезаем тела из фона (надежный метод VTK)...")
-
-        total_removed = 0
-        n_comp = max(1, len(body_meshes))
-        for i, m in enumerate(body_meshes):
-            check_cancel()
-            report(44 + int(24 * i / n_comp),
-                   f"Вырезание компонента {i + 1}/{n_comp}")
-            n_inside = 0
+        # Поэтому сначала пробуем построить сетку, в которую поверхность
+        # тела входит как есть (constrained Delaunay через TetGen). Если
+        # не получается — нет TetGen, тела не сливаются в замкнутую
+        # поверхность, грани тела потерялись, — остаёмся на прежнем
+        # картезианском пути без потери функционала.
+        _bf = None
+        build_body_fitted_grid = None
+        try:
             try:
+                from mesh.bodyfit_tetgen import build_body_fitted_grid
+            except ImportError:
+                from bodyfit_tetgen import build_body_fitted_grid
+        except Exception:
+            build_body_fitted_grid = None
+        if build_body_fitted_grid is not None:
+            report(14, "Телооблекающая сетка (TetGen)")
+            try:
+                _bf = build_body_fitted_grid(
+                    body_meshes, body_min, body_max, margin, log=print)
+            except Exception as _e:
+                print(f"   Внимание: телооблекающая сетка не построена "
+                      f"({type(_e).__name__}: {_e})")
+                _bf = None
+        if _bf is not None:
+            grid = _bf["grid"]
+            print(f"   Готово: телооблекающая сетка: {grid.n_points} узлов, "
+                  f"{grid.n_cells} тетраэдров, граней тела в маркере "
+                  f"{len(_bf['body_facets'])}")
+            report(68, "Телооблекающая сетка построена")
+        else:
+            # === Проверка разрешающей способности ============================
+            #
+            # Сетка строится вырезанием ячеек фона: ячейка удаляется, если её
+            # ЦЕНТР попал внутрь тела. Значит тело thinner одного шага фона
+            # может не попасть в сетку вовсе — и не потому, что сетка грубая,
+            # а потому, что так легли узлы.
+            #
+            # На полном самолёте при качестве «Средняя» h_near считается от
+            # размаха (body_size ~ 9 м) и равен ~0.135 м, а толщина ГО, ВО и
+            # руля (хорда 0.70 м, профиль 12%) — 0.084 м, то есть 0.62 шага.
+            # Крыло в корне (1.44 м, NACA2412) — 0.173 м, 1.28 шага.
+            #
+            # Молча выдавать такую сетку нельзя: SU2 на ней расходится, и
+            # пользователь узнаёт об этом только через десять минут счёта.
+            # Поэтому считаем и печатаем явно.
+            if body_thinness:
+                print("   Проверка разрешающей способности (шаг у тела "
+                      f"{h_near:.4f} м):")
+                _worst = []
+                for _name, _t in sorted(body_thinness, key=lambda x: x[1]):
+                    _cells = _t / h_near if h_near > 0 else 0.0
+                    if _cells < 1.0:
+                        _verdict = "НЕ РАЗРЕШАЕТСЯ — элемент может отсутствовать в сетке"
+                    elif _cells < 3.0:
+                        _verdict = "на пределе — поверхность будет ступенчатой"
+                    else:
+                        _verdict = "разрешается"
+                    print(f"      {_name}: мин. габарит {_t:.4f} м = "
+                          f"{_cells:.2f} шага — {_verdict}")
+                    if _cells < 3.0:
+                        _worst.append((_name, _t, _cells))
+                if _worst:
+                    _n_bad = sum(1 for _, _, c in _worst if c < 1.0)
+                    print("   Внимание: сетка строится вырезанием ячеек фона и "
+                          "не облегает поверхность. Элемент тоньше одного шага "
+                          "фона попадает в сетку как ступенчатая пластина в одну "
+                          "ячейку или не попадает вовсе — расчёт на такой сетке "
+                          "расходится независимо от настроек решателя.")
+                    if _n_bad:
+                        print(f"   Компонентов тоньше одного шага: {_n_bad}. "
+                              "Нужен шаг у тела не более "
+                              f"{min(t for _, t, _ in _worst) / 3.0:.4f} м "
+                              "(3 шага на самый тонкий элемент), либо сетка, "
+                              "облегающая поверхность (gmsh по STL).")
+
+            report(15, "Построение осей фоновой сетки")
+
+            def make_clustered_axis(bmin, bmax, margin_minus, margin_plus,
+                                    h_near_axis, h_far_axis):
+                domain_min = bmin - margin_minus
+                domain_max = bmax + margin_plus
+                inner_min = bmin - 2.0 * h_near_axis
+                inner_max = bmax + 2.0 * h_near_axis
+                inner_min = max(inner_min, domain_min)
+                inner_max = min(inner_max, domain_max)
+
+                left_len = max(inner_min - domain_min, 0.0)
+                n_left = max(2, int(np.ceil(left_len / h_far_axis)))
+                left = np.linspace(domain_min, inner_min, n_left + 1)
+
+                center = np.arange(inner_min, inner_max + 0.5 * h_near_axis,
+                                   h_near_axis)
+                if len(center) == 0 or center[-1] < inner_max:
+                    center = np.append(center, inner_max)
+
+                right_len = max(domain_max - inner_max, 0.0)
+                n_right = max(2, int(np.ceil(right_len / h_far_axis)))
+                right = np.linspace(inner_max, domain_max, n_right + 1)
+
+                axis = np.unique(np.concatenate([left, center, right]))
+                axis.sort()
+                return axis
+
+            xs = make_clustered_axis(body_min[0], body_max[0],
+                                     margin * 0.8, margin * 1.2,
+                                     h_near, h_far)
+            report(17, "Построение осей фоновой сетки (X)")
+
+            ys = make_clustered_axis(body_min[1], body_max[1],
+                                     margin, margin,
+                                     h_near, h_far)
+            report(19, "Построение осей фоновой сетки (Y)")
+
+            zs = make_clustered_axis(body_min[2], body_max[2],
+                                     margin, margin,
+                                     h_near, h_far)
+            report(21, "Построение осей фоновой сетки (Z)")
+
+            nx = len(xs) - 1
+            ny = len(ys) - 1
+            nz = len(zs) - 1
+            approx_tets = nx * ny * nz * 5
+            print(f"   Разрешение:     {nx} x {ny} x {nz}")
+            print(f"   Примерно тетр.: {approx_tets}")
+
+            check_cancel()
+            report(24, "Генерация узлов фоновой сетки")
+
+            xv, yv, zv = np.meshgrid(xs, ys, zs, indexing='ij')
+            points = np.column_stack([xv.ravel(), yv.ravel(), zv.ravel()])
+            print(f"   Точек фона: {len(points)}")
+
+            check_cancel()
+            report(30, "Разбиение на тетраэдры")
+
+            ii, jj, kk = np.meshgrid(np.arange(nx), np.arange(ny), np.arange(nz),
+                                     indexing='ij')
+
+            def idx(i, j, k):
+                return (i * (ny + 1) + j) * (nz + 1) + k
+
+            corners = np.stack([
+                idx(ii, jj, kk).ravel(),
+                idx(ii + 1, jj, kk).ravel(),
+                idx(ii + 1, jj + 1, kk).ravel(),
+                idx(ii, jj + 1, kk).ravel(),
+                idx(ii, jj, kk + 1).ravel(),
+                idx(ii + 1, jj, kk + 1).ravel(),
+                idx(ii + 1, jj + 1, kk + 1).ravel(),
+                idx(ii, jj + 1, kk + 1).ravel(),
+            ], axis=1)
+
+            pattern = np.array([
+                [0, 1, 2, 6],
+                [0, 2, 3, 6],
+                [0, 5, 1, 6],   # было [0,1,5,6]
+                [0, 4, 5, 6],
+                [0, 3, 7, 6],
+                [0, 7, 4, 6],   # было [0,4,7,6]
+            ], dtype=np.int64)
+
+            cells_arr = corners[:, pattern].reshape(-1, 4)
+            n_tets = len(cells_arr)
+            print(f"   Тетраэдров до вырезания: {n_tets}")
+
+            check_cancel()
+            report(40, "Сборка объёмной сетки")
+
+            cell_array = np.hstack([
+                np.full((n_tets, 1), 4, dtype=np.int64),
+                cells_arr
+            ]).ravel()
+            celltypes = np.full(n_tets, pv.CellType.TETRA, dtype=np.uint8)
+            grid = pv.UnstructuredGrid(cell_array, celltypes, points)
+            report(44, "Расчёт центров ячеек")
+
+            cell_centers = grid.cell_centers().points
+            centers_poly = pv.PolyData(cell_centers)
+            keep_mask = np.ones(len(cell_centers), dtype=bool)
+            print("Вырезаем тела из фона (надежный метод VTK)...")
+
+            total_removed = 0
+            n_comp = max(1, len(body_meshes))
+            for i, m in enumerate(body_meshes):
+                check_cancel()
+                report(44 + int(24 * i / n_comp),
+                       f"Вырезание компонента {i + 1}/{n_comp}")
+                n_inside = 0
                 try:
-                    enclosed = centers_poly.select_enclosed_points(
-                        m, tolerance=1e-5, check_surface=False)
-                except (TypeError, AttributeError):
                     try:
-                        enclosed = centers_poly.select_interior_points(m)
+                        enclosed = centers_poly.select_enclosed_points(
+                            m, tolerance=1e-5, check_surface=False)
                     except (TypeError, AttributeError):
-                        enclosed = centers_poly.select_enclosed_points(m)
-                inside = enclosed['SelectedPoints'].astype(bool)
-                n_inside = int(inside.sum())
-                if n_inside == 0 and TRIMESH_AVAILABLE:
-                    faces_np = m.faces.reshape(-1, 4)[:, 1:]
-                    tm = trimesh.Trimesh(vertices=m.points, faces=faces_np,
-                                         process=True)
-                    if not tm.is_watertight:
-                        tm.fill_holes()
-                    inside = tm.contains(cell_centers)
+                        try:
+                            enclosed = centers_poly.select_interior_points(m)
+                        except (TypeError, AttributeError):
+                            enclosed = centers_poly.select_enclosed_points(m)
+                    inside = enclosed['SelectedPoints'].astype(bool)
                     n_inside = int(inside.sum())
-                if n_inside > 0:
-                    keep_mask &= ~inside
-                    total_removed += n_inside
-                    print(f"   Готово: Компонент {i}: удалено {n_inside} ячеек внутри тела")
-                else:
-                    print(f"   Внимание: Компонент {i}: 0 ячеек попало внутрь!")
-            except Exception as e:
-                print(f"   x Ошибка вырезания компонента {i}: {e}")
+                    if n_inside == 0 and TRIMESH_AVAILABLE:
+                        faces_np = m.faces.reshape(-1, 4)[:, 1:]
+                        tm = trimesh.Trimesh(vertices=m.points, faces=faces_np,
+                                             process=True)
+                        if not tm.is_watertight:
+                            tm.fill_holes()
+                        inside = tm.contains(cell_centers)
+                        n_inside = int(inside.sum())
+                    if n_inside > 0:
+                        keep_mask &= ~inside
+                        total_removed += n_inside
+                        print(f"   Готово: Компонент {i}: удалено {n_inside} ячеек внутри тела")
+                    else:
+                        print(f"   Внимание: Компонент {i}: 0 ячеек попало внутрь!")
+                except Exception as e:
+                    print(f"   x Ошибка вырезания компонента {i}: {e}")
 
-        if total_removed == 0:
-            return False, ("ОШИБКА: Ни одна ячейка не вырезана под самолёт! "
-                           "Самолёт не попал в сетку.")
+            if total_removed == 0:
+                return False, ("ОШИБКА: Ни одна ячейка не вырезана под самолёт! "
+                               "Самолёт не попал в сетку.")
 
-        check_cancel()
-        report(70, "Удаление ячеек внутри тела")
-        grid = grid.extract_cells(keep_mask)
+            check_cancel()
+            report(70, "Удаление ячеек внутри тела")
+            grid = grid.extract_cells(keep_mask)
         if not isinstance(grid, pv.UnstructuredGrid):
             grid = pv.UnstructuredGrid(grid)
         if grid.n_cells == 0:
