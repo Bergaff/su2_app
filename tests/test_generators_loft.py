@@ -132,6 +132,33 @@ for tag, build, vol_ref, max_ref in cases:
                   "%.6f против %.6f" % (t.volume, vol_ref))
 
 print()
+print("== крыло: было не объёмом вовсе ==")
+# Старый код давал у корня два геометрически совпадающих контура, каждый со
+# своей крышкой: 79 дублей граней, 632 ребра с тремя и более соседями,
+# is_watertight=False, is_volume=False, максимальное ребро 4.5913 м.
+wing, x_off = gen.generate_wing_mesh(9.02, 1.44, 0.58, 0.0, 0.0,
+                                     "2412", -0.64, 0.0, 0.0)
+wv, wf = _tri(wing)
+we = _edges(wv, wf)
+check("крыло: наибольшее ребро не в полразмаха", we.max() < 0.40,
+      "макс %.4f (было 4.5913)" % we.max())
+check("крыло: нет дублей граней",
+      len(wf) == len(np.unique(np.sort(wf, axis=1), axis=0)),
+      "дублей %d (было 79)" % (len(wf) - len(np.unique(np.sort(wf, axis=1), axis=0))))
+if HAS_TRIMESH:
+    wt = trimesh.Trimesh(vertices=wv, faces=wf, process=False)
+    check("крыло: поверхность замкнута", wt.is_watertight is True)
+    check("крыло: это объём", wt.is_volume is True)
+    check("крыло: объём сошёлся (0.8013 при 40 точках профиля)",
+          abs(wt.volume - 0.801288) < 1e-5, "%.6f" % wt.volume)
+    Ew = np.sort(np.vstack([wf[:, [0, 1]], wf[:, [1, 2]], wf[:, [2, 0]]]), axis=1)
+    _, iw = np.unique(Ew, axis=0, return_inverse=True)
+    cw = np.bincount(iw)
+    check("крыло: нет не-многообразных рёбер", int((cw >= 3).sum()) == 0,
+          "%d (было 632)" % int((cw >= 3).sum()))
+    check("крыло: нет висячих рёбер", int((cw == 1).sum()) == 0)
+
+print()
 print("== n_chord действительно управляет разрешением ==")
 a = gen.generate_tail_surface(_AM(), "NACA0012", 2.8, 0.56, 0.28,
                               0.0, 0.0, x_offset=2.8, n_chord=20)

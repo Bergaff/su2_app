@@ -477,6 +477,10 @@ class MainWindow(QMainWindow):
         self.current_selected_body_index = -1
         self.flow_arrow_actor = None
         self.current_surface_mesh = None
+        # Камера запоминается между перерисовками карты поля. Сбрасывается
+        # только при загрузке НОВОГО результата: тогда вид надо подобрать
+        # заново, а при смене отображаемой величины — оставить как есть.
+        self._flow_scene_ready = False
         self.current_volume_mesh = None
         self.latest_case_dir = None
         self.wing_box_actor = None
@@ -5502,6 +5506,7 @@ class MainWindow(QMainWindow):
             mesh = pv.read(surface_file)
             self.current_surface_mesh = mesh
             self.current_volume_mesh = None
+            self._flow_scene_ready = False
             self.combo_scalar.blockSignals(True)
             self.combo_scalar.clear()
             if mesh.array_names:
@@ -5520,6 +5525,16 @@ class MainWindow(QMainWindow):
     def render_flow_scene(self, *args):
         if not self.current_surface_mesh:
             return
+        # Переключение карты поля перерисовывает сцену целиком, а clear()
+        # убирает все актёры — вместе с этим уезжает и вид. Пользователь
+        # крутит модель один раз и ожидает, что смена отображаемой величины
+        # не сдвинет её с места, поэтому камеру запоминаем и возвращаем.
+        saved_camera = None
+        if self._flow_scene_ready:
+            try:
+                saved_camera = self.plotter.camera.copy()
+            except Exception:
+                saved_camera = None
         self.plotter.clear()
         self.plotter.add_axes()
         for b in self.bodies:
@@ -5573,6 +5588,12 @@ class MainWindow(QMainWindow):
         else:
             self.plotter.add_mesh(surface, color="lightblue", show_edges=True)
         self.update_flow_arrow()
+        if saved_camera is not None:
+            try:
+                self.plotter.camera = saved_camera
+            except Exception:
+                pass
+        self._flow_scene_ready = True
         self.plotter.render()
 
     def update_flow_arrow(self):

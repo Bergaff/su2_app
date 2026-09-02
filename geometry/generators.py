@@ -272,79 +272,51 @@ def generate_wing_mesh(span, chord_root, chord_tip, sweep_deg, twist_deg,
         x_tip = half_span * math.tan(sweep_in)
     stations.append((1.0, chord_tip, x_tip, twist_deg))
 
-    loops = []
+    # Консоли строятся адаптивным лофтом. Прежний код соединял соседние
+    # станции одним поясом четырёхугольников: при размахе 9.02 м панель
+    # консоли была 4.59 м при хордовом шаге около 0.02 м, а измеренное
+    # максимальное ребро готового крыла — 4.5913 м.
+    #
+    # Заодно убран дефект, из-за которого крыло вообще не было объёмом.
+    # Корневая станция (eta=0) давала левый и правый контур в одной точке
+    # y=0, то есть два геометрически совпадающих, но топологически разных
+    # контура, и каждый закрывался своей крышкой. Измерено на старом коде:
+    # 79 дублей граней, 632 ребра с тремя и более соседями,
+    # is_watertight=False, is_volume=False. Теперь корневой контур один,
+    # он общий для обеих консолей, и крышка в корне не нужна вовсе.
+    sec_pts = []
     for eta, chord, x_le, tw in stations:
         rx, rz = generate_naca4_section(chord, naca_code, twist=tw)
-        n = len(rx)
-        # две консоли: влево и вправо от оси симметрии
-        y_left = -eta * half_span
-        y_right = +eta * half_span
-        loops.append((n, x_le, y_left, y_right))
+        yL = -eta * half_span + pos_y * 0
+        yR = +eta * half_span
+        left = [[x_le + rx[i] + pos_x, yL, pos_z + rz[i]] for i in range(len(rx))]
+        right = [[x_le + rx[i] + pos_x, yR, pos_z + rz[i]] for i in range(len(rx))]
+        sec_pts.append((left, right))
 
-    points = []
-    all_faces = []
-    # строим лофт по секциям: каждая секция — левая и правая точки
-    # структура: [sec0_L, sec0_R, sec1_L, sec1_R, ...]
-    sec_meshes_pts = []
-    for n, x_le, yL, yR in loops:
-        chord = loops[len(sec_meshes_pts)][3] if False else None
-    # проще: пересобираем заново с известными хордами
-    sec_pts = []
-    for (eta, chord, x_le, tw), (n, _xl, yL, yR) in zip(stations, loops):
-        rx, rz = generate_naca4_section(chord, naca_code, twist=tw)
-        left = [[x_le + rx[i], yL + pos_y * 0, pos_z + rz[i]] for i in range(n)]
-        right = [[x_le + rx[i], yR, pos_z + rz[i]] for i in range(n)]
-        for p in left:
-            p[0] += pos_x
-            p[1] += 0.0
-        for p in right:
-            p[0] += pos_x
-        sec_pts.append((left, right, n))
+    # В корне левый и правый контуры совпадают — берём один.
+    root = sec_pts[0][0]
+    left_rings = [sp[0] for sp in sec_pts[1:]][::-1] + [root]
+    right_rings = [root] + [sp[1] for sp in sec_pts[1:]]
 
-    points = []
-    for left, right, n in sec_pts:
-        points.extend(left)
-        points.extend(right)
+    pts_l, faces_l = _loft_rings(left_rings)
+    pts_r, faces_r = _loft_rings(right_rings)
 
-    nsec = len(sec_pts)
-    n = sec_pts[0][2]
-    # локальные индексы: секция k -> начало 2*k*n
-    def LI(k, side):  # side 0=left,1=right
-        return 2 * k * n + side * n
+    off = len(pts_l)
+    points = list(pts_l) + list(pts_r)
+    all_faces = list(faces_l) + [[f[0]] + [i + off for i in f[1:]] for f in faces_r]
 
-    for k in range(nsec - 1):
-        # левая консоль: от секции k к k+1 (движение к корню, т.е. отрицательному y)
-        for i in range(n - 1):
-            all_faces.append([4, LI(k + 1, 0) + i, LI(k + 1, 0) + i + 1,
-                              LI(k, 0) + i + 1, LI(k, 0) + i])
-        all_faces.append([4, LI(k + 1, 0) + n - 1, LI(k + 1, 0),
-                          LI(k, 0), LI(k, 0) + n - 1])
-        # правая консоль
-        for i in range(n - 1):
-            all_faces.append([4, LI(k, 1) + i, LI(k, 1) + i + 1,
-                              LI(k + 1, 1) + i + 1, LI(k + 1, 1) + i])
-        all_faces.append([4, LI(k, 1) + n - 1, LI(k, 1),
-                          LI(k + 1, 1), LI(k + 1, 1) + n - 1])
-
-    # крышки на концах (левый конец первой секции, правый конец последней)
-    def LI(k, side):
-        return 2 * k * n + side * n
-
+    n = len(root)
+    # Крышки только на концах: левый конец левой консоли и правый конец
+    # правой. Корень закрыт самим стыком консолей. Начало последнего
+    # контура фиксируем ДО первого append — иначе len(points) сдвигается
+    # на центроид и правая крышка уходит на чужой контур.
+    last_start = len(points) - n
     c1 = len(points)
-    points.append(_centroid(points, LI(0, 0), n))
-    all_faces.extend(_cap_faces(LI(0, 0), n, c1))
+    points.append(_centroid(points, 0, n))
+    all_faces.extend(_cap_faces(0, n, c1))
     c2 = len(points)
-    points.append(_centroid(points, LI(nsec - 1, 1), n))
-    all_faces.extend(_cap_faces(LI(nsec - 1, 1), n, c2))
-
-    # стык секций в центре (корневая нервюра): крышка между секцией 0 L и R
-    # нужна, только если крыло разомкнуто в центре — у нас две консоли, закрываем
-    c3 = len(points)
-    points.append(_centroid(points, LI(0, 1), n))
-    all_faces.extend(_cap_faces(LI(0, 1), n, c3))
-    c4 = len(points)
-    points.append(_centroid(points, LI(nsec - 1, 0), n))
-    all_faces.extend(_cap_faces(LI(nsec - 1, 0), n, c4))
+    points.append(_centroid(points, last_start, n))
+    all_faces.extend(_cap_faces(last_start, n, c2))
 
     flat = [v for f in all_faces for v in f]
     mesh = pv.PolyData(np.array(points), np.array(flat)).triangulate().clean(tolerance=1e-6)

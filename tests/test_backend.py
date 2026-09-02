@@ -1843,6 +1843,109 @@ check("при срабатывании ограничения печатаетс
 check("запрошенный шаг сохраняется для отчёта",
       "_h_requested = h_near" in _gm3)
 
+# ------------------------------------------- карта поля не сбрасывает вид
+print("== карта поля: вид сохраняется при переключении величины ==")
+
+
+class _FakeCam:
+    def __init__(self, tag):
+        self.tag = tag
+
+    def copy(self):
+        return _FakeCam(self.tag)
+
+
+class _FakePlotter:
+    """Имитирует сцену, которая при clear() теряет установленный вид."""
+
+    def __init__(self):
+        self.camera = _FakeCam("первоначальный")
+        self.n_clear = 0
+        self.on_render = []
+
+    def clear(self):
+        self.n_clear += 1
+        self.camera = _FakeCam("сброшенный")
+
+    def add_axes(self):
+        pass
+
+    def add_mesh(self, *a, **k):
+        pass
+
+    def remove_actor(self, a):
+        pass
+
+    def render(self):
+        self.on_render.append(self.camera.tag)
+
+
+class _FakeScalar:
+    def currentText(self):
+        return ""
+
+
+class _FakeChk:
+    def isChecked(self):
+        return False
+
+
+class _FakeLog:
+    def append(self, t):
+        pass
+
+
+class _FakeSurf:
+    array_names = []
+    n_points = 0
+    n_cells = 0
+    point_data = {}
+    cell_data = {}
+
+    def copy(self):
+        return self
+
+
+def _mk_window():
+    w = MW.MainWindow.__new__(MW.MainWindow)
+    w.current_surface_mesh = _FakeSurf()
+    w.current_volume_mesh = None
+    w.latest_case_dir = None
+    w.bodies = []
+    w.plotter = _FakePlotter()
+    w.chk_show_volume = _FakeChk()
+    w.combo_scalar = _FakeScalar()
+    w.flow_arrow_actor = None
+    w.log_text = _FakeLog()
+    w._flow_scene_ready = False
+    return w
+
+
+_w6 = _mk_window()
+_w6.render_flow_scene()
+check("первая отрисовка не восстанавливает чужую камеру",
+      _w6.plotter.on_render[-1] == "сброшенный",
+      _w6.plotter.on_render[-1])
+check("после первой отрисовки сцена помечена готовой",
+      _w6._flow_scene_ready is True)
+
+# Пользователь покрутил модель — вид стал его собственным.
+_w6.plotter.camera = _FakeCam("пользовательский")
+_w6.render_flow_scene()
+check("переключение карты поля сохраняет вид пользователя",
+      _w6.plotter.on_render[-1] == "пользовательский",
+      _w6.plotter.on_render[-1])
+check("сцена при этом перерисована целиком",
+      _w6.plotter.n_clear == 2, _w6.plotter.n_clear)
+
+# Новый результат — вид надо подобрать заново, а не тащить старый.
+_w7 = _mk_window()
+_w7._flow_scene_ready = False
+_w7.render_flow_scene()
+check("новый результат не наследует прежний вид",
+      _w7.plotter.on_render[-1] == "сброшенный",
+      _w7.plotter.on_render[-1])
+
 # ---------------------------------------------------------------- summary
 print()
 if FAIL:
