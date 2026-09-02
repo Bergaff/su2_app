@@ -197,15 +197,17 @@ def box_surface(bounds, h_box):
         return n
 
     faces = []
-    # (фиксированная ось, её индекс, два свободных индекса и их пределы)
-    faces_spec = [
-        (0, 0, (ny, nz)), (0, nx, (ny, nz)),
-        (1, 0, (nz, nx)), (1, ny, (nz, nx)),
-        (2, 0, (nx, ny)), (2, nz, (nx, ny)),
-    ]
-    for fa, fidx, (nu, nv) in faces_spec:
+    # Число делений по каждой оси. Пары «свободная ось — её число делений»
+    # строятся явно: раньше порядок брался из списка [a for a in (0,1,2)
+    # if a != fa], и для граней y=const первой свободной оказывалась ось X,
+    # а число делений ей доставалось от Z. На кубическом коробе это
+    # незаметно, на некубическом — IndexError.
+    counts = {0: nx, 1: ny, 2: nz}
+    faces_spec = [(0, 0), (0, nx), (1, 0), (1, ny), (2, 0), (2, nz)]
+    for fa, fidx in faces_spec:
         free = [a for a in (0, 1, 2) if a != fa]
         ua, va = free[0], free[1]
+        nu, nv = counts[ua], counts[va]
         for i in range(nu):
             for j in range(nv):
                 corners = []

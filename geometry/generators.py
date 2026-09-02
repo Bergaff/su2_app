@@ -416,7 +416,15 @@ def generate_slats_mesh(span, chord_root, chord_tip, slat_deflection,
 
 
 def generate_fuselage_mesh(param_group: dict, n_len=80, n_circ=48) -> pv.PolyData:
-    """Запасной (быстрый) фюзеляж по n1/n2/n3, если UI не переопределяет."""
+    """Запасной (быстрый) фюзеляж по n1/n2/n3, если UI не переопределяет.
+
+    Торцы закрыты конусами из треугольников. Без заглушек оболочка не
+    замкнута: у неё есть край, и булево объединение с другими телами
+    становится невозможным (trimesh честно возвращает незамкнутую
+    поверхность, а union от неё отказывается). Основной фюзеляж
+    приложения в ui/main_window.py заглушки имеет — эта функция должна
+    вести себя так же, иначе запасной путь даёт необъединяемую модель.
+    """
     L = float(param_group.get("n1", 5.0))
     R = float(param_group.get("n2", 0.6))
     nose_frac = float(param_group.get("n3", 0.35))
@@ -427,21 +435,46 @@ def generate_fuselage_mesh(param_group: dict, n_len=80, n_circ=48) -> pv.PolyDat
     tail = xs > 0.75
     de = (xs[tail] - 0.75) / 0.25
     r[tail] = (1.0 - (de ** 0.8) / (de ** 0.8 + (1 - de) ** 2))
-    theta = np.linspace(0.0, 2 * np.pi, n_circ)
-    X = np.repeat(xs * L, n_circ)
-    T = np.tile(theta, n_len)
-    Y = np.repeat(r * R, n_circ) * np.cos(T)
-    Z = np.repeat(r * R, n_circ) * np.sin(T)
-    pts = np.column_stack([X, Y, Z])
-    faces = []
-    for i in range(n_len - 1):
+    theta = np.linspace(0.0, 2 * np.pi, n_circ, endpoint=False)
+
+    points = []
+    rings = []
+    for i, (x_n, ri) in enumerate(zip(xs, r)):
+        # Кольца нулевого радиуса (сам нос и самый срез хвоста) не нужны:
+        # они стягиваются в одну точку, и clean() схлопывает их, оставляя
+        # вырожденные грани. Вместо них ниже ставятся вершины-конусы.
+        if ri < 1e-9:
+            continue
+        ring = []
         for j in range(n_circ):
-            a = i * n_circ + j
-            b = i * n_circ + (j + 1) % n_circ
-            c = (i + 1) * n_circ + (j + 1) % n_circ
-            d = (i + 1) * n_circ + j
-            faces += [4, a, b, c, d]
-    return pv.PolyData(pts, np.array(faces)).clean()
+            ring.append(len(points))
+            points.append([x_n * L, ri * R * np.cos(theta[j]),
+                           ri * R * np.sin(theta[j])])
+        rings.append(ring)
+    if len(rings) < 2:
+        return pv.PolyData(np.zeros((1, 3)), np.array([], dtype=np.int64))
+
+    faces = []
+    nose_tip = len(points)
+    points.append([float(xs[0]) * L, 0.0, 0.0])
+    tail_tip = len(points)
+    points.append([float(xs[-1]) * L, 0.0, 0.0])
+
+    first = rings[0]
+    for j in range(n_circ):
+        faces.append([3, nose_tip, first[(j + 1) % n_circ], first[j]])
+    for k in range(len(rings) - 1):
+        r1, r2 = rings[k], rings[k + 1]
+        for j in range(n_circ):
+            faces.append([4, r1[j], r1[(j + 1) % n_circ],
+                          r2[(j + 1) % n_circ], r2[j]])
+    last = rings[-1]
+    for j in range(n_circ):
+        faces.append([3, last[j], last[(j + 1) % n_circ], tail_tip])
+
+    flat = np.array([v for f in faces for v in f], dtype=np.int64)
+    return pv.PolyData(np.array(points), flat).triangulate().clean(
+        tolerance=1e-9)
 
 
 def generate_tail_surface(airfoil_manager, airfoil_name, span, chord_root,

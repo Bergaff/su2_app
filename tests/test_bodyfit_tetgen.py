@@ -180,6 +180,33 @@ else:
     check("знаковый объём короба совпадает с габаритами (%.4f против %.4f)"
           % (v_box_surf, v_exp), abs(v_box_surf - v_exp) < 1e-6 * v_exp)
 
+    # НЕКУБИЧЕСКИЙ короб обязателен: у расчётной области самолёта ось X
+    # длиннее Y и Z, и на ней число делений другое. На кубе ошибка
+    # спаривания осей не видна — именно так она и прошла в первый раз,
+    # а на реальном самолёте падала с IndexError и уводила генератор на
+    # картезианский запасной путь.
+    print("Некубический короб (реальная расчётная область)")
+    nb = (-4.2, 5.8, -5.0, 5.0, -5.0, 5.0)
+    nbp, nbf = bt.box_surface(nb, 0.9)
+    ntri = nbp[nbf]
+    nnrm = np.cross(ntri[:, 1] - ntri[:, 0], ntri[:, 2] - ntri[:, 0])
+    ncen = ntri.mean(axis=1)
+    nctr = np.array([(nb[0] + nb[1]) / 2.0, (nb[2] + nb[3]) / 2.0,
+                     (nb[4] + nb[5]) / 2.0])
+    check("все нормали наружу (внутрь %d)"
+          % int((np.einsum("ij,ij->i", nnrm, ncen - nctr) < 0).sum()),
+          int((np.einsum("ij,ij->i", nnrm, ncen - nctr) < 0).sum()) == 0)
+    ne = np.sort(np.vstack([nbf[:, [0, 1]], nbf[:, [1, 2]],
+                            nbf[:, [0, 2]]]), axis=1)
+    neu, nec = np.unique(ne, axis=0, return_counts=True)
+    check("некубический короб замкнут (рёбер %d, нарушителей %d)"
+          % (len(neu), int((nec != 2).sum())), int((nec != 2).sum()) == 0)
+    nv_exp = (nb[1] - nb[0]) * (nb[3] - nb[2]) * (nb[5] - nb[4])
+    nv_surf = float(np.einsum(
+        "ij,ij->i", ntri[:, 0], np.cross(ntri[:, 1], ntri[:, 2])).sum() / 6.0)
+    check("объём некубического короба верный (%.4f против %.4f)"
+          % (nv_surf, nv_exp), abs(nv_surf - nv_exp) < 1e-6 * nv_exp)
+
     # ------------------------------------------------------- сквозной прогон
     print("Сквозной прогон generate_mesh_impl")
     gg = _load("gmsh_generator_standalone", os.path.join("mesh", "gmsh_generator.py"))

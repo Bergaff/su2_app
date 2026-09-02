@@ -229,6 +229,8 @@ _HISTORY_LINE = re.compile(r"^\s*(\d+)\s*\|\s*([-\deE.+]+)")
 STALL_PATIENCE = 1000   # итераций без нового минимума невязки
 STALL_RISE = 0.15       # насколько log10(res) выше минимума — уже застой
 STALL_START = 50        # не судить раньше: совпадает с CONV_STARTITER
+STALL_FLAT_MARGIN = 1.0  # порядков до цели сходимости — дальше ждать нечего
+DEFAULT_CONV_MINVAL = -7.0  # как в CONV_RESIDUAL_MINVAL у config_builder
 
 
 def stall_patience_for(max_iter):
@@ -250,7 +252,9 @@ def stall_patience_for(max_iter):
 
 
 def stall_verdict(it, rms, best_rms, best_iter,
-                  patience=STALL_PATIENCE, rise=STALL_RISE, start=STALL_START):
+                  patience=STALL_PATIENCE, rise=STALL_RISE, start=STALL_START,
+                  conv_minval=DEFAULT_CONV_MINVAL,
+                  flat_margin=STALL_FLAT_MARGIN):
     """Решение детектора застоя по одной строке лога SU2.
 
     Возвращает ``(best_rms, best_iter, причина)``: причина — строка, если
@@ -266,18 +270,34 @@ def stall_verdict(it, rms, best_rms, best_iter,
     log10(res) 0.410 -> 0.615 -> 0.715 -> 0.760 за 4500 итераций,
     35 минут 26 секунд, и сессия отчиталась «1 успешных».
 
+    Отдельно разбирается второй случай — невязка не растёт, а просто
+    стоит на месте. На том же крыле после починки справочных данных
+    log10(res) встал на -1.889 на итерации 1500 и не сдвинулся до 4500.
+    Условие «выше минимума на rise» здесь не срабатывает: текущее
+    значение равно лучшему. Но и сходимостью это не является — SU2 сам
+    остановился бы, дойдя до CONV_RESIDUAL_MINVAL. Поэтому плоская
+    невязка тоже считается застоем, если до цели сходимости ещё больше
+    ``flat_margin`` порядков.
+
     NaN сюда не попадает — его считает отдельный счётчик в цикле.
     """
     if rms != rms:
         return best_rms, best_iter, None
     if best_rms is None or rms < best_rms:
         return rms, it, None
-    if (it >= start and it - best_iter >= patience
-            and rms > best_rms + rise):
-        return best_rms, best_iter, (
-            "Расчёт не сходится: невязка не улучшалась %d итераций. "
-            "Лучшее значение log10(res)=%.3f на итерации %d, сейчас %.3f."
-            % (it - best_iter, best_rms, best_iter, rms))
+    if it >= start and it - best_iter >= patience:
+        if rms > best_rms + rise:
+            return best_rms, best_iter, (
+                "Расчёт не сходится: невязка не улучшалась %d итераций. "
+                "Лучшее значение log10(res)=%.3f на итерации %d, "
+                "сейчас %.3f."
+                % (it - best_iter, best_rms, best_iter, rms))
+        if best_rms > conv_minval + flat_margin:
+            return best_rms, best_iter, (
+                "Расчёт встал: невязка не улучшалась %d итераций и "
+                "осталась на log10(res)=%.3f при цели сходимости %.1f. "
+                "До неё больше порядка — дальше считать бессмысленно."
+                % (it - best_iter, best_rms, conv_minval))
     return best_rms, best_iter, None
 
 
@@ -542,15 +562,26 @@ class SU2Worker:
             return self._result(aoa, False, f"Не удалось запустить SU2: {e}")
 
         max_iter = 300
+        conv_minval = DEFAULT_CONV_MINVAL
         try:
             with open(cfg_path, "r", encoding="utf-8", errors="ignore") as f:
+                _cfg_text = f.read()
                 m = re.search(
                     r"^\s*(?:INNER_ITER|ITER)\s*=\s*(\d+)",
-                    f.read(),
+                    _cfg_text,
                     re.M,
                 )
                 if m:
                     max_iter = int(m.group(1)) or 300
+                # Цель сходимости нужна детектору застоя: плоская невязка
+                # вдали от неё — это застой, а рядом с ней — сходимость.
+                mc = re.search(
+                    r"^\s*CONV_RESIDUAL_MINVAL\s*=\s*(-?[\d.]+)",
+                    _cfg_text,
+                    re.M,
+                )
+                if mc:
+                    conv_minval = float(mc.group(1))
         except Exception:
             pass
 
@@ -603,7 +634,8 @@ class SU2Worker:
                 last_rms = rms
                 best_rms, best_iter, stall_why = stall_verdict(
                     it, rms, best_rms, best_iter,
-                    patience=stall_patience_for(max_iter))
+                    patience=stall_patience_for(max_iter),
+                    conv_minval=conv_minval)
                 if stall_why:
                     proc.terminate()
                     return self._result(

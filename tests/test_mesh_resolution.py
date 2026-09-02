@@ -67,8 +67,25 @@ def main():
 
     buf = io.StringIO()
     with redirect_stdout(buf):
-        ok, msg = _gm.generate_mesh_impl([fus, tail], quality_text="Средняя",
-                                         progress_cb=lambda p, t: None)
+        # Этот тест проверяет предупреждение картезианского фона о том,
+        # что тонкое тело не разрешается его шагом. Телооблекающая сетка
+        # (TetGen) поверхность облегает и предупреждение не печатает —
+        # поэтому путь TetGen здесь отключён, иначе проверялся бы не тот
+        # код. Поведение TetGen покрыто в tests/test_bodyfit_tetgen.py.
+        import types as _types
+        _stub = _types.ModuleType("mesh.bodyfit_tetgen")
+        _stub.build_body_fitted_grid = lambda *a, **k: None
+        _saved = sys.modules.get("mesh.bodyfit_tetgen")
+        sys.modules["mesh.bodyfit_tetgen"] = _stub
+        try:
+            ok, msg = _gm.generate_mesh_impl(
+                [fus, tail], quality_text="Средняя",
+                progress_cb=lambda p, t: None)
+        finally:
+            if _saved is None:
+                sys.modules.pop("mesh.bodyfit_tetgen", None)
+            else:
+                sys.modules["mesh.bodyfit_tetgen"] = _saved
     log = buf.getvalue()
 
     print("== отчёт о разрешающей способности ==")

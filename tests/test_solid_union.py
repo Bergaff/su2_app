@@ -201,6 +201,20 @@ if st4["mesh"] is not None:
     check("вырезано именно пересечение с фюзеляжем (%.4f)" % st4["overlap"],
           0.05 < st4["overlap"] < 1.0)
 
+print("Запасной фюзеляж замкнут и объединяется")
+# geometry/generators.py:generate_fuselage_mesh помечен как запасной путь.
+# Раньше у него не было заглушек на торцах, оболочка получалась открытой,
+# и объединение с остальными телами становилось невозможным.
+fus = gen.generate_fuselage_mesh({"n1": 8.0, "n2": 0.6, "n3": 0.35})
+check("generate_fuselage_mesh замкнут", watertight(fus))
+check("объём запасного фюзеляжа разумен (%.4f)" % volume(fus),
+      3.0 < volume(fus) < 9.5)
+st5 = su.union_stats([fus, real["крыло"]], log=lambda *_: None)
+check("запасной фюзеляж объединяется с крылом", st5["mesh"] is not None)
+if st5["mesh"] is not None:
+    check("объединение с запасным фюзеляжем замкнуто",
+          watertight(st5["mesh"]))
+
 print("Кнопка «Объединить пересекающиеся тела»")
 
 
