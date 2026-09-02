@@ -404,8 +404,17 @@ def main():
     check("замечание не прерывает повтор прогона",
           "break" not in _tail.split("verdict = self._recover(")[0],
           _tail[:160])
-    check("замечание показывается один раз за сессию",
-          "_mesh_note_shown" in _tail)
+    # Прежняя проверка искала "_mesh_note_shown" в тексте workers.py и
+    # потому пропустила настоящий баг: атрибут был объявлен в SU2Worker, а
+    # читался в SessionRunner.run, и первый же повтор падал с
+    # AttributeError. Проверка обязана создавать объект.
+    _runner = _wk.SessionRunner(object())
+    check("SessionRunner создаётся и флаг замечания на месте",
+          hasattr(_runner, "_mesh_note_shown")
+          and _runner._mesh_note_shown is False)
+    check("флаг принадлежит SessionRunner, а не SU2Worker",
+          "_mesh_note_shown" not in getattr(_wk.SU2Worker.__init__,
+                                            "__code__", None).co_names)
 
     print()
     print("Пройдено: %d" % _passed)

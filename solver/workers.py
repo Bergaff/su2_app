@@ -430,7 +430,6 @@ class SU2Worker:
         # Счётчик попыток для авто-фоллбэка: 0 = ещё не пробовали,
         # 1 = mpiexec -gpu не сработал, 2 = OpenMP offload не сработал.
         self._gpu_attempts = 0
-        self._mesh_note_shown = False
         # =================================================================
 
     def stop(self):
@@ -775,6 +774,13 @@ class SessionRunner(QThread):
         self._recovery_mutex = QMutex()
         self._recovery_cond = QWaitCondition()
         self._recovery_answer = None
+        # Замечание о качестве сетки показывается один раз за сессию.
+        # Атрибут обязан жить именно здесь: читает его SessionRunner.run,
+        # а не SU2Worker. Когда он по ошибке был объявлен в SU2Worker,
+        # первый же повтор прогона падал с
+        # AttributeError: 'SessionRunner' object has no attribute
+        # '_mesh_note_shown' — уже после успешно посчитанной сетки.
+        self._mesh_note_shown = False
         # Слот-приёмник живёт в главном потоке (объект QThread создан там),
         # поэтому модальный диалог внутри него безопасен.
         self.recovery_signal.connect(self._handle_recovery_in_gui)

@@ -506,6 +506,16 @@ class MainWindow(QMainWindow):
         self._mesh_start_time = None
         self._opt_running = False
         self._eta_ema = None
+        # Объявлены здесь, а не в местах первого использования: атрибут,
+        # впервые присваиваемый внутри другого метода, существует только
+        # после его вызова. Именно так SessionRunner упал с
+        # AttributeError: '_mesh_note_shown' — атрибут был объявлен в
+        # чужом классе. Сейчас все четыре читаются только после
+        # присваивания, но гарантируется это случайно, а не кодом.
+        self._install_worker = None
+        self._mem_install_worker = None
+        self._last_logged_pct = -1
+        self._sym_clip_planes = []
         # Значение ядер, реально применяемое в расчёте.
         # Источник истины — физические ядра, не os.cpu_count() (тот
         # возвращает логические и завышает для HT-машин).
