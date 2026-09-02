@@ -634,7 +634,8 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
             report(14, "Телооблекающая сетка (TetGen)")
             try:
                 _bf = build_body_fitted_grid(
-                    body_meshes, body_min, body_max, margin, log=say)
+                    body_meshes, body_min, body_max, margin, log=say,
+                    target_edge=h_near)
             except Exception as _e:
                 say(f"Внимание: телооблекающая сетка не построена "
                     f"({type(_e).__name__}: {_e}) — строится картезианская "

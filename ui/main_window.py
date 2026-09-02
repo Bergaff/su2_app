@@ -76,7 +76,7 @@ from physics.airfoils import generate_naca4_section
 from geometry.stl_healer import heal_stl_mesh, HealReportDialog
 from geometry.generators import (
     create_primitive, generate_wing_mesh, generate_flaps_mesh,
-    generate_slats_mesh, cad_to_stl, CAD_EXTENSIONS,
+    generate_slats_mesh, cad_to_stl, cad_detect_units, CAD_EXTENSIONS,
 )
 from mesh.gmsh_generator import generate_mesh_impl
 from mesh.mesh_worker import MeshWorker, MeshAdaptWorker
@@ -87,6 +87,16 @@ from solver.workers import (
 from solver.session import CalculationSession
 # === T6: лицензирование (опционально — не падает, если модуль недоступен)
 _LICENSE_ERROR = ""
+
+# Варианты масштаба при импорте CAD. Вынесены на уровень модуля: линт
+# требует, чтобы каждый self.<attr> где-то присваивался, а это константа,
+# а не состояние окна.
+_CAD_SCALE_CHOICES = [
+    ("Миллиметры → метры (×0.001)", 0.001),
+    ("Сантиметры → метры (×0.01)", 0.01),
+    ("Метры — оставить координаты как есть (×1)", 1.0),
+    ("Дюймы → метры (×0.0254)", 0.0254),
+]
 try:
     from license_client.license_checker import LicenseChecker, LicenseStatus
     _LICENSE_AVAILABLE = True
@@ -3344,6 +3354,47 @@ class MainWindow(QMainWindow):
         # КАМЕРУ НЕ СБРАСЫВАЕМ
         self.update_flow_arrow()
 
+    def _cad_ask_scale(self, path):
+        """Масштаб CAD → модель. Возвращает множитель или None (отмена).
+
+        Координаты STEP читаются как есть, а расчёт идёт в метрах. Файл
+        FreeCAD по умолчанию объявляет миллиметры, и деталь 65 мм
+        приезжает как «крыло размахом 65.077 м». Поэтому единицы
+        показываются явно, а масштаб выбирает пользователь.
+        """
+        detected = None
+        try:
+            detected = cad_detect_units(path)
+        except Exception:
+            detected = None
+
+        labels = [c[0] for c in _CAD_SCALE_CHOICES]
+        current = 0
+        if detected:
+            name, factor = detected
+            for i, (_lbl, f) in enumerate(_CAD_SCALE_CHOICES):
+                if abs(f - factor) < 1e-15:
+                    current = i
+                    break
+            prompt = (
+                "В файле объявлены единицы: %s.\n"
+                "Координаты читаются как есть, расчёт идёт в метрах.\n\n"
+                "В каких единицах задана модель?" % name)
+        else:
+            prompt = (
+                "Единицы в файле определить не удалось.\n"
+                "Координаты читаются как есть, расчёт идёт в метрах.\n\n"
+                "В каких единицах задана модель?")
+
+        choice, ok = QInputDialog.getItem(
+            self, "Единицы CAD-модели", prompt, labels, current, False)
+        if not ok:
+            return None
+        for lbl, f in _CAD_SCALE_CHOICES:
+            if lbl == choice:
+                return f
+        return 1.0
+
     def _add_body(self, path, role):
         ext = os.path.splitext(path)[1].lower()
         source_path = path
@@ -3358,10 +3409,15 @@ class MainWindow(QMainWindow):
                 return
             stl_name = f"_cad_{self.next_body_id}_{os.path.splitext(os.path.basename(path))[0]}.stl"
             stl_path = os.path.join(WORK_DIR_BASE, stl_name)
+            scale = self._cad_ask_scale(path)
+            if scale is None:
+                self.log_text.append("  Импорт отменён пользователем.")
+                return
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
                 cad_to_stl(path, stl_path,
-                           log=lambda m: self.log_text.append(m))
+                           log=lambda m: self.log_text.append(m),
+                           scale=scale)
                 self.log_text.append(f"  Готово: CAD → STL: {stl_path}")
                 path = stl_path
             except Exception as e:

@@ -84,6 +84,53 @@ def tetgen_available():
     return bool(HAS_TETGEN and HAS_TRIMESH and HAS_SCIPY and HAS_PYVISTA)
 
 
+def _load_surface_refine():
+    """Загрузить mesh/surface_refine.py по пути файла (без mesh/__init__)."""
+    try:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "surface_refine.py")
+        spec = importlib.util.spec_from_file_location(
+            "surface_refine_standalone", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+def surface_needs_refinement(points, faces, target_edge):
+    """Грубее ли поверхность целевого шага.
+
+    Сравнивается средняя площадь треугольника с площадью равностороннего
+    треугольника с ребром ``target_edge`` (0.433 * h^2). Запас взят
+    двукратный: уплотнять уже достаточно мелкую поверхность незачем, а
+    на самолёте из пяти компонентов это стоило бы миллионов граней.
+
+    Точность формы здесь ни при чём — поверхность и так точная. Речь о
+    плотности: TetGen сохраняет входные грани как есть, поэтому размер
+    ячеек у тела повторяет размер треугольников поверхности. Замерено на
+    пластине plane_wing.step (65.077 x 19 x 1.5 с четырьмя пазами 0.3):
+    412 граней дают 5301 тетраэдр, те же грани, уплотнённые до шага у
+    тела (0.9762 м) — 17094 грани и 52315 тетраэдров, сохранение 100%
+    в обоих случаях, 2.0 с.
+    """
+    try:
+        pts = np.asarray(points, dtype=float)
+        fac = np.asarray(faces, dtype=np.int64)
+        if len(fac) == 0 or target_edge is None or target_edge <= 0:
+            return False
+        p0 = pts[fac[:, 0]]; p1 = pts[fac[:, 1]]; p2 = pts[fac[:, 2]]
+        area = 0.5 * float(np.linalg.norm(np.cross(p1 - p0, p2 - p0),
+                                          axis=1).sum())
+        if area <= 0:
+            return False
+        mean_area = area / len(fac)
+        return mean_area > 2.0 * 0.433 * float(target_edge) ** 2
+    except Exception:
+        return False
+
+
 def _load_solid_union():
     """Загрузить geometry/solid_union.py по пути файла.
 
@@ -330,7 +377,8 @@ def remove_interior_tets(points, tets, body_pts, body_faces, log=print):
 
 def build_body_fitted_grid(body_meshes, body_min, body_max, margin,
                            min_ratio=2.0, max_volume=None,
-                           min_recovery=DEFAULT_MIN_RECOVERY, log=print):
+                           min_recovery=DEFAULT_MIN_RECOVERY, log=print,
+                           target_edge=None, max_surface_faces=400_000):
     """Построить телообтекающую сетку.
 
     Возвращает dict:
@@ -349,6 +397,30 @@ def build_body_fitted_grid(body_meshes, body_min, body_max, margin,
     if body_pts is None:
         return None
     log("   Готово: объединённая поверхность: %d граней" % len(body_faces))
+
+    # Плотность поверхности задаёт размер ячеек у тела: TetGen сохраняет
+    # входные грани как есть и не добавляет точки на крупные плоскости.
+    # Ограничение на объём ячейки (-a) тут не годится — оно действует на
+    # всю область, а дальнее поле в 3-4 габарита модели при шаге у тела
+    # дало бы сотни миллионов тетраэдров. Поэтому уплотняется только
+    # поверхность и только если она действительно грубее цели.
+    if target_edge and surface_needs_refinement(body_pts, body_faces,
+                                                target_edge):
+        _sr = _load_surface_refine()
+        if _sr is not None:
+            try:
+                v2, f2, info = _sr.refine_to_edge_length(
+                    body_pts, body_faces, target_edge,
+                    max_faces=max_surface_faces)
+                log("   Поверхность уплотнена до шага %.4f м: %d -> %d граней"
+                    % (target_edge, len(body_faces), len(f2)))
+                if info.get("capped"):
+                    log("   Внимание: достигнут предел %d граней, шаг %.4f м "
+                        "не выдержан" % (max_surface_faces, target_edge))
+                body_pts, body_faces = v2, f2
+            except Exception as e:
+                log("   Внимание: уплотнить поверхность не удалось (%s), "
+                    "сетка строится по исходной триангуляции" % e)
 
     bounds = farfield_bounds(body_min, body_max, margin)
     points, tets = tetrahedralize_plc(body_pts, body_faces, bounds,

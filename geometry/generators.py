@@ -4,6 +4,7 @@ import math
 import os
 
 import numpy as np
+import re
 import pyvista as pv
 
 from physics.airfoils import generate_naca4_section
@@ -578,7 +579,63 @@ def generate_wing(params: WingParameters, airfoil_manager=None) -> pv.PolyData:
 CAD_EXTENSIONS = (".step", ".stp", ".iges", ".igs", ".x_t", ".x_b", ".sat",
                   ".brep", ".bdf", ".nas", ".ply", ".obj", ".off")
 
-def cad_to_stl(src_path: str, out_path: str, log=None) -> str:
+_SI_PREFIX_TO_M = {
+    "MICRO": 1e-6, "MILLI": 1e-3, "CENTI": 1e-2, "DECI": 1e-1,
+    "": 1.0, "$": 1.0, "NONE": 1.0,
+    "DEKA": 1e1, "HECTO": 1e2, "KILO": 1e3,
+}
+
+_SI_UNIT_RE = re.compile(
+    r"SI_UNIT\s*\(\s*\.(?P<prefix>[A-Z$]*)\.\s*,\s*\.METRE\.\s*\)",
+    re.IGNORECASE)
+_CONV_UNIT_RE = re.compile(
+    r"CONVERSION_BASED_UNIT\s*\(\s*'(?P<name>[^']+)'",
+    re.IGNORECASE)
+_NAMED_TO_M = {"INCH": 0.0254, "FOOT": 0.3048, "FEET": 0.3048,
+               "THOU": 0.0000254, "MIL": 0.0000254}
+
+
+def cad_detect_units(path: str):
+    """Единицы длины, объявленные в CAD-файле.
+
+    Возвращает ``(название, множитель в метры)`` или ``None``, если
+    объявление найти не удалось (IGES и бинарные форматы единиц не
+    печатают).
+
+    Нужно потому, что координаты STEP читаются как есть и дальше
+    называются метрами. Файл FreeCAD по умолчанию объявляет
+    ``SI_UNIT(.MILLI.,.METRE.)``: деталь 65 мм превращается в «крыло
+    размахом 65.077 м», и всё downstream — справочные данные, шаг
+    сетки, число Рейнольдса — считается от этого.
+
+    Пример из plane_wing.step:
+        #2118 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            head = f.read(4_000_000)
+    except Exception:
+        return None
+    m = _SI_UNIT_RE.search(head)
+    if m:
+        prefix = (m.group("prefix") or "").upper()
+        factor = _SI_PREFIX_TO_M.get(prefix)
+        if factor is None:
+            return None
+        names = {"MICRO": "мкм", "MILLI": "мм", "CENTI": "см", "DECI": "дм",
+                 "": "м", "$": "м", "NONE": "м", "DEKA": "дам",
+                 "HECTO": "гм", "KILO": "км"}
+        return names.get(prefix, prefix.lower()), factor
+    m = _CONV_UNIT_RE.search(head)
+    if m:
+        name = m.group("name").strip().upper()
+        if name in _NAMED_TO_M:
+            return name.lower(), _NAMED_TO_M[name]
+    return None
+
+
+def cad_to_stl(src_path: str, out_path: str, log=None,
+               scale: float = 1.0) -> str:
     """Конвертирует CAD-модель в STL триангуляцией поверхностей через gmsh.
 
     Параметры:
@@ -603,6 +660,22 @@ def cad_to_stl(src_path: str, out_path: str, log=None) -> str:
         gmsh.option.setNumber("General.Verbosity", 2)
         gmsh.open(src_path)            # OCC читает STEP/IGES/BREP/…
         gmsh.model.occ.synchronize()
+        # Координаты STEP читаются как есть. Если файл объявляет
+        # миллиметры, а расчёт идёт в метрах, модель надо привести к
+        # метрам здесь — иначе габарит в 65 мм приедет в решатель как
+        # 65 м, и ни шаг сетки, ни число Рейнольдса не будут иметь
+        # отношения к реальной детали.
+        try:
+            _k = float(scale)
+        except Exception:
+            _k = 1.0
+        if _k > 0 and abs(_k - 1.0) > 1e-12:
+            _ents = gmsh.model.occ.getEntities()
+            if _ents:
+                gmsh.model.occ.dilate(_ents, 0.0, 0.0, 0.0, _k, _k, _k)
+                gmsh.model.occ.synchronize()
+                if log:
+                    log(f"  Масштаб CAD → модель: {_k:g}")
         gmsh.model.mesh.generate(2)    # триангуляция поверхностей
         gmsh.write(out_path)           # STL
     except Exception as e:
