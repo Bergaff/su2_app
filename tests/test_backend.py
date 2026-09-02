@@ -2000,11 +2000,12 @@ from solver.workers import stall_verdict as _sv
 from solver.workers import stall_patience_for
 
 
-def _run(trace, patience=1000):
+def _run(trace, patience=1000, conv_minval=-7.0):
     best_rms, best_iter, why = None, 0, None
     for it, rms in trace:
         best_rms, best_iter, why = _sv(it, rms, best_rms, best_iter,
-                                       patience=patience)
+                                       patience=patience,
+                                       conv_minval=conv_minval)
         if why:
             return it, why
     return None, None
@@ -2021,6 +2022,37 @@ check("прерывается задолго до 4500 итераций",
       _it is not None and _it < 2500, "итерация %s" % _it)
 check("причина объясняет, что невязка не улучшалась",
       _why is not None and "не улучшалась" in _why, str(_why)[:60])
+
+# Тот же расчёт крыла после починки справочных данных: невязка не растёт,
+# а просто стоит на -1.889 с итерации 1500 до 4500. Условие «выше минимума
+# на STALL_RISE» здесь не срабатывает — текущее значение равно лучшему.
+_flat = [(i, 1.711 if i == 0 else -1.889) for i in range(0, 6001, 50)]
+_it_f, _why_f = _run(_flat, patience=stall_patience_for(6000))
+check("плоская невязка тоже считается застоем", _it_f is not None,
+      "дошло до конца")
+check("плоская невязка прерывается задолго до 6000 итераций",
+      _it_f is not None and _it_f < 2000, "итерация %s" % _it_f)
+check("в причине названа цель сходимости",
+      _why_f is not None and "цели сходимости" in _why_f, str(_why_f)[:70])
+
+# Негативный контроль: расчёт, который дошёл до цели и встал, застоем не
+# является — SU2 сам остановился бы по CONV_RESIDUAL_MINVAL.
+_conv = [(i, -7.5) for i in range(0, 6001, 50)]
+_it_c, _ = _run(_conv, patience=stall_patience_for(6000))
+check("сошедшийся до цели и вставший расчёт не прерывается", _it_c is None,
+      "прерван на %s" % _it_c)
+
+# Негативный контроль: цель сходимости берётся из конфига. При цели -2.0
+# невязка -1.889 уже у цели, и ждать дальше законно.
+_it_n, _ = _run(_flat, patience=stall_patience_for(6000), conv_minval=-2.0)
+check("при цели -2.0 невязка -1.889 застоем не считается", _it_n is None,
+      "прерван на %s" % _it_n)
+
+# Негативный контроль: медленно, но верно сходящийся расчёт не трогается.
+_slow = [(i, 1.5 - 0.0015 * i) for i in range(0, 6001, 50)]
+_it_s, _ = _run(_slow, patience=stall_patience_for(6000))
+check("медленно сходящийся расчёт не прерывается", _it_s is None,
+      "прерван на %s" % _it_s)
 
 # Прогон полного самолёта: -1.494 на старте, 11.06 на 265-й. Там SU2
 # сам обрывает расчёт по своему порогу 10^20, но детектор обязан сработать
