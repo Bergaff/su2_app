@@ -416,6 +416,59 @@ def main():
           "_mesh_note_shown" not in getattr(_wk.SU2Worker.__init__,
                                             "__code__", None).co_names)
 
+    # ---------------------------------------------------------------
+    # Повтор пишется в тот же каталог и перезаписывает history.csv.
+    # Без сравнения в отчёт уходит последний прогон, а не лучший:
+    # на plane_wing.step первый дошёл до -3.33, повтор с пресетом выдал
+    # Cd=0.851 при L/D=0.40 — и в CSV попал именно он.
+    print()
+    print("== в отчёт идёт лучший прогон, а не последний ==")
+    _hist_dir = os.path.join(workdir, "_hist_case")
+    os.makedirs(_hist_dir, exist_ok=True)
+    with open(os.path.join(_hist_dir, "history.csv"), "w",
+              encoding="utf-8") as _fh:
+        _fh.write('"Iteration","rms[Rho]","CL","CD","CMz"\n')
+        _fh.write('"1","0.60900","0.010","0.020","0.001"\n')
+        _fh.write('"2","-3.33000","0.337","0.851","0.054"\n')
+    _h = _wk.parse_history(_hist_dir)
+    check("parse_history возвращает невязку", _h is not None
+          and abs(_h["rms"] - (-3.33)) < 1e-9, str(_h))
+    check("parse_history возвращает коэффициенты",
+          abs(_h["cl"] - 0.337) < 1e-9 and abs(_h["cd"] - 0.851) < 1e-9)
+
+    _prev = {"aoa": 3.0, "cl": 0.337, "cd": 0.851, "rms": -3.33,
+             "error": True, "error_msg": "встал", "stopped": False}
+    _new = {"aoa": 3.0, "cl": 0.100, "cd": 0.900, "rms": -1.20,
+            "error": False, "error_msg": "", "stopped": False}
+    _notes = []
+    _kept = _wk.SessionRunner._better_result(_prev, _new, _notes.append)
+    check("оставлен прогон с меньшей невязкой",
+          _kept["rms"] == -3.33 and _kept["cl"] == 0.337, str(_kept))
+    check("пользователю сказано, что оставлен первый прогон",
+          len(_notes) == 1 and "первого прогона" in _notes[0], str(_notes))
+    check("оставленный результат не помечен ошибкой",
+          _kept["error"] is False)
+    check("несходимость всё равно упомянута",
+          "-4" in _kept["error_msg"], _kept["error_msg"])
+
+    _better_new = {"aoa": 3.0, "cl": 0.20, "cd": 0.02, "rms": -5.0,
+                   "error": False, "error_msg": "", "stopped": False}
+    _notes2 = []
+    check("если повтор лучше — остаётся повтор",
+          _wk.SessionRunner._better_result(_prev, _better_new,
+                                           _notes2.append)["rms"] == -5.0
+          and _notes2 == [])
+    _noRms = {"aoa": 3.0, "cl": 0.0, "cd": 0.0, "rms": None,
+              "error": False, "error_msg": "", "stopped": False}
+    check("без невязки сравнивать нечего — остаётся новый",
+          _wk.SessionRunner._better_result(_prev, _noRms,
+                                           lambda m: None) is _noRms)
+
+    _wk_src2 = open(os.path.join(_ROOT, "solver", "workers.py"),
+                    encoding="utf-8").read()
+    check("цикл повторов сравнивает прогоны",
+          "res = self._better_result(_prev, res, log_cb)" in _wk_src2)
+
     print()
     print("Пройдено: %d" % _passed)
     if _failed:

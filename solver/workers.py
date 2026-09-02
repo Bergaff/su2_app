@@ -380,9 +380,11 @@ def parse_history(case_dir: str):
         icl = col("cl")
         icd = col("cd")
         icm = col("cmz", "cm", "cmy")
+        irms = col("rms[rho]", "res_rms_rho", "rms[res_rho]")
         if icl is None or icd is None:
             return None
-        out = {"cl": None, "cd": None, "cm": 0.0, "iters": len(data)}
+        out = {"cl": None, "cd": None, "cm": 0.0, "iters": len(data),
+               "rms": None}
         for ln in reversed(data):
             parts = [p.strip().strip('"') for p in ln.split(",")]
             if len(parts) <= max(icl, icd):
@@ -392,6 +394,11 @@ def parse_history(case_dir: str):
                 out["cd"] = float(parts[icd])
                 if icm is not None and len(parts) > icm:
                     out["cm"] = float(parts[icm])
+                if irms is not None and len(parts) > irms:
+                    try:
+                        out["rms"] = float(parts[irms])
+                    except ValueError:
+                        out["rms"] = None
                 break
             except ValueError:
                 continue
@@ -436,8 +443,8 @@ class SU2Worker:
         self._stop = True
 
     # ------------------------------------------------------------------
-    def _result(self, aoa, ok, error_msg="", stopped=False):
-        return {"aoa": aoa, "cl": 0.0, "cd": 0.0, "cm": 0.0,
+    def _result(self, aoa, ok, error_msg="", stopped=False, rms=None):
+        return {"aoa": aoa, "cl": 0.0, "cd": 0.0, "cm": 0.0, "rms": rms,
                 "error": (not ok) and (not stopped), "error_msg": error_msg,
                 "stopped": stopped}
 
@@ -675,7 +682,7 @@ class SU2Worker:
                     conv_minval=conv_minval)
                 if stall_why:
                     proc.terminate()
-                    return self._result(
+                    _r = self._result(
                         aoa, False,
                         stall_why + "\n"
                         "Норма должна падать до -4…-6, здесь она стоит или "
@@ -686,7 +693,17 @@ class SU2Worker:
                         "  2. Снять галочку «Быстрый CFL» или снизить "
                         "CFL_ADAPT_PARAM.\n"
                         "  3. Уменьшить угол атаки.\n\n"
-                        f"Хвост лога:\n{self._tail_text()}")
+                        f"Хвост лога:\n{self._tail_text()}",
+                        rms=best_rms)
+                    # Коэффициенты к этому моменту уже посчитаны и лежат в
+                    # history.csv. Без них прерванный прогон возвращал нули,
+                    # и повтор с другим пресетом перезаписывал каталог —
+                    # сравнить два прогона было не с чем.
+                    _h = parse_history(self.case_dir)
+                    if _h:
+                        _r.update({"cl": _h["cl"], "cd": _h["cd"],
+                                   "cm": _h["cm"]})
+                    return _r
                 if rms != rms:
                     nan_count += 1
                     if nan_count >= 3:
@@ -745,7 +762,7 @@ class SU2Worker:
                 "Проверьте, что тело самолёта нанесено на границу 'airfoil' "
                 "и геометрия замкнута.")
 
-        res = self._result(aoa, True)
+        res = self._result(aoa, True, rms=hist.get("rms"))
         res.update({"cl": hist["cl"], "cd": hist["cd"], "cm": hist["cm"]})
         return res
 
@@ -799,6 +816,37 @@ class SessionRunner(QThread):
     # ------------------------------------------------------------------
     # Автоконфиг: предложение устойчивого пресета после расхождения
     # ------------------------------------------------------------------
+    @staticmethod
+    def _better_result(prev, new, log_cb):
+        """Лучший из двух прогонов одной точки.
+
+        Повтор пишется в тот же каталог и перезаписывает history.csv,
+        поэтому без явного сравнения результат первого прогона теряется.
+        На plane_wing.step при телооблекающей сетке первый прогон дошёл до
+        log10(rms[Rho])=-3.33, а повтор с пресетом выдал Cd=0.851 при
+        L/D=0.40 — и в отчёт ушёл именно повтор, потому что он был
+        последним, а не потому что лучшим.
+
+        Сравнение по логарифму невязки: чем меньше, тем лучше. Если
+        невязки нет хотя бы у одного из прогонов, сравнивать нечего и
+        остаётся новый результат — прежнее поведение.
+        """
+        rp, rn = prev.get("rms"), new.get("rms")
+        if not isinstance(rp, (int, float)) or not isinstance(rn, (int, float)):
+            return new
+        if rn <= rp:
+            return new
+        kept = dict(prev)
+        kept["error"] = False
+        kept["error_msg"] = (
+            "Результат не сошёлся до порога (log10(rms[Rho])=%.3f при "
+            "норме -4…-6), но это лучше, чем дал повтор с другим "
+            "пресетом (%.3f). Коэффициенты приблизительные." % (rp, rn))
+        log_cb("Внимание: повтор дал худшую сходимость "
+               "(log10(rms[Rho])=%.3f против %.3f) — оставлен результат "
+               "первого прогона." % (rn, rp))
+        return kept
+
     def _recover(self, case_dir, res, log_cb):
         """Вызывается из потока расчёта. Определяет причину провала по
         history.csv и ждёт ответ из GUI-диалога.
@@ -936,8 +984,10 @@ class SessionRunner(QThread):
                         elif verdict == "rerun_safe":
                             self._auto_preset = "safe"
                         log_cb("Повторный расчёт точки с новыми настройками...")
+                        _prev = res
                         self._worker = _make_worker()
                         res = self._worker.run(aoa)
+                        res = self._better_result(_prev, res, log_cb)
                     else:
                         self._recovery_declined = True
                         log_cb("Автоконфиг отклонён — продолжаю серию "
