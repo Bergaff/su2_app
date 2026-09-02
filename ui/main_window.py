@@ -4324,10 +4324,23 @@ class MainWindow(QMainWindow):
                 self._mesh_worker = MeshWorker(stl_paths, quality, parent=self)
         # ================================================================
         self._mesh_worker.setProperty("stl_paths", stl_paths)
+        self._connect_mesh_log(self._mesh_worker)
         self._mesh_worker.progress_signal.connect(self.on_mesh_progress)
         self._mesh_worker.finished_signal.connect(
             lambda ok, msg: self.on_mesh_finished(ok, msg, stl_paths))
         self._mesh_worker.start()
+
+    def _connect_mesh_log(self, worker):
+        """Диагностика генератора сетки — в лог приложения.
+
+        Без этого причина, по которой сетка не облегает тело, остаётся в
+        stdout: у собранного exe окна консоли нет, и пользователь видит
+        только расходимость через десять минут счёта.
+        """
+        sig = getattr(worker, "log_signal", None)
+        if sig is None:
+            return
+        sig.connect(lambda m: self.log_text.append(str(m)))
 
     def on_mesh_progress(self, percent, stage):
         self._set_progress(percent)
@@ -5179,6 +5192,7 @@ class MainWindow(QMainWindow):
                                        self.combo_mesh_quality.currentText(),
                                        parent=self,
                                        symmetry_planes=self.get_symmetry_plane_axes())
+        self._connect_mesh_log(self._mesh_worker)
         self._mesh_worker.progress_signal.connect(
             lambda p, s: self.statusBar().showMessage(f"Опт. сетка: {s} ({p}%)", 2000))
         self._mesh_worker.finished_signal.connect(

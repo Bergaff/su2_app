@@ -31,6 +31,7 @@ class MeshWorker(QThread):
         use_symmetry — T1: добавить маркер symmetry_plane для SU2 MARKER_SYM
     """
     progress_signal = pyqtSignal(int, str)   # процент 0..100, этап
+    log_signal = pyqtSignal(str)             # диагностика в лог приложения
     finished_signal = pyqtSignal(bool, str)  # ok, message
 
     def __init__(self, stl_paths, quality_text="Средняя", parent=None,
@@ -63,6 +64,12 @@ class MeshWorker(QThread):
         except Exception:
             pass
 
+    def _log_cb(self, msg):
+        try:
+            self.log_signal.emit(str(msg))
+        except Exception:
+            pass
+
     def run(self):
         if generate_mesh_impl is None:
             self.finished_signal.emit(
@@ -77,6 +84,7 @@ class MeshWorker(QThread):
                 cancel_cb=self._check_cancel,
                 use_symmetry=self.use_symmetry,
                 symmetry_planes=self.symmetry_planes,
+                log_cb=self._log_cb,
             )
             # ==========================================================
         except MeshCancelled as e:

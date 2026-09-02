@@ -472,10 +472,14 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
 # ---------------------------------------------------------------------------
 def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=None,
                        cancel_cb=None, use_symmetry=False,
-                       symmetry_planes=None):
+                       symmetry_planes=None, log_cb=None):
     """Основная функция генерации сетки.
 
     progress_cb(percent:int, stage:str) — вызывается по ходу генерации;
+    log_cb(str) — диагностика в лог приложения (причины отката на
+                  картезианский путь, вердикты по разрешению тонких
+                  деталей). Без него эти сведения уходят только в stdout,
+                  которого в собранном exe не существует;
     cancel_cb() -> bool — если вернул True, генерация аккуратно прерывается.
     use_symmetry: если True — на плоскости Y=0 треугольники маркируются
                   как symmetry_plane (T1: для SU2 MARKER_SYM).
@@ -486,6 +490,23 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         try:
             if progress_cb:
                 progress_cb(int(pct), stage)
+        except Exception:
+            pass
+
+    def say(msg):
+        """Диагностика, которая обязана дойти до пользователя.
+
+        print() здесь бесполезен: собранный exe запускается без окна
+        консоли (CREATE_NO_WINDOW), и весь вывод в stdout исчезает.
+        Именно так пользователь получал сетку, не облегавшую тело, и не
+        видел ни причины отката, ни предупреждения о неразрешаемой
+        тонкой детали — узнавал только по расходимости через десять
+        минут счёта. Поэтому диагностика дублируется в лог приложения.
+        """
+        print(msg)
+        try:
+            if log_cb:
+                log_cb(str(msg))
         except Exception:
             pass
 
@@ -613,10 +634,11 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
             report(14, "Телооблекающая сетка (TetGen)")
             try:
                 _bf = build_body_fitted_grid(
-                    body_meshes, body_min, body_max, margin, log=print)
+                    body_meshes, body_min, body_max, margin, log=say)
             except Exception as _e:
-                print(f"   Внимание: телооблекающая сетка не построена "
-                      f"({type(_e).__name__}: {_e})")
+                say(f"Внимание: телооблекающая сетка не построена "
+                    f"({type(_e).__name__}: {_e}) — строится картезианская "
+                    f"сетка фона, она поверхность тела не облегает.")
                 _bf = None
         if _bf is not None:
             grid = _bf["grid"]
@@ -641,8 +663,8 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
             # пользователь узнаёт об этом только через десять минут счёта.
             # Поэтому считаем и печатаем явно.
             if body_thinness:
-                print("   Проверка разрешающей способности (шаг у тела "
-                      f"{h_near:.4f} м):")
+                say("Проверка разрешающей способности (шаг у тела "
+                    f"{h_near:.4f} м):")
                 _worst = []
                 for _name, _t in sorted(body_thinness, key=lambda x: x[1]):
                     _cells = _t / h_near if h_near > 0 else 0.0
@@ -652,23 +674,23 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                         _verdict = "на пределе — поверхность будет ступенчатой"
                     else:
                         _verdict = "разрешается"
-                    print(f"      {_name}: мин. габарит {_t:.4f} м = "
-                          f"{_cells:.2f} шага — {_verdict}")
+                    say(f"  {_name}: мин. габарит {_t:.4f} м = "
+                        f"{_cells:.2f} шага — {_verdict}")
                     if _cells < 3.0:
                         _worst.append((_name, _t, _cells))
                 if _worst:
                     _n_bad = sum(1 for _, _, c in _worst if c < 1.0)
-                    print("   Внимание: сетка строится вырезанием ячеек фона и "
-                          "не облегает поверхность. Элемент тоньше одного шага "
-                          "фона попадает в сетку как ступенчатая пластина в одну "
-                          "ячейку или не попадает вовсе — расчёт на такой сетке "
-                          "расходится независимо от настроек решателя.")
+                    say("Внимание: сетка строится вырезанием ячеек фона и "
+                        "не облегает поверхность. Элемент тоньше одного шага "
+                        "фона попадает в сетку как ступенчатая пластина в одну "
+                        "ячейку или не попадает вовсе — расчёт на такой сетке "
+                        "расходится независимо от настроек решателя.")
                     if _n_bad:
-                        print(f"   Компонентов тоньше одного шага: {_n_bad}. "
-                              "Нужен шаг у тела не более "
-                              f"{min(t for _, t, _ in _worst) / 3.0:.4f} м "
-                              "(3 шага на самый тонкий элемент), либо сетка, "
-                              "облегающая поверхность (gmsh по STL).")
+                        say(f"Компонентов тоньше одного шага: {_n_bad}. "
+                        "Нужен шаг у тела не более "
+                        f"{min(t for _, t, _ in _worst) / 3.0:.4f} м "
+                        "(3 шага на самый тонкий элемент), либо сетка, "
+                        "облегающая поверхность (gmsh по STL).")
 
             report(15, "Построение осей фоновой сетки")
 
