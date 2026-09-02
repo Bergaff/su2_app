@@ -469,6 +469,87 @@ def main():
     check("цикл повторов сравнивает прогоны",
           "res = self._better_result(_prev, res, log_cb)" in _wk_src2)
 
+    # ---------------------------------------------------------------
+    # SU2 требует, чтобы у каждой грани маркера был ровно один соседний
+    # тетраэдр. На полном самолёте mesh.su2 этому не удовлетворял:
+    #   The surface element (0, 195) doesn't have an associated volume
+    #   element
+    # и точка перезапускалась трижды с одним и тем же файлом.
+    print()
+    print("== маркеры согласованы с объёмной сеткой (инвариант SU2) ==")
+    import numpy as np
+    _outer = pv.Box(bounds=(-5, 5, -5, 5, -5, 5)).triangulate().points
+    _sph = pv.Sphere(radius=1.0, theta_resolution=24,
+                     phi_resolution=24).triangulate()
+    _grid = pv.PolyData(np.vstack([_outer, _sph.points])).delaunay_3d()
+    _cc = _grid.cell_centers().points
+    _keep = np.flatnonzero(np.linalg.norm(_cc, axis=1) > 1.05)
+    _grid = _grid.extract_cells(_keep)
+
+    _surf = _grid.extract_surface(algorithm="dataset_surface").triangulate()
+    _sf = np.asarray(_surf.faces).reshape(-1, 4)[:, 1:]
+    _sp = np.asarray(_surf.points).copy()
+    # грань, которой нет среди тетраэдров — ровно та, что ломает SU2
+    _sp = np.vstack([_sp, [[0.2, 0.2, 0.98], [0.6, 0.1, 0.85],
+                           [0.1, 0.6, 0.85]]])
+    _sf = np.vstack([_sf, [[len(_sp) - 3, len(_sp) - 2, len(_sp) - 1]]])
+    _bad = pv.PolyData(_sp, np.hstack([[3, *t] for t in _sf]).astype(np.int64))
+
+    _wlog = []
+    _out = os.path.join(workdir, "_marker_check.su2")
+    _gm.write_su2(_grid, _bad, _out, log_cb=_wlog.append)
+    _wj = "\n".join(_wlog)
+    check("грань без соседнего тетраэдра обнаружена и названа в логе",
+          "которых нет на границе объёмной сетки" in _wj, _wj[:160])
+
+    _lines = open(_out, encoding="ascii", errors="replace").read().split("\n")
+    _i = 0; _tets2 = []; _mk = {}
+    while _i < len(_lines):
+        _t = _lines[_i].split("%")[0].strip()
+        if _t.startswith("NELEM="):
+            _n = int(_t.split("=")[1])
+            _tets2 = [tuple(int(x) for x in _lines[_i + 1 + _k].split()[1:5])
+                      for _k in range(_n)]
+            _i += _n
+        elif _t.startswith("MARKER_TAG="):
+            _tag = _t.split("=")[1].strip()
+            _k2 = int(_lines[_i + 1].split("%")[0].strip().split("=")[1])
+            _mk[_tag] = [tuple(int(x) for x in _lines[_i + 2 + _j].split()[1:4])
+                         for _j in range(_k2)]
+            _i += _k2 + 1
+        _i += 1
+    _t2 = np.asarray(_tets2)
+    _tf2 = np.vstack([_t2[:, [0, 1, 2]], _t2[:, [0, 1, 3]],
+                      _t2[:, [0, 2, 3]], _t2[:, [1, 2, 3]]])
+    _u2, _c2 = np.unique(np.sort(_tf2, axis=1), axis=0, return_counts=True)
+    _bnd = set(map(tuple, _u2[_c2 == 1]))
+    _all = set(map(tuple, _u2))
+    _viol = 0
+    _cov = set()
+    for _tag, _fs in _mk.items():
+        for _f in _fs:
+            _k3 = tuple(sorted(_f))
+            _cov.add(_k3)
+            if _k3 not in _bnd or len(set(_f)) < 3:
+                _viol += 1
+        _srt = [tuple(sorted(_f)) for _f in _fs]
+        _viol += len(_srt) - len(set(_srt))
+    # Маркеры намеренно не правятся — только диагностируются. Поэтому
+    # injected-грань остаётся в файле, и важно, что детектор назвал ровно
+    # её, а не половину сетки.
+    check("нарушение ровно одно — добавленная грань, ложных срабатываний нет "
+          "(нарушителей %d)" % _viol, _viol == 1, "нарушителей %d" % _viol)
+    check("маркер airfoil непустой", len(_mk.get("airfoil", [])) > 0)
+
+    # Негативный контроль: на поверхности без посторонних граней детектор
+    # молчит, то есть не гудит на каждой сетке подряд.
+    _clean_log = []
+    _out2 = os.path.join(workdir, "_marker_clean.su2")
+    _gm.write_su2(_grid, _surf, _out2, log_cb=_clean_log.append)
+    _cj = "\n".join(_clean_log)
+    check("на чистой поверхности детектор молчит",
+          "которых нет на границе объёмной сетки" not in _cj, _cj[:160])
+
     print()
     print("Пройдено: %d" % _passed)
     if _failed:

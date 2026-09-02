@@ -398,6 +398,50 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
 
     valid_tets = [tet for tet in tetras if len(tet) == 4]
 
+    # === Проверка инварианта SU2 =====================================
+    #
+    # CPhysicalGeometry::SetBoundVolume требует, чтобы у каждого элемента
+    # маркера был ровно один соседний тетраэдр. Иначе SU2 падает с
+    #   "The surface element (0, 195) doesn't have an associated volume
+    #    element"
+    # — и точка перезапускается автоконфигом с тем же самым файлом, трижды
+    # подряд, без единого внятного слова в логе приложения.
+    #
+    # Маркеры собираются из отдельной PolyData, точки которой привязываются
+    # к объёму поиском ближайшего соседа, поэтому грань может попасть в
+    # маркер, не будучи гранью ни одного тетраэдра. Здесь результат
+    # сверяется с настоящим набором граней и нарушение печатается в лог с
+    # примерами. Сами маркеры не правятся: их починка задела бы путь
+    # симметрии, покрытый tests/test_symmetry_slice.py.
+    _log = kwargs.get("log_cb") or (lambda *_a: None)
+    _vt = np.asarray(valid_tets, dtype=np.int64)
+    if len(_vt) and len(vol_pts):
+        _tf = np.vstack([_vt[:, [0, 1, 2]], _vt[:, [0, 1, 3]],
+                         _vt[:, [0, 2, 3]], _vt[:, [1, 2, 3]]])
+        _u, _c = np.unique(np.sort(_tf, axis=1), axis=0, return_counts=True)
+        _allf = set(map(tuple, _u.tolist()))
+        _bnd = set(map(tuple, _u[_c == 1].tolist()))
+
+        def _audit(tris, name):
+            bad, seen = [], set()
+            for line in tris:
+                key = tuple(sorted(int(x) for x in line.split()[1:4]))
+                if len(set(key)) < 3 or key not in _bnd or key in seen:
+                    bad.append(key)
+                seen.add(key)
+            if bad:
+                _log("Внимание: в маркере %s %d граней, которых нет на "
+                     "границе объёмной сетки (примеры: %s). SU2 отвергнет "
+                     "такую сетку ошибкой SetBoundVolume."
+                     % (name, len(bad),
+                        ", ".join(str(b) for b in bad[:3])))
+            return len(bad)
+
+        _audit(airfoil_tris, "airfoil")
+        _audit(farfield_tris, "farfield")
+        for _pl, _tris in symmetry_tris.items():
+            _audit(_tris, "symmetry_" + str(_pl))
+
     # === ИСПРАВЛЕНИЕ #1: жёсткая защита от пустого маркера airfoil ===
     if len(airfoil_tris) == 0:
         raise RuntimeError(
@@ -1115,6 +1159,7 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         try:
             # === T1: пробрасываем use_symmetry в write_su2 =============
             write_su2(grid, surface, su2_path,
+                      log_cb=say,
                       use_symmetry=use_symmetry,
                       symmetry_planes=symmetry_planes,
                       pre_clip_points=_pre_clip_pts
