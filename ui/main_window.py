@@ -3190,6 +3190,49 @@ class MainWindow(QMainWindow):
             ox = self.w_pos_x.value() + 0.25 * ref_length + 0.5 * sweep_offset
             oy = self.w_pos_y.value()
             oz = self.w_pos_z.value()
+            # === Справочные данные по реальной геометрии крыла ==========
+            #
+            # Выше Sref и Lref считаются из спинбоксов «Размах / Хорда
+            # корня / Хорда конца». Для крыла, построенного встроенным
+            # генератором, это верно: спинбоксы и есть источник геометрии.
+            # Но при импорте детали спинбоксы не обновляются и остаются
+            # заводскими (размах 10 м, хорды 1.8/0.9 м), а коэффициенты
+            # Cl = L/(q·Sref) и Cm = M/(q·Sref·Lref) нормируются именно на
+            # них. Проверено на расчёте импортированного крыла: в лог
+            # ушло Lref=1.400, Sref=13.500 — это ровно 0.5·(1.8+0.9)·10 и
+            # (2/3)·1.8·(1+0.5+0.25)/1.5, то есть значения по умолчанию,
+            # а не размеры загруженной детали.
+            #
+            # Поэтому, если размах в модели заметно отличается от размаха
+            # в параметрах, справочные данные берутся прямо с сетки крыла.
+            # Порог 2% — чтобы погрешность триангуляции не переключала
+            # ветку на встроенном крыле, где спинбоксы точны.
+            _mesh = wing.get("mesh")
+            if _mesh is not None:
+                try:
+                    from geometry.reference import wing_reference_from_pv
+                except Exception:
+                    wing_reference_from_pv = None
+                geo = (wing_reference_from_pv(_mesh)
+                       if wing_reference_from_pv else None)
+                if geo is not None:
+                    _rel = abs(geo["span"] - span) / max(geo["span"], 1e-9)
+                    if _rel > 0.02:
+                        _ratio = geo["area"] / max(ref_area, 1e-9)
+                        self.log_text.append(
+                            f"Внимание: размах крыла в модели {geo['span']:.3f} м, "
+                            f"а в параметрах крыла {span:.3f} м. Справочные "
+                            f"данные взяты по загруженной геометрии: иначе Cl "
+                            f"и Cd отличались бы в {_ratio:.2f} раз, а Cm — "
+                            f"ещё и на отношение хорд.")
+                        ref_area = geo["area"]
+                        ref_length = geo["mac"]
+                        ox = geo["x_le_mean"] + 0.25 * ref_length
+                        oy = 0.5 * (geo["y_min"] + geo["y_max"])
+                        _zb = _mesh.bounds
+                        oz = 0.5 * (_zb[4] + _zb[5])
+                        span = geo["span"]
+            # =============================================================
             self.log_text.append(
                 f"RefData: Lref={ref_length:.3f}, Sref={ref_area:.3f}, "
                 f"O=({ox:.3f}, {oy:.3f}, {oz:.3f})")
