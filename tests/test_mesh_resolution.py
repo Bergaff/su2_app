@@ -345,11 +345,13 @@ def main():
           and "не более 0.0000" not in _flat_joined)
 
     # ---------------------------------------------------------------
-    # Вердикт о сетке должен доходить до сессии: пресеты автоконфига
-    # меняют только CFL/MUSCL/entropy fix, поэтому повтор прогона при
-    # нерешённой геометрии — это ещё один полный прогон впустую.
+    # Вердикт о сетке должен доходить до сессии как ПРЕДУПРЕЖДЕНИЕ.
+    # Пресеты автоконфига меняют только CFL/MUSCL/entropy fix — сетку они
+    # не трогают, поэтому число будет неточным. Но обрывать повтор нельзя:
+    # пресет меняет устойчивость схемы, и на картезианской сетке это часто
+    # единственный способ получить результат вообще.
     print()
-    print("== сессия знает, что повтор с другим пресетом бесполезен ==")
+    print("== сессия знает о качестве сетки, но повтор не обрывает ==")
     import config.settings as _CS
     import importlib.util as _ilu
     _spec = _ilu.spec_from_file_location(
@@ -372,26 +374,38 @@ def main():
     check("вердикт: плоский компонент перечислен",
           "_flat_plate2.stl" in _CS.MESH_DIAGNOSIS["flat"],
           str(_CS.MESH_DIAGNOSIS["flat"]))
-    _why = _wk.mesh_limits_solver_settings()
-    check("сессия получает причину, по которой повтор бесполезен",
-          bool(_why) and "нулевая толщина" in _why, str(_why))
+    # Замечание, а не запрет. Замер пользователя на plane_wing.step:
+    # на картезианской сетке первый прогон встал на 0.60, а повтор с
+    # пресетом пошёл (0.410, -1.864, -2.295, -2.728) и точка завершилась
+    # успешно. Обрывать такой повтор — значит оставить без результата.
+    _note = _wk.mesh_quality_note()
+    check("сессия получает замечание о качестве сетки",
+          bool(_note) and "нулевая толщина" in _note, str(_note))
 
     _CS.MESH_DIAGNOSIS.update({"body_fitted": True, "unresolved": [],
                                "flat": [], "reason": ""})
-    check("негативный контроль: при облегающей сетке повтор разрешён",
-          _wk.mesh_limits_solver_settings() is None)
+    check("негативный контроль: при облегающей сетке замечаний нет",
+          _wk.mesh_quality_note() is None)
     _CS.MESH_DIAGNOSIS.update({"body_fitted": False, "unresolved": [],
                                "flat": [], "reason": "причина X"})
     check("причина отката доходит до сессии",
-          _wk.mesh_limits_solver_settings() == "причина X")
+          _wk.mesh_quality_note() == "причина X")
     _CS.MESH_DIAGNOSIS.update({"body_fitted": True, "unresolved": [],
                                "flat": [], "reason": ""})
+
     _wk_src = open(os.path.join(_ROOT, "solver", "workers.py"),
                    encoding="utf-8").read()
     _i_rec = _wk_src.index("verdict = self._recover(")
-    _i_guard = _wk_src.index("_mesh_why = mesh_limits_solver_settings()")
-    check("проверка сетки стоит ДО вызова автоконфига", _i_guard < _i_rec,
+    _i_guard = _wk_src.index("_mesh_note = mesh_quality_note()")
+    check("замечание о сетке стоит ДО вызова автоконфига", _i_guard < _i_rec,
           "%d против %d" % (_i_guard, _i_rec))
+    # Именно это и было регрессией: замечание обрывало цикл повторов.
+    _tail = _wk_src[_i_guard:_i_guard + 1200]
+    check("замечание не прерывает повтор прогона",
+          "break" not in _tail.split("verdict = self._recover(")[0],
+          _tail[:160])
+    check("замечание показывается один раз за сессию",
+          "_mesh_note_shown" in _tail)
 
     print()
     print("Пройдено: %d" % _passed)
