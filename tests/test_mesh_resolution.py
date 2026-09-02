@@ -318,6 +318,32 @@ def main():
           _BF.tetgen_available() is False or _BF.tetgen_missing() == [],
           str(_BF.tetgen_missing()))
 
+    # ---------------------------------------------------------------
+    # Вырожденное тело: нулевая толщина. Киль в UI был именно таким —
+    # v_stabilizer.stl уходил в сеточник с мин. габаритом 0.0000 м, а
+    # совет «нужен шаг у тела не более 0.0000 м» был бессмыслицей.
+    print()
+    print("== вырожденное тело названо, а не послано в бесконечное сгущение ==")
+    _flat_stl = os.path.join(workdir, "_flat_plate.stl")
+    pv.Plane(i_size=1.0, j_size=0.8).triangulate().save(_flat_stl)
+    _flat_log = []
+    _buf5 = io.StringIO()
+    with redirect_stdout(_buf5):
+        _gm.generate_mesh_impl([_flat_stl, tail], quality_text="Средняя",
+                               log_cb=_flat_log.append)
+    _flat_joined = "\n".join(_flat_log)
+    check("плоское тело помечено как вырожденное",
+          "ВЫРОЖДЕННОЕ" in _flat_joined, _flat_joined[:120])
+    check("сказано, что сгущение сетки не поможет",
+          "нулевая толщина" in _flat_joined)
+    check("имя плоского компонента названо",
+          "_flat_plate.stl" in _flat_joined)
+    check("совет «шаг не более 0.0000 м» больше не выдаётся",
+          "не более 0.0000 м" not in _flat_joined, _flat_joined[:120])
+    check("для тонкого, но объёмного тела совет сохранился",
+          "Нужен шаг у тела не более" in _flat_joined
+          and "не более 0.0000" not in _flat_joined)
+
     print()
     print("Пройдено: %d" % _passed)
     if _failed:

@@ -636,15 +636,17 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         # картезианском пути без потери функционала.
         _bf = None
         build_body_fitted_grid = None
-        _bf_import_error = None
+        _bf_errs = []
         try:
-            try:
-                from mesh.bodyfit_tetgen import build_body_fitted_grid
-            except ImportError:
-                from bodyfit_tetgen import build_body_fitted_grid
+            from mesh.bodyfit_tetgen import build_body_fitted_grid
         except Exception as _e:
-            build_body_fitted_grid = None
-            _bf_import_error = "%s: %s" % (type(_e).__name__, _e)
+            # Первая причина важнее второй: обычно именно она настоящая.
+            _bf_errs.append("mesh.bodyfit_tetgen: %s" % _e)
+            try:
+                from bodyfit_tetgen import build_body_fitted_grid
+            except Exception as _e2:
+                build_body_fitted_grid = None
+                _bf_errs.append("bodyfit_tetgen: %s" % _e2)
         if build_body_fitted_grid is None:
             # Раньше здесь стоял голый `except: ... = None`, и пользователь
             # получал картезианскую сетку без единого слова о том, что
@@ -655,7 +657,8 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                 "тела не облегает, тонкие элементы разрешаются ступенькой, "
                 "и расчёт на такой сетке может расходиться независимо от "
                 "настроек решателя."
-                % (_bf_import_error or "модуль mesh.bodyfit_tetgen не найден"))
+                % ("; ".join(_bf_errs)
+                   or "модуль mesh.bodyfit_tetgen не найден"))
         if build_body_fitted_grid is not None:
             report(14, "Телооблекающая сетка (TetGen)")
             try:
@@ -695,7 +698,13 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                 _worst = []
                 for _name, _t in sorted(body_thinness, key=lambda x: x[1]):
                     _cells = _t / h_near if h_near > 0 else 0.0
-                    if _cells < 1.0:
+                    if _t <= 1e-9:
+                        # Тело лежит в одной плоскости: объём ноль. Такой
+                        # компонент в сетку не попадёт ни при каком шаге,
+                        # и совет «взять шаг поменьше» здесь неприменим.
+                        _verdict = ("ВЫРОЖДЕННОЕ — нулевая толщина, тело "
+                                    "не попадёт в сетку ни при каком шаге")
+                    elif _cells < 1.0:
                         _verdict = "НЕ РАЗРЕШАЕТСЯ — элемент может отсутствовать в сетке"
                     elif _cells < 3.0:
                         _verdict = "на пределе — поверхность будет ступенчатой"
@@ -712,10 +721,18 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                         "фона попадает в сетку как ступенчатая пластина в одну "
                         "ячейку или не попадает вовсе — расчёт на такой сетке "
                         "расходится независимо от настроек решателя.")
-                    if _n_bad:
+                    _flat = [n for n, t, _ in _worst if t <= 1e-9]
+                    _thin = [(n, t) for n, t, _ in _worst if t > 1e-9]
+                    if _flat:
+                        say("Внимание: у компонента(ов) %s нулевая толщина — "
+                            "геометрия плоская, объёма нет. Проверьте "
+                            "генератор или исходный CAD: никакое сгущение "
+                            "сетки не поможет, тело нужно перестроить "
+                            "объёмным." % ", ".join(_flat))
+                    if _n_bad and _thin:
                         say(f"Компонентов тоньше одного шага: {_n_bad}. "
                         "Нужен шаг у тела не более "
-                        f"{min(t for _, t, _ in _worst) / 3.0:.4f} м "
+                        f"{min(t for _, t in _thin) / 3.0:.4f} м "
                         "(3 шага на самый тонкий элемент), либо сетка, "
                         "облегающая поверхность (gmsh по STL).")
 

@@ -77,6 +77,7 @@ from geometry.stl_healer import heal_stl_mesh, HealReportDialog
 from geometry.generators import (
     create_primitive, generate_wing_mesh, generate_flaps_mesh,
     generate_slats_mesh, cad_to_stl, cad_detect_units, CAD_EXTENSIONS,
+    generate_vertical_stabilizer_geometry,
 )
 from mesh.gmsh_generator import generate_mesh_impl
 from mesh.mesh_worker import MeshWorker, MeshAdaptWorker
@@ -4076,28 +4077,19 @@ class MainWindow(QMainWindow):
             sweep = self.vk_sweep.value()
             pos_x = self.vk_pos_x.value()
             pos_z = self.vk_pos_z.value()
-            sweep_offset = height * math.tan(math.radians(sweep))
-            rx, rz = generate_naca4_section(chord, "0012", twist=0.0)
-            tx, tz = generate_naca4_section(chord * 0.45, "0012", twist=0.0)
-            n = len(rx)
-            points = []
-            for i in range(n):
-                points.append([rx[i] + pos_x, 0.0, rz[i] + pos_z])
-            for i in range(n):
-                points.append([tx[i] + sweep_offset + pos_x, 0.0, tz[i] + pos_z + height])
-            faces = []
-            for i in range(n - 1):
-                faces.append([4, i, i + 1, n + i + 1, n + i])
-            faces.append([4, n - 1, 0, n, 2 * n - 1])
-            bottom_c = len(points)
-            points.append(self._compute_centroid(points, 0, n))
-            faces.extend(self._create_triangular_cap_faces(0, n, center_idx=bottom_c))
-            top_c = len(points)
-            points.append(self._compute_centroid(points, n, n))
-            faces.extend(self._create_triangular_cap_faces(n, n, center_idx=top_c))
-            flat_faces = [v for f in faces for v in f]
-            vk_mesh = pv.PolyData(np.array(points),
-                                  np.array(flat_faces)).triangulate().clean(tolerance=1e-6)
+            # Геометрия киля берётся из готового генератора, а не
+            # собирается здесь заново. Инлайн-копия разошлась с ним: она
+            # ставила толщину профиля в Z и оставляла Y обоих сечений
+            # нулём, поэтому киль выходил плоским листом нулевого объёма
+            # (габарит по Y ровно 0.0000, volume 0.0, 316 граней). Такое
+            # тело в сетку не попадает вовсе — ни у одной ячейки фона центр
+            # не оказывается внутри нулевой толщины, — а объединение тел
+            # даёт открытую оболочку и обрывает телооблекающий путь.
+            # Генератор уже покрыт тестами, дублировать его незачем.
+            vk_mesh = generate_vertical_stabilizer_geometry(
+                None, "NACA0012", height, chord, chord * 0.45, sweep,
+                z_offset=pos_z)
+            vk_mesh.translate([pos_x, 0.0, 0.0], inplace=True)
             vk_mesh.compute_normals(auto_orient_normals=True, inplace=True)
             os.makedirs(WORK_DIR_BASE, exist_ok=True)
             path = os.path.join(WORK_DIR_BASE, "v_stabilizer.stl")
