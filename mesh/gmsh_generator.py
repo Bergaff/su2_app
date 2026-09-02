@@ -37,6 +37,14 @@ except ImportError:
     MESH_FILE = os.path.join(WORK_DIR_BASE, "mesh.su2")
     MESH_QUALITY = ["Грубая (быстро)", "Средняя", "Точная (медленно)"]
 
+# Тот же словарь, что читает solver/workers.py. Если config.settings
+# недоступен — локальная копия: вердикт просто никто не прочитает.
+try:
+    from config.settings import MESH_DIAGNOSIS
+except ImportError:
+    MESH_DIAGNOSIS = {"body_fitted": True, "unresolved": [],
+                      "flat": [], "reason": ""}
+
 try:
     import trimesh
     TRIMESH_AVAILABLE = True
@@ -484,7 +492,17 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
     use_symmetry: если True — на плоскости Y=0 треугольники маркируются
                   как symmetry_plane (T1: для SU2 MARKER_SYM).
     Возвращает (ok: bool, msg: str).
+
+    Побочно заполняет config.settings.MESH_DIAGNOSIS: solver/workers.py
+    читает его, чтобы не перезапускать точку с другим численным пресетом,
+    когда причина неудачи — сетка, а пресет сетку не меняет.
     """
+    # Сброс вердикта прошлой генерации. Изменяем на месте: объект общий
+    # с solver/workers.py, переопределение имени разъединило бы их.
+    MESH_DIAGNOSIS["body_fitted"] = True
+    MESH_DIAGNOSIS["unresolved"] = []
+    MESH_DIAGNOSIS["flat"] = []
+    MESH_DIAGNOSIS["reason"] = ""
     def report(pct, stage):
         print(f"[{int(pct):3d}%] {stage}")
         try:
@@ -637,6 +655,7 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         _bf = None
         build_body_fitted_grid = None
         _bf_errs = []
+        _bf_reason = ""
         try:
             from mesh.bodyfit_tetgen import build_body_fitted_grid
         except Exception as _e:
@@ -659,6 +678,9 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                 "настроек решателя."
                 % ("; ".join(_bf_errs)
                    or "модуль mesh.bodyfit_tetgen не найден"))
+            _bf_reason = ("телооблекающая сетка недоступна: "
+                          + ("; ".join(_bf_errs)
+                             or "модуль mesh.bodyfit_tetgen не найден"))
         if build_body_fitted_grid is not None:
             report(14, "Телооблекающая сетка (TetGen)")
             try:
@@ -670,6 +692,8 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                     f"({type(_e).__name__}: {_e}) — строится картезианская "
                     f"сетка фона, она поверхность тела не облегает.")
                 _bf = None
+                _bf_reason = ("телооблекающая сетка не построена: "
+                              "%s: %s" % (type(_e).__name__, _e))
         if _bf is not None:
             grid = _bf["grid"]
             print(f"   Готово: телооблекающая сетка: {grid.n_points} узлов, "
@@ -692,6 +716,12 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
             # Молча выдавать такую сетку нельзя: SU2 на ней расходится, и
             # пользователь узнаёт об этом только через десять минут счёта.
             # Поэтому считаем и печатаем явно.
+            MESH_DIAGNOSIS["body_fitted"] = False
+            MESH_DIAGNOSIS["reason"] = (_bf_reason or
+                                        "телооблекающая сетка не построена: "
+                                        "тела не слились в замкнутую "
+                                        "поверхность либо грани тела не "
+                                        "восстановились в триангуляции")
             if body_thinness:
                 say("Проверка разрешающей способности (шаг у тела "
                     f"{h_near:.4f} м):")
@@ -714,6 +744,10 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                         f"{_cells:.2f} шага — {_verdict}")
                     if _cells < 3.0:
                         _worst.append((_name, _t, _cells))
+                    if _t <= 1e-9:
+                        MESH_DIAGNOSIS["flat"].append(_name)
+                    elif _cells < 1.0:
+                        MESH_DIAGNOSIS["unresolved"].append(_name)
                 if _worst:
                     _n_bad = sum(1 for _, _, c in _worst if c < 1.0)
                     say("Внимание: сетка строится вырезанием ячеек фона и "

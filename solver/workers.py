@@ -22,6 +22,36 @@ from datetime import datetime
 from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QWaitCondition
 
 from config.settings import config, MESH_FILE, WORK_DIR_BASE
+
+# Вердикт о последней построенной сетке (заполняет mesh/gmsh_generator.py).
+# Нужен здесь, чтобы не перезапускать точку с другим численным пресетом,
+# когда причина неудачи — сетка.
+try:
+    from config.settings import MESH_DIAGNOSIS
+except ImportError:      # pragma: no cover
+    MESH_DIAGNOSIS = {"body_fitted": True, "unresolved": [],
+                      "flat": [], "reason": ""}
+
+
+def mesh_limits_solver_settings():
+    """Причина, по которой повтор с другим пресетом не поможет, или None.
+
+    Пресеты автоконфига (su2_autoconfig.PRESETS) меняют только CFL_NUMBER,
+    CFL_ADAPT, MUSCL и entropy fix — ни сетку, ни INNER_ITER. Если сетка не
+    описывает геометрию, прогон повторится один в один, только займёт ещё
+    один полный прогон. На пластине plane_wing.step это 1100 итераций за
+    951 с за попытку, и таких попыток до трёх.
+    """
+    if MESH_DIAGNOSIS.get("flat"):
+        return ("у компонента(ов) %s нулевая толщина — тела нет в сетке "
+                "вовсе" % ", ".join(MESH_DIAGNOSIS["flat"]))
+    if MESH_DIAGNOSIS.get("unresolved"):
+        return ("компонент(ы) %s тоньше шага сетки и попадают в неё "
+                "ступенькой" % ", ".join(MESH_DIAGNOSIS["unresolved"]))
+    if not MESH_DIAGNOSIS.get("body_fitted", True):
+        return (MESH_DIAGNOSIS.get("reason")
+                or "сетка не облегает поверхность тела")
+    return None
 from solver.config_builder import write_case_config
 # === ПАТЧ: импорт помощников гибридного GPU-режима =====================
 from solver.gpu_launcher import (
@@ -871,6 +901,19 @@ class SessionRunner(QThread):
                     if not (res.get("error") and not res.get("stopped")):
                         break
                     if self._recovery_declined or su2_autoconfig is None:
+                        break
+                    _mesh_why = mesh_limits_solver_settings()
+                    if _mesh_why:
+                        # Повтор с другим пресетом дал бы тот же результат:
+                        # пресет не меняет сетку. Раньше точка пересчитывалась
+                        # до трёх раз, и на пластине plane_wing.step это
+                        # стоило трёх полных прогонов вместо одного.
+                        log_cb("Внимание: повтор с другими настройками "
+                               "бесполезен — %s. Пресеты автоконфига меняют "
+                               "CFL и порядок схемы, а не сетку. Пересоберите "
+                               "сетку (телооблекающим путём) или упростите "
+                               "геометрию." % _mesh_why)
+                        self._recovery_declined = True
                         break
                     verdict = self._recover(case_dir, res, log_cb)
                     if verdict in ("rerun_safe", "rerun_ultra", "settings"):

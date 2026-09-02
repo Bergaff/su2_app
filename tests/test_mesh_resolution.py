@@ -344,6 +344,55 @@ def main():
           "Нужен шаг у тела не более" in _flat_joined
           and "не более 0.0000" not in _flat_joined)
 
+    # ---------------------------------------------------------------
+    # Вердикт о сетке должен доходить до сессии: пресеты автоконфига
+    # меняют только CFL/MUSCL/entropy fix, поэтому повтор прогона при
+    # нерешённой геометрии — это ещё один полный прогон впустую.
+    print()
+    print("== сессия знает, что повтор с другим пресетом бесполезен ==")
+    import config.settings as _CS
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location(
+        "wk_probe", os.path.join(_ROOT, "solver", "workers.py"))
+    _wk = _ilu.module_from_spec(_spec)
+    sys.modules["wk_probe"] = _wk
+    _spec.loader.exec_module(_wk)
+
+    _flat_stl2 = os.path.join(workdir, "_flat_plate2.stl")
+    pv.Plane(i_size=1.0, j_size=0.8).triangulate().save(_flat_stl2)
+    _buf6 = io.StringIO()
+    with redirect_stdout(_buf6):
+        _gm.generate_mesh_impl([fus, tail, _flat_stl2],
+                               quality_text="Средняя")
+    check("вердикт: сетка не облегает тело",
+          _CS.MESH_DIAGNOSIS["body_fitted"] is False)
+    check("вердикт: тонкий компонент перечислен",
+          "h_stab.stl" in _CS.MESH_DIAGNOSIS["unresolved"],
+          str(_CS.MESH_DIAGNOSIS["unresolved"]))
+    check("вердикт: плоский компонент перечислен",
+          "_flat_plate2.stl" in _CS.MESH_DIAGNOSIS["flat"],
+          str(_CS.MESH_DIAGNOSIS["flat"]))
+    _why = _wk.mesh_limits_solver_settings()
+    check("сессия получает причину, по которой повтор бесполезен",
+          bool(_why) and "нулевая толщина" in _why, str(_why))
+
+    _CS.MESH_DIAGNOSIS.update({"body_fitted": True, "unresolved": [],
+                               "flat": [], "reason": ""})
+    check("негативный контроль: при облегающей сетке повтор разрешён",
+          _wk.mesh_limits_solver_settings() is None)
+    _CS.MESH_DIAGNOSIS.update({"body_fitted": False, "unresolved": [],
+                               "flat": [], "reason": "причина X"})
+    check("причина отката доходит до сессии",
+          _wk.mesh_limits_solver_settings() == "причина X")
+    _CS.MESH_DIAGNOSIS.update({"body_fitted": True, "unresolved": [],
+                               "flat": [], "reason": ""})
+    _wk_src = open(os.path.join(_ROOT, "solver", "workers.py"),
+                   encoding="utf-8").read()
+    _i_rec = _wk_src.index("verdict = self._recover(")
+    _i_guard = _wk_src.index("_mesh_why = mesh_limits_solver_settings()")
+    check("проверка сетки стоит ДО вызова автоконфига", _i_guard < _i_rec,
+          "%d против %d" % (_i_guard, _i_rec))
+
     print()
     print("Пройдено: %d" % _passed)
     if _failed:
