@@ -4161,7 +4161,20 @@ class MainWindow(QMainWindow):
             self.fill_wing_box_from_fuselage()
             self.preview_wing_box()
             self.auto_suggest_wing_params()
+            # ГО подстраивается по фюзеляжу всегда, а не только когда
+            # включён чекбокс «Автоподбор по фюзеляжу». Без этого
+            # hs_pos_x остаётся заводским (6.5 м), а фюзеляж длиной 8 м
+            # кончается на x=+4: замер на сгенерированном самолёте дал ГО
+            # на x от 6.50 до 7.18 и руль высоты до 7.30, то есть между
+            # хвостом и оперением 2.5 м воздуха. Такое оперение не
+            # работает — оно висит в следе за фюзеляжем, не будучи к нему
+            # присоединённым, и момент тангажа считается от тела, которого
+            # рядом нет. Для кнопки «Полный самолёт» связность обязательна.
+            _hs_was_auto = self.hs_auto.isChecked()
+            self.hs_auto.setChecked(True)
             self.generate_horizontal_stabilizer()
+            if not _hs_was_auto:
+                self.hs_auto.setChecked(False)
             self.generate_vertical_stabilizer()
             # КАМЕРУ НЕ СБРАСЫВАЕМ
             self.log_text.append("Готово: Полный самолёт сгенерирован!")

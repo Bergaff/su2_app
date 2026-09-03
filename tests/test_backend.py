@@ -135,6 +135,100 @@ with tempfile.TemporaryDirectory() as td:
     res = parse_history(td)
     check("parse_history без файла → None", res is None)
 
+# --- расчёт по половине модели -------------------------------------------
+# При включённой плоскости симметрии в сетке только половина самолёта, а
+# REF_AREA берётся по полному крылу, поэтому SU2 возвращает вдвое
+# меньшие Cl, Cd и Cm. Признак — незакомментированная строка MARKER_SYM
+# в config.cfg того же каталога.
+from solver.workers import symmetry_scale
+
+_HIST = ('"Outer_Iter","CL","CD","CMz"\n'
+         '0,0.10,0.05,-0.001\n'
+         '1,0.30,0.020,-0.010\n')
+
+
+def _case(cfg_text):
+    td = tempfile.mkdtemp()
+    with open(os.path.join(td, "history.csv"), "w") as f:
+        f.write(_HIST)
+    if cfg_text is not None:
+        with open(os.path.join(td, "config.cfg"), "w") as f:
+            f.write(cfg_text)
+    return td
+
+
+_td = _case("MARKER_SYM= ( symmetry_xz )\n")
+check("симметрия включена → масштаб 2.0", symmetry_scale(_td) == 2.0,
+      symmetry_scale(_td))
+_r = parse_history(_td)
+check("Cl/Cd/Cm удвоены для половины модели",
+      abs(_r["cl"] - 0.60) < 1e-12 and abs(_r["cd"] - 0.040) < 1e-12
+      and abs(_r["cm"] + 0.020) < 1e-12 and _r["half_model"], str(_r))
+
+_td = _case("% MARKER_SYM= ( symmetry_xy symmetry_xz symmetry_yz )  # выключено\n")
+check("закомментированный MARKER_SYM игнорируется",
+      symmetry_scale(_td) == 1.0, symmetry_scale(_td))
+_r = parse_history(_td)
+check("без симметрии коэффициенты не меняются",
+      abs(_r["cl"] - 0.30) < 1e-12 and not _r["half_model"], str(_r))
+
+_td = _case("MARKER_SYM= (  )\n")
+check("пустой MARKER_SYM не включает удвоение", symmetry_scale(_td) == 1.0,
+      symmetry_scale(_td))
+_td = _case(None)
+check("без config.cfg масштаб 1.0", symmetry_scale(_td) == 1.0,
+      symmetry_scale(_td))
+
+# --- «Полный самолёт» подстраивает ГО по фюзеляжу ------------------------
+# Без этого hs_pos_x остаётся заводским (6.5 м) при фюзеляже, который
+# кончается на x=+4: оперение висело в 2.5 м позади хвоста.
+print()
+print("== полный самолёт: автоподбор ГО ==")
+try:
+    from ui.main_window import MainWindow as _MW
+except Exception as _exc:
+    _MW = None
+    print("  (пропущено: ui.main_window не импортируется: %s)" % _exc)
+
+if _MW is not None:
+    class _Chk2:
+        def __init__(self, v):
+            self.v = v
+        def isChecked(self):
+            return self.v
+        def setChecked(self, v):
+            self.v = bool(v)
+
+    class _Log2:
+        def __init__(self):
+            self.lines = []
+        def append(self, s):
+            self.lines.append(s)
+
+    class _Stub:
+        pass
+
+    for _start in (False, True):
+        _st = _Stub()
+        _order = []
+        _st.log_text = _Log2()
+        _st.hs_auto = _Chk2(_start)
+        _st._get_fuselage_body = lambda: {"mesh": object()}
+        _st.generate_fuselage = lambda: None
+        _st.fill_wing_box_from_fuselage = lambda: None
+        _st.preview_wing_box = lambda: None
+        _st.auto_suggest_wing_params = lambda: None
+        _st.generate_vertical_stabilizer = lambda: None
+
+        def _hs(_st=_st, _order=_order):
+            _order.append(("hs", _st.hs_auto.isChecked()))
+        _st.generate_horizontal_stabilizer = _hs
+        _MW.generate_full_aircraft(_st)
+        check("при генерации самолёта ГО строится с автоподбором (старт %s)"
+              % _start, _order == [("hs", True)], str(_order))
+        check("состояние чекбокса восстановлено (старт %s)" % _start,
+              _st.hs_auto.isChecked() == _start, _st.hs_auto.isChecked())
+
 # ---------------------------------------------------------------- config_builder
 print("== solver.config_builder ==")
 from solver.config_builder import build_su2_config, write_case_config

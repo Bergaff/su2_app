@@ -349,6 +349,40 @@ def parse_iteration_line(line: str):
     return None
 
 
+def symmetry_scale(case_dir: str) -> float:
+    """2.0, если расчёт шёл по половине модели, иначе 1.0.
+
+    При включённой плоскости симметрии в сетке только половина самолёта,
+    а REF_AREA берётся по полному крылу (справочные данные считаются до
+    резки). SU2 интегрирует давление по тем маркерам, которые есть в
+    сетке, поэтому подъёмная сила, сопротивление и момент выходят ровно
+    вдвое меньше настоящих. L/D — отношение — от этого не меняется.
+
+    Признак берётся из config.cfg того же каталога: незакомментированная
+    строка MARKER_SYM хотя бы с одним именем. Выключенная плоскость
+    записывается как «% MARKER_SYM= ( ... )  # выключено», поэтому
+    строки с «%» пропускаются — в SU2 это единственный символ
+    комментария.
+    """
+    try:
+        cfg = os.path.join(case_dir, "config.cfg")
+        if not os.path.exists(cfg):
+            return 1.0
+        with open(cfg, "r", encoding="utf-8", errors="ignore") as f:
+            for ln in f:
+                t = ln.strip()
+                if not t or t.startswith("%"):
+                    continue
+                if not t.upper().startswith("MARKER_SYM"):
+                    continue
+                rhs = t.split("=", 1)[1] if "=" in t else ""
+                if [n for n in re.split(r"[(),\s]+", rhs) if n]:
+                    return 2.0
+        return 1.0
+    except Exception:
+        return 1.0
+
+
 def parse_history(case_dir: str):
     """Читает итоговые CL/CD/CMz из history*.csv. Возвращает dict или None."""
     try:
@@ -404,6 +438,15 @@ def parse_history(case_dir: str):
                 continue
         if out["cl"] is None or out["cd"] is None:
             return None
+        # Расчёт по половине модели даёт половину сил при полном REF_AREA.
+        _k = symmetry_scale(case_dir)
+        if _k != 1.0:
+            out["cl"] = out["cl"] * _k
+            out["cd"] = out["cd"] * _k
+            out["cm"] = out["cm"] * _k
+            out["half_model"] = True
+        else:
+            out["half_model"] = False
         return out
     except Exception:
         return None
@@ -764,6 +807,11 @@ class SU2Worker:
 
         res = self._result(aoa, True, rms=hist.get("rms"))
         res.update({"cl": hist["cl"], "cd": hist["cd"], "cm": hist["cm"]})
+        if hist.get("half_model"):
+            res["half_model"] = True
+            self.log_cb(
+                "  расчёт по половине модели: Cl, Cd и Cm удвоены — в сетке "
+                "только половина самолёта, а REF_AREA взята по полному крылу.")
         return res
 
 
