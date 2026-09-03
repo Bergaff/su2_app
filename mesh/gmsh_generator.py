@@ -466,7 +466,15 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
             f.write(f"NPOIN= {n_points}\n")
             for i, p in enumerate(vol_pts):
                 f.write(f"{p[0]:.15e} {p[1]:.15e} {p[2]:.15e} {i}\n")
-            f.write("NMARK= 2\n")
+            # NMARK обязан совпадать с фактическим числом маркеров: SU2
+            # читает ровно столько, сколько здесь заявлено. Было жёстко 2,
+            # поэтому при включённой симметрии записывались четыре маркера,
+            # а решатель加载只有 airfoil и farfield — MARKER_SYM из
+            # config.cfg ссылался на маркеры, которых для него не
+            # существовало.
+            _nmark = 2 + sum(1 for _pl in symmetry_planes
+                             if symmetry_tris.get(_pl))
+            f.write(f"NMARK= {_nmark}\n")
             f.write("MARKER_TAG= airfoil\n")
             f.write(f"MARKER_ELEMS= {len(airfoil_tris)}\n")
             for line in airfoil_tris:
@@ -484,13 +492,11 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
                 tris = symmetry_tris.get(plane, [])
                 if not tris:
                     continue
-                if plane == "xz":
-                    # Маркер на плоскости Y=0 — оставляем оба имени
-                    # (старое и новое), чтобы старый config.cfg работал.
-                    f.write("MARKER_TAG= symmetry_plane\n")
-                    f.write(f"MARKER_ELEMS= {len(tris)}\n")
-                    for line in tris:
-                        f.write(f"{line}\n")
+                # Раньше для плоскости XZ те же самые грани писались ещё
+                # раз под старым именем symmetry_plane. Одна граница в двух
+                # маркерах — это нарушение формата: SU2 получает одни и те
+                # же элементы дважды. config.cfg генерируется этим же
+                # приложением каждый расчёт, поэтому старое имя не нужно.
                 f.write(f"MARKER_TAG= symmetry_{plane}\n")
                 f.write(f"MARKER_ELEMS= {len(tris)}\n")
                 for line in tris:
@@ -1117,6 +1123,28 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         grid = pv.UnstructuredGrid(cell_array_clean, celltypes_clean,
                                    new_points)
         print(f"Готово: Итоговая сетка: {grid.n_points} узлов, {grid.n_cells} тетраэдров")
+
+        # Резка по плоскостям симметрии (vtkClipDataSet) не склеивает
+        # совпавшие точки: на линии реза одна и та же координата остаётся
+        # под несколькими индексами. Дальше surface извлекается из этой
+        # сетки, и write_su2 привязывает её точки к объёму поиском
+        # ближайшего соседа. На совпавших точках привязка схлопывает их
+        # непоследовательно, и в маркеры попадают грани, которых нет среди
+        # тетраэдров, а часть граней дублируется. SU2 отвергает такой файл:
+        #   The surface element (0, 195) doesn't have an associated volume
+        #    element
+        # Замерено на полном самолёте с плоскостью XZ: 422 висячих и 122
+        # дубля в airfoil, 54 висячих в farfield.
+        try:
+            _n_before = grid.n_points
+            _merged = grid.clean()
+            if _merged is not None and _merged.n_cells > 0:
+                grid = _merged
+            if grid.n_points != _n_before:
+                say("   Готово: склеено совпавших точек после резки: "
+                    "%d -> %d" % (_n_before, grid.n_points))
+        except Exception:
+            pass
 
         try:
             grid.save(PREVIEW_MESH)

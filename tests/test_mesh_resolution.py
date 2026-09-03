@@ -550,6 +550,59 @@ def main():
     check("на чистой поверхности детектор молчит",
           "которых нет на границе объёмной сетки" not in _cj, _cj[:160])
 
+    # ---------------------------------------------------------------
+    # Резка по плоскости симметрии ломала инвариант SU2. На полном
+    # самолёте с плоскостью XZ замерено: 422 висячих и 122 дубля в
+    # airfoil, 54 висячих в farfield — SU2 падал на SetBoundVolume.
+    # Плюс NMARK был жёстко 2 при четырёх записанных маркерах, и одни
+    # грани писались дважды: symmetry_plane и symmetry_xz.
+    print()
+    print("== симметрия не ломает инвариант SU2 ==")
+    import numpy as _np
+    gg_mesh = _gm.MESH_FILE
+    _sym_log = []
+    _buf7 = io.StringIO()
+    with redirect_stdout(_buf7):
+        _ok_sym, _msg_sym = _gm.generate_mesh_impl(
+            [fus], quality_text="Средняя", log_cb=_sym_log.append,
+            use_symmetry=True, symmetry_planes=["xz"])
+    check("сетка с симметрией построилась (%s)" % _msg_sym, bool(_ok_sym))
+    _sl = open(gg_mesh, encoding="ascii", errors="replace").read().split("\n")
+    _i = 0; _t3 = []; _mk3 = {}; _nmark = None
+    while _i < len(_sl):
+        _t = _sl[_i].split("%")[0].strip()
+        if _t.startswith("NELEM="):
+            _n = int(_t.split("=")[1])
+            _t3 = [tuple(int(x) for x in _sl[_i + 1 + _k].split()[1:5])
+                   for _k in range(_n)]
+            _i += _n
+        elif _t.startswith("NMARK="):
+            _nmark = int(_t.split("=")[1])
+        elif _t.startswith("MARKER_TAG="):
+            _tag = _t.split("=")[1].strip()
+            _k2 = int(_sl[_i + 1].split("%")[0].strip().split("=")[1])
+            _mk3[_tag] = [tuple(int(x) for x in _sl[_i + 2 + _j].split()[1:4])
+                          for _j in range(_k2)]
+            _i += _k2 + 1
+        _i += 1
+    check("NMARK равен числу записанных маркеров (%s против %d)"
+          % (_nmark, len(_mk3)), _nmark == len(_mk3))
+    check("маркер симметрии один, без дубля symmetry_plane",
+          "symmetry_plane" not in _mk3 and "symmetry_xz" in _mk3,
+          str(sorted(_mk3)))
+    _t3a = _np.asarray(_t3)
+    _tf3 = _np.vstack([_t3a[:, [0, 1, 2]], _t3a[:, [0, 1, 3]],
+                       _t3a[:, [0, 2, 3]], _t3a[:, [1, 2, 3]]])
+    _u3, _c3 = _np.unique(_np.sort(_tf3, axis=1), axis=0, return_counts=True)
+    _bnd3 = set(map(tuple, _u3[_c3 == 1].tolist()))
+    _v3 = 0
+    for _tag, _fs in _mk3.items():
+        _srt = [tuple(sorted(_f)) for _f in _fs]
+        _v3 += sum(1 for _f in _srt if _f not in _bnd3)
+        _v3 += len(_srt) - len(set(_srt))
+    check("с симметрией нарушений инварианта нет (нарушителей %d)" % _v3,
+          _v3 == 0)
+
     print()
     print("Пройдено: %d" % _passed)
     if _failed:

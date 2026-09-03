@@ -136,8 +136,10 @@ def _sym_marker_names(planes):
     names = []
     for p in (planes or []):
         p = str(p).lower()
-        if p == "xz" and "symmetry_plane" not in names:
-            names.append("symmetry_plane")
+        if p == "xz" and "symmetry_xz" not in names:
+            # Раньше сюда добавлялось и старое имя symmetry_plane. В
+            # mesh.su2 те же грани больше не дублируются под двумя
+            # маркерами, поэтому в MARKER_SYM остаётся одно имя.
             names.append("symmetry_xz")
         elif p == "xy":
             names.append("symmetry_xy")
