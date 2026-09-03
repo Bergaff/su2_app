@@ -10,6 +10,14 @@ pyvista, чтобы собрать сетку и поверхность.
 По одной геометрии его треугольники неотличимы от грани среза — у них и
 координата на плоскости, и нормаль вдоль неё.
 
+Второй сценарий — обратный: срез дальнего поля. Коробка расчётной
+области симметрична относительно плоскости реза, поэтому слой её узлов
+лежит ровно на плоскости и clip() переиспользует эти точки как старые.
+Признак «все вершины созданы резкой» такие грани отвергает, они уходят в
+airfoil, и SU2 получает стенку и монитор сил на плоской плите в
+невозмущённом потоке. На сгенерированном самолёте это дало Cd=0.184 и
+Cm=9.23 при норме ~0.02 и ~0.1.
+
 Запуск:  python tests/test_symmetry_slice.py
 """
 import os
@@ -68,12 +76,16 @@ def build_case():
     """Срез по Z=0: грань среза, верх крыла, дальняя граница, боковая грань."""
     cut_pts, cut_tris = quads([(-0.7, 0.7, -4.5, 4.5)], 0.0)     # появился при резке
     wing_pts, wing_tris = quads([(-0.7, 0.7, -4.5, 4.5)], 0.075)  # был до резки
+    # Срез дальнего поля: его вершины лежат на плоскости реза, но
+    # существовали и до резки — узлы симметричной коробки области.
+    oldcut_pts, oldcut_tris = quads([(-20, 20, -20, 20)], 0.0)
     far_pts, far_tris = quads([(-40, 48, -40, 40)], 40.0)
     side_pts = [(-40, -40, 0), (-40, 40, 0), (-40, 40, 40), (-40, -40, 40)]
     side_tris = [[0, 1, 2], [0, 2, 3]]
 
     pts, tris, off = [], [], 0
     for pp, tt in ((cut_pts, cut_tris), (wing_pts, wing_tris),
+                   (oldcut_pts, oldcut_tris),
                    (far_pts, far_tris), (side_pts, side_tris)):
         tris += [[i + off for i in t] for t in tt]
         pts += pp
@@ -104,7 +116,8 @@ def build_case():
     grid = pv.UnstructuredGrid(ug)
 
     # До резки существовали крыло и дальнее поле; точек среза не было.
-    pre = np.array(list(wing_pts) + list(far_pts) + list(side_pts), dtype=float)
+    pre = np.array(list(wing_pts) + list(oldcut_pts) + list(far_pts)
+                   + list(side_pts), dtype=float)
     return grid, surface, pre, grid_pts
 
 
@@ -131,16 +144,21 @@ def main():
     before, before_err = run(grid, surface)
     after, after_err = run(grid, surface, pre_clip_points=pre)
 
-    check("без проверки происхождения маркер стенки пуст (баг воспроизведён)",
-          before_err is not None and "airfoil" in before_err, before_err)
-    check("с проверкой происхождения write_su2 не падает",
+    check("без pre_clip_points write_su2 не падает",
+          before_err is None, before_err)
+    check("с pre_clip_points write_su2 не падает",
           after_err is None, after_err)
 
+    if before:
+        check("геометрия сама отделяет крыло от среза (airfoil=2)",
+              before.get("airfoil", 0) == 2, before)
     if after:
         check("стенка самолёта получила свои треугольники",
               after.get("airfoil", 0) == 2, after)
-        check("грань среза отнесена к симметрии",
-              after.get("symmetry_xy", 0) == 2, after)
+        check("грань среза отнесена к симметрии (2 новых + 2 старых вершины)",
+              after.get("symmetry_xy", 0) == 4, after)
+        check("срез дальнего поля из старых вершин не ушёл в стенку",
+              before == after, "%s против %s" % (before, after))
         check("дальняя граница не смешалась со стенкой",
               after.get("farfield", 0) == 4, after)
         check("все треугольники распределены",

@@ -349,6 +349,9 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
         #
         # Именно это позволяет резать модель по любой плоскости, а не
         # только по «удобной» XZ.
+        # Признак происхождения оставлен как страховка от числового
+        # мусора, но он НЕ МОЖЕТ быть единственным — см. ниже.
+        _all_new = None
         if sym_mask and _pre_keys is not None:
             try:
                 _qv = np.round(tri_pts.reshape(-1, 3)
@@ -356,10 +359,57 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
                 _old_v = np.array([tuple(_v) in _pre_keys for _v in _qv],
                                   dtype=bool).reshape(len(tri_idx_array), 3)
                 _all_new = ~_old_v.any(axis=1)
-                for plane in list(sym_mask.keys()):
-                    sym_mask[plane] = sym_mask[plane] & _all_new
             except Exception:
-                pass
+                _all_new = None
+
+        # === Основной признак: ВСЕ ТРИ вершины грани лежат в плоскости.
+        #
+        # Раньше единственным признаком было происхождение вершин: срезом
+        # считалась грань, у которой все три вершины созданы самой резкой.
+        # На дальнем поле это ломается. Коробка области симметрична
+        # относительно плоскости реза, поэтому слой её узлов лежит ровно
+        # на y=0, и clip() переиспользует эти точки как старые. Половина
+        # граней среза оказывалась «не новой», проваливалась в airfoil,
+        # и SU2 получал MARKER_EULER и MARKER_MONITORING на плоской плите
+        # в невозмущённом потоке.
+        #
+        # Замерено на сгенерированном самолёте (Средняя, резка по XZ):
+        #   airfoil     12899 граней, 3105.9 м2, из них 843 грани
+        #               и 3078.8 м2 лежат ровно в Y=0;
+        #   symmetry_xz  4108 граней, 3113.0 м2, все в Y=0;
+        #   сумма 6191.8 м2 при площади сечения области 6200.0 м2 —
+        #   то есть плоскость симметрии делилась между маркерами пополам.
+        #   Настоящая поверхность тела — только 27.1 м2 из 3105.9.
+        # Расчёт по такой сетке даёт Cd=0.184 и Cm=9.23 при норме ~0.02
+        # и ~0.1: давление интегрируется по плите в десятки метров
+        # плечом от точки отсчёта момента.
+        #
+        # Принадлежность плоскости — свойство геометрическое и точное:
+        # у грани среза в плоскости лежат все три вершины, у поверхности
+        # тела хотя бы одна отстоит от неё. Киль (y=±0.042 м) и верх/низ
+        # фюзеляжа отсеиваются тем же признаком, что и раньше. Допуск
+        # 1e-6 от габарита области на два порядка меньше полутолщины
+        # самых тонких тел и несравнимо больше ошибки, с которой clip()
+        # ставит точки на плоскость.
+        if sym_mask:
+            _plane_axis = {"xy": 2, "xz": 1, "yz": 0}
+            _plane_eps = 1e-6 * float(max(1.0, bbox_size))
+            for plane in list(sym_mask.keys()):
+                _pname = str(plane).split(":", 1)[0].strip().lower()
+                _ax = _plane_axis.get(_pname)
+                if _ax is None:
+                    continue
+                _off = 0.0
+                if ":" in str(plane):
+                    try:
+                        _off = float(str(plane).split(":", 1)[1])
+                    except Exception:
+                        _off = 0.0
+                _onplane = (np.abs(tri_pts[:, :, _ax] - _off)
+                            <= _plane_eps).all(axis=1)
+                if _all_new is not None:
+                    _onplane = _onplane | _all_new
+                sym_mask[plane] = sym_mask[plane] & _onplane
         # =================================================================
         mapped = point_map[tri_idx_array]
         for k in range(len(mapped)):
@@ -540,7 +590,7 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                   которого в собранном exe не существует;
     cancel_cb() -> bool — если вернул True, генерация аккуратно прерывается.
     use_symmetry: если True — на плоскости Y=0 треугольники маркируются
-                  как symmetry_plane (T1: для SU2 MARKER_SYM).
+                  как symmetry_xz (T1: для SU2 MARKER_SYM).
     Возвращает (ok: bool, msg: str).
 
     Побочно заполняет config.settings.MESH_DIAGNOSIS: solver/workers.py
