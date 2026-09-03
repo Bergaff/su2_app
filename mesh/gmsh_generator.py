@@ -149,6 +149,43 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
     if markers_info is None:
         markers_info = [("airfoil", 0), ("farfield", 0)]
 
+    # === Порядок вершин грани маркера ====================================
+    #
+    # SU2 берёт нормаль грани маркера из порядка её вершин и больше
+    # ниоткуда. До сих пор порядок приходил прямо из surface.faces, то
+    # есть полагался на vtkPolyDataNormals (auto_orient_normals /
+    # consistent_normals). Это ненадёжно: consistent_normals требует
+    # многообразной поверхности, а после резки по плоскости симметрии и
+    # склейки совпавших точек поверхность не обязана быть
+    # многообразной.
+    #
+    # Замер на сгенерированном самолёте: 911 из 12367 граней airfoil
+    # (7.37%) были записаны с обходом внутрь тела, в symmetry_xz — 17,
+    # в farfield — 0. Такая грань даёт вклад в силу с обратным знаком,
+    # поэтому завышались и Cl, и Cd одновременно: расчёт дал Cl=0.739 и
+    # Cd=0.360 при L/D=2.05, хотя в невязкой постановке сопротивление
+    # замкнутого тела должно быть близко к нулю.
+    #
+    # Внешняя нормаль граничной грани тетраэдральной сетки определяется
+    # точно и без эвристик: она смотрит от четвёртой вершины
+    # тетраэдра наружу. Порядок вершин выставляется по ней.
+    _out_winding = {}
+    try:
+        _Tw = np.asarray([t for t in tetras if len(t) == 4], dtype=np.int64)
+        for _miss in range(4):
+            if not len(_Tw):
+                break
+            _f = _Tw[:, [j for j in range(4) if j != _miss]]
+            _p = vol_pts[_f]
+            _n = np.cross(_p[:, 1] - _p[:, 0], _p[:, 2] - _p[:, 0])
+            _opp = vol_pts[_Tw[:, _miss]]
+            _flip = np.einsum('ij,ij->i', _n, _p.mean(axis=1) - _opp) < 0.0
+            _f = np.where(_flip[:, None], _f[:, [0, 2, 1]], _f)
+            for _k, _v in zip(map(tuple, np.sort(_f, axis=1)), _f):
+                _out_winding[_k] = _v
+    except Exception:
+        _out_winding = {}
+
     # === T1: список плоскостей симметрии (XY, XZ, YZ) =================
     # Поддержка нескольких плоскостей одновременно. Каждая плоскость
     # даёт отдельный маркер в mesh.su2:
@@ -413,7 +450,13 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
         # =================================================================
         mapped = point_map[tri_idx_array]
         for k in range(len(mapped)):
-            line = f"5 {int(mapped[k, 0])} {int(mapped[k, 1])} {int(mapped[k, 2])}"
+            _ow = _out_winding.get(tuple(sorted((int(mapped[k, 0]),
+                                                 int(mapped[k, 1]),
+                                                 int(mapped[k, 2])))))
+            if _ow is not None:
+                line = f"5 {int(_ow[0])} {int(_ow[1])} {int(_ow[2])}"
+            else:
+                line = f"5 {int(mapped[k, 0])} {int(mapped[k, 1])} {int(mapped[k, 2])}"
             # Проверяем симметрию: первый попавший маркер из sym_mask
             sym_marked = False
             for plane, mask in sym_mask.items():
@@ -1219,18 +1262,14 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
             except Exception:
                 pass
 
-        try:
-            cell_centers_surf = surface.cell_centers().points
-            normals = np.asarray(surface.cell_normals)
-            if len(normals) == surface.n_cells and len(normals) > 0:
-                center = np.asarray(surface.points).mean(axis=0)
-                outward = cell_centers_surf - center
-                flip = np.einsum('ij,ij->i', normals, outward) < 0
-                if np.any(flip):
-                    normals[flip] *= -1.0
-                    surface.cell_normals = normals
-        except Exception:
-            pass
+        # Здесь был переворот cell_normals: нормаль грани сравнивалась с
+        # направлением «от центра всей поверхности к центру грани» и
+        # переворачивалась, если смотрела не туда. Такой признак верен
+        # только для выпуклого тела, а самолёт выпуклым не является.
+        # Кроме того, поле surface.cell_normals дальше никто не читал:
+        # write_su2 пишет порядок вершин, а не нормали. Блок удалён —
+        # порядок вершин теперь выставляется в write_su2 по внешней
+        # нормали тетраэдра, что точно и не зависит от формы тела.
 
         su2_path = MESH_FILE
         report(97, "Запись файла mesh.su2")

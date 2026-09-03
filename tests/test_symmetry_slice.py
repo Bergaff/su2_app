@@ -134,6 +134,58 @@ def run(grid, surface, **kw):
     return marks, None
 
 
+def outward_violations(path):
+    """Сколько граней маркеров записано с обходом внутрь тела.
+
+    SU2 берёт нормаль грани маркера из порядка её вершин и больше
+    ниоткуда, поэтому обход обязан давать внешнюю нормаль. Внешняя
+    нормаль граничной грани тетраэдральной сетки определяется точно:
+    она смотрит от четвёртой вершины тетраэдра наружу.
+    """
+    txt = open(path, encoding="utf-8").read().split("\n")
+    i, pts, tets, marks = 0, None, [], []
+    while i < len(txt):
+        t = txt[i].split("%")[0].strip()
+        if t.startswith("NELEM="):
+            n = int(t.split("=")[1])
+            tets += [tuple(int(x) for x in txt[i + 1 + k].split()[1:5])
+                     for k in range(n)]
+            i += n
+        elif t.startswith("NPOIN="):
+            n = int([x for x in t.replace("=", " ").split() if x][-1])
+            pts = np.array([[float(v) for v in txt[i + 1 + k].split()[:3]]
+                            for k in range(n)])
+            i += n
+        elif t.startswith("MARKER_TAG="):
+            k = int(txt[i + 1].split("%")[0].strip().split("=")[1])
+            marks += [tuple(int(x) for x in txt[i + 2 + j].split()[1:4])
+                      for j in range(k)]
+            i += k + 1
+        i += 1
+    out = {}
+    T = np.asarray(tets)
+    for miss in range(4):
+        f = T[:, [j for j in range(4) if j != miss]]
+        p3 = pts[f]
+        n = np.cross(p3[:, 1] - p3[:, 0], p3[:, 2] - p3[:, 0])
+        flip = np.einsum('ij,ij->i', n,
+                         p3.mean(axis=1) - pts[T[:, miss]]) < 0.0
+        f = np.where(flip[:, None], f[:, [0, 2, 1]], f)
+        q3 = pts[f]
+        nv = np.cross(q3[:, 1] - q3[:, 0], q3[:, 2] - q3[:, 0])
+        for k, v in zip(map(tuple, np.sort(f, axis=1)), nv):
+            out[k] = v
+    bad = 0
+    for a, b, c in marks:
+        v = out.get(tuple(sorted((a, b, c))))
+        if v is None:
+            continue
+        q = pts[[a, b, c]]
+        if np.dot(np.cross(q[1] - q[0], q[2] - q[0]), v) < 0:
+            bad += 1
+    return bad, len(marks)
+
+
 def main():
     grid, surface, pre, grid_pts = build_case()
     span = float((grid_pts.max(0) - grid_pts.min(0)).max())
@@ -168,6 +220,33 @@ def main():
         # «MARKER_SYM not found in mesh».
         for tag, n in after.items():
             check("маркер %s непустой" % tag, n > 0, n)
+
+    # ---------------------------------------------------------------
+    # Обход вершин грани маркера. SU2 берёт из него нормаль, поэтому
+    # грань, записанная внутрь тела, даёт вклад в силу с обратным
+    # знаком. На сгенерированном самолёте таких было 911 из 12367 в
+    # airfoil (7.37%) и 17 в symmetry_xz: завышались и Cl, и Cd
+    # одновременно (Cl=0.739, Cd=0.360, L/D=2.05).
+    print()
+    print("== обход вершин граней маркера ==")
+    _fr = np.asarray(surface.faces).reshape(-1, 4)[:, [0, 2, 1, 3]]
+    flipped = pv.PolyData(surface.points, _fr.reshape(-1))
+    check("в поданной на запись поверхности обход действительно перевёрнут",
+          not np.array_equal(np.asarray(flipped.faces),
+                             np.asarray(surface.faces)))
+    _out = os.path.join(tempfile.mkdtemp(), "mesh.su2")
+    write_su2(grid, flipped, _out, use_symmetry=True,
+              symmetry_planes=["xy"], pre_clip_points=pre)
+    _bad, _tot = outward_violations(_out)
+    check("запись разворачивает обход наружу (внутрь %d из %d граней)"
+          % (_bad, _tot), _bad == 0 and _tot > 0)
+
+    _out2 = os.path.join(tempfile.mkdtemp(), "mesh.su2")
+    write_su2(grid, surface, _out2, use_symmetry=True,
+              symmetry_planes=["xy"], pre_clip_points=pre)
+    _bad2, _tot2 = outward_violations(_out2)
+    check("правильный обход запись не портит (внутрь %d из %d)"
+          % (_bad2, _tot2), _bad2 == 0 and _tot2 == _tot)
 
     print()
     print("Пройдено: %d" % _passed)

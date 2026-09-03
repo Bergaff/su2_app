@@ -646,6 +646,39 @@ def main():
           % (_syapl, _sec3), _syapl > 0.9 * _sec3,
           "%.0f против %.0f" % (_syapl, _sec3))
 
+    # ---------------------------------------------------------------
+    # SU2 берёт нормаль грани маркера из порядка её вершин и больше
+    # ниоткуда. Грань, записанная с обходом внутрь тела, даёт вклад в
+    # силу с обратным знаком, поэтому завышались и Cl, и Cd
+    # одновременно: расчёт самолёта дал Cl=0.739, Cd=0.360 и L/D=2.05,
+    # хотя в невязкой постановке сопротивление замкнутого тела близко к
+    # нулю. Замер показал 911 из 12367 граней airfoil (7.37%) с обходом
+    # внутрь и ещё 17 в symmetry_xz.
+    _Tw = _np.asarray(_t3)
+    _ow = {}
+    for _miss in range(4):
+        _f = _Tw[:, [j for j in range(4) if j != _miss]]
+        _p = _P3[_f]
+        _n = _np.cross(_p[:, 1] - _p[:, 0], _p[:, 2] - _p[:, 0])
+        _fl = _np.einsum('ij,ij->i', _n,
+                         _p.mean(axis=1) - _P3[_Tw[:, _miss]]) < 0.0
+        _f = _np.where(_fl[:, None], _f[:, [0, 2, 1]], _f)
+        for _k, _v in zip(map(tuple, _np.sort(_f, axis=1)), _f):
+            _ow[_k] = _v
+    _inward = 0
+    for _tag, _fs in _mk3.items():
+        for _a, _b, _c in _fs:
+            _v = _ow.get(tuple(sorted((_a, _b, _c))))
+            if _v is None:
+                continue
+            _q = _P3[[_a, _b, _c]]
+            _w = _P3[list(_v)]
+            if _np.dot(_np.cross(_q[1] - _q[0], _q[2] - _q[0]),
+                       _np.cross(_w[1] - _w[0], _w[2] - _w[0])) < 0:
+                _inward += 1
+    check("все грани маркеров записаны с внешним обходом (внутрь %d)"
+          % _inward, _inward == 0)
+
     print()
     print("Пройдено: %d" % _passed)
     if _failed:
