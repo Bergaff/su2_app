@@ -487,9 +487,20 @@ class SU2Worker:
 
     # ------------------------------------------------------------------
     def _result(self, aoa, ok, error_msg="", stopped=False, rms=None):
+        # Порядок схемы записывается в результат: по нему _better_result
+        # выбирает, какой из прогонов точки оставить.
+        second = None
+        if su2_autoconfig is not None:
+            try:
+                v = su2_autoconfig.read_config_values(
+                    os.path.join(self.case_dir, "config.cfg"), ("MUSCL_FLOW",))
+                if v:
+                    second = str(v.get("MUSCL_FLOW", "")).upper().startswith("Y")
+            except Exception:
+                second = None
         return {"aoa": aoa, "cl": 0.0, "cd": 0.0, "cm": 0.0, "rms": rms,
                 "error": (not ok) and (not stopped), "error_msg": error_msg,
-                "stopped": stopped}
+                "stopped": stopped, "second_order": second}
 
     def _tail_text(self, n=12):
         return "\n".join(self._tail[-n:])
@@ -882,6 +893,27 @@ class SessionRunner(QThread):
         невязки нет хотя бы у одного из прогонов, сравнивать нечего и
         остаётся новый результат — прежнее поведение.
         """
+        # Порядок схемы важнее глубины невязки, и проверять его надо раньше.
+        # Первый порядок ВСЕГДА доводит невязку глубже: схемная вязкость гасит
+        # всё подряд. Поэтому сравнение по невязке систематически выбирает
+        # менее точный прогон — так в отчёт и уходил Cd = 0.36 из расчёта
+        # первым порядком, хотя рядом лежал результат вторым порядком.
+        if prev.get("second_order") is True and new.get("second_order") is False:
+            kept = dict(prev)
+            kept["error"] = False
+            kept["error_msg"] = (
+                "Оставлен прогон вторым порядком (log10(rms[Rho])=%s), хотя "
+                "повтор первым порядом сошёлся глубже (%s): у первого порядка "
+                "глубокая невязка не означает точности, а Cd в нём завышен "
+                "схемной вязкостью. Коэффициенты приблизительные."
+                % (prev.get("rms"), new.get("rms")))
+            log_cb("Внимание: повтор шёл первым порядком и сошёлся глубже "
+                   "(log10(rms[Rho])=%s против %s), но оставлен результат "
+                   "второго порядка — он точнее по схеме, а глубокая невязка "
+                   "первого порядка достигается схемной вязкостью."
+                   % (new.get("rms"), prev.get("rms")))
+            return kept
+
         rp, rn = prev.get("rms"), new.get("rms")
         if not isinstance(rp, (int, float)) or not isinstance(rn, (int, float)):
             return new

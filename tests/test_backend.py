@@ -381,7 +381,8 @@ with tempfile.TemporaryDirectory() as td:
     check("ultra: линейный решатель как в базовом конфиге (1e-6)",
           "LINEAR_SOLVER_ERROR= 1e-6" in txt3 and "LINEAR_SOLVER_ITER= 15" in txt3)
     check("ultra: второй порядок MUSCL_FLOW= YES", "MUSCL_FLOW= YES" in txt3)
-    check("ultra: рампа CFL до 50", "( 0.5, 1.2, 0.5, 50.0 )" in txt3)
+    check("ultra: рампа CFL до 5.0, как в базовом конфиге",
+          "( 0.5, 1.2, 0.5, 5.0 )" in txt3)
     check("restore_original", AC.restore_original(cfg) is True)
     check("оригинал восстановлен", "CFL_ADAPT= YES" in
           open(cfg, encoding="utf-8").read())
@@ -445,11 +446,48 @@ with tempfile.TemporaryDirectory() as td:
     _diff = {k: (AC.PRESETS["ultra"][k], _base.get(k))
              for k in AC.PRESETS["ultra"]
              if k in _base and AC.PRESETS["ultra"][k] != _base[k]}
-    check("ultra отличается от базового конфига только потолком CFL",
-          list(_diff) == ["CFL_ADAPT_PARAM"], str(_diff))
+    # Потолок CFL 50.0 проверен прогоном: расходимость на 1128-й итерации,
+    # тогда как база с потолком 5.0 не расходится. Более точной настройки,
+    # которая на этой сетке устойчива, нет — ultra совпадает с базой.
+    check("ultra полностью совпадает с базовым конфигом",
+          _diff == {}, str(_diff))
     check("общие ключи ultra и базового конфига сверены (тест не выродился)",
           len([k for k in AC.PRESETS["ultra"] if k in _base]) >= 10,
           str(len([k for k in AC.PRESETS["ultra"] if k in _base])))
+
+    # Пресет, уже записанный в config.cfg, предлагать бессмысленно.
+    _cfg2 = os.path.join(_case2, "config.cfg")
+    open(_cfg2, "w", encoding="utf-8").write("SOLVER= EULER\n")
+    AC.apply_preset(_cfg2, "ultra")
+    check("match_preset узнаёт ultra по файлу", AC.match_preset(_cfg2) == "ultra")
+    _a3, _p3, _n3 = AC.suggest(_case2, current_preset=None)
+    check("suggest не предлагает уже применённый ultra", _p3 != "ultra",
+          "%s %s" % (_a3, _p3))
+
+    # Выбор результата: порядок схемы важнее глубины невязки. Первый порядок
+    # всегда доводит невязку глубже, и сравнение только по невязке отдавало
+    # в отчёт Cd = 0.36 из первого порядка вместо второго.
+    from solver.workers import SessionRunner as _SR
+    _logs = []
+    _prev = {"rms": -2.20, "second_order": True, "cl": 0.7, "cd": 0.05,
+             "error": True, "error_msg": "", "stopped": True}
+    _new = {"rms": -6.19, "second_order": False, "cl": 0.74, "cd": 0.36,
+            "error": False, "error_msg": "", "stopped": False}
+    _kept = _SR._better_result(_prev, _new, _logs.append)
+    check("второй порядок со слабой невязкой важнее первого с глубокой",
+          _kept.get("second_order") is True and _kept.get("cd") == 0.05,
+          str(_kept.get("cd")))
+    check("оставленный результат помечен как несошедшийся",
+          _kept.get("error") is False and "вторым порядком" in _kept.get("error_msg", ""),
+          _kept.get("error_msg", "")[:70])
+    check("в логе объяснено, почему оставлен второй порядок",
+          any("первым порядком" in m for m in _logs), str(_logs[:1]))
+    _same = _SR._better_result(dict(_prev, second_order=False), _new, _logs.append)
+    check("при равном порядке решает невязка (прежнее поведение)",
+          _same.get("cd") == 0.36, str(_same.get("cd")))
+    _unk = _SR._better_result({"rms": -2.2, "second_order": None}, _new, _logs.append)
+    check("неизвестный порядок схемы не ломает выбор",
+          _unk.get("cd") == 0.36, str(_unk.get("cd")))
 
 # детектор по history.csv
 with tempfile.TemporaryDirectory() as td:

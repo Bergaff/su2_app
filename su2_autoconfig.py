@@ -85,7 +85,11 @@ PRESETS = {
         "NUM_METHOD_GRAD": "WEIGHTED_LEAST_SQUARES",
         "CFL_NUMBER": "1.0",
         "CFL_ADAPT": "YES",
-        "CFL_ADAPT_PARAM": "( 0.5, 1.2, 0.5, 50.0 )",
+        # Потолок 5.0 — как в базовом конфиге. Поднятие до 50.0 проверено
+        # прогоном: расходимость на 1128-й итерации, тогда как база с
+        # потолком 5.0 не расходится вовсе. То есть более точной настройки,
+        # которая на этой сетке устойчива, нет: ultra совпадает с базой.
+        "CFL_ADAPT_PARAM": "( 0.5, 1.2, 0.5, 5.0 )",
         "LINEAR_SOLVER": "FGMRES",
         "LINEAR_SOLVER_PREC": "ILU",
         "LINEAR_SOLVER_ERROR": "1e-6",
@@ -572,6 +576,13 @@ def describe_config_scheme(path):
             f"{tag}. {tail}")
 
 
+def _cfg_file(path):
+    """Путь к config.cfg: принимаем и файл, и каталог кейса."""
+    if os.path.isdir(path):
+        return os.path.join(path, "config.cfg")
+    return path
+
+
 def suggest(path, screen_text=None, current_preset=None):
     """Рекомендация следующего шага: (action, preset|None, текст)."""
     res = detect_result(path, screen_text)
@@ -579,6 +590,12 @@ def suggest(path, screen_text=None, current_preset=None):
     if st == "converged":
         return "none", None, "Расчёт сошёлся - настройки менять не нужно."
     if st in ("diverged", "error", "unknown"):
+        # Пресет, которому config.cfg уже соответствует, предлагать бессмысленно:
+        # перезапуск с теми же числами даст тот же результат и только потеряет
+        # пару минут. ultra сейчас совпадает с базовым конфигом, поэтому на
+        # базовом прогоне он и будет пропущен.
+        if current_preset is None and match_preset(_cfg_file(path)) in PRESETS:
+            current_preset = match_preset(_cfg_file(path))
         if current_preset is None:
             return "apply_preset", "ultra", \
                 "Расчёт не сошёлся. Применён пресет 'ultra' (%s), " \
