@@ -825,7 +825,6 @@ class SessionRunner(QThread):
     paused_signal = pyqtSignal()
     finished_all = pyqtSignal()
     # Автоконфиг: поток расчёта шлёт запрос, диалог показывается в GUI-потоке
-    recovery_signal = pyqtSignal(object)
 
     def __init__(self, session, parent=None):
         super().__init__(parent)
@@ -836,9 +835,6 @@ class SessionRunner(QThread):
         # Автоконфиг
         self._recovery_declined = False   # пользователь отказался — больше не спрашивать
         self._auto_preset = None          # 'safe'|'ultra' — применять ко всем точкам серии
-        self._recovery_mutex = QMutex()
-        self._recovery_cond = QWaitCondition()
-        self._recovery_answer = None
         # Замечание о качестве сетки показывается один раз за сессию.
         # Атрибут обязан жить именно здесь: читает его SessionRunner.run,
         # а не SU2Worker. Когда он по ошибке был объявлен в SU2Worker,
@@ -848,7 +844,6 @@ class SessionRunner(QThread):
         self._mesh_note_shown = False
         # Слот-приёмник живёт в главном потоке (объект QThread создан там),
         # поэтому модальный диалог внутри него безопасен.
-        self.recovery_signal.connect(self._handle_recovery_in_gui)
 
     # ------------------------------------------------------------------
     def request_pause(self):
@@ -897,8 +892,12 @@ class SessionRunner(QThread):
 
     def _recover(self, case_dir, res, log_cb):
         """Вызывается из потока расчёта. Определяет причину провала по
-        history.csv и ждёт ответ из GUI-диалога.
-        Возвращает 'rerun_safe'|'rerun_ultra'|'settings'|'abort'."""
+        history.csv, сам выбирает пресет и пишет всё в лог.
+
+        Модального окна больше нет: выбор детерминированный и идёт по
+        PRESET_ORDER — сначала 'ultra' (второй порядок, CFL с рампой),
+        и только потом 'safe' (первый порядок). Возвращает
+        'rerun_safe'|'rerun_ultra'|'abort'."""
         text = res.get("error_msg", "") or ""
         if su2_autoconfig is None:
             return "abort"
@@ -907,45 +906,19 @@ class SessionRunner(QThread):
             return "abort"
         log_cb(f"Внимание: {det.get('detail', 'Расчёт не сошёлся.')}")
 
-        # Если диалоговый модуль недоступен — безопасный авто-пресет без вопросов
-        if su2_config_dialog is None:
-            try:
-                su2_autoconfig.apply_preset(
-                    os.path.join(case_dir, "config.cfg"), "safe")
-                log_cb("Автоматически применён устойчивый пресет 'safe'.")
-                return "rerun_safe"
-            except Exception as e:
-                log_cb(f"Внимание: Автоконфиг недоступен: {e}")
-                return "abort"
-
-        self._recovery_answer = None
-        self.recovery_signal.emit(
-            {"case_dir": case_dir, "text": text})
-        self._recovery_mutex.lock()
-        if self._recovery_answer is None:
-            self._recovery_cond.wait(self._recovery_mutex, 600000)  # 10 мин на ответ
-        ans = self._recovery_answer
-        self._recovery_mutex.unlock()
-        return ans or "abort"
-
-    def provide_recovery_answer(self, answer):
-        """Вызывается из GUI-потока после выбора пользователя."""
-        self._recovery_mutex.lock()
-        self._recovery_answer = answer
-        self._recovery_cond.wakeAll()
-        self._recovery_mutex.unlock()
-
-    def _handle_recovery_in_gui(self, payload):
-        """Слот в ГЛАВНОМ потоке: здесь можно показывать модальный диалог."""
+        action, preset, note = su2_autoconfig.suggest(
+            case_dir, screen_text=text, current_preset=self._auto_preset)
+        if action != "apply_preset" or preset is None:
+            log_cb(f"Внимание: {note}")
+            return "abort"
         try:
-            if su2_config_dialog is not None:
-                verdict = su2_config_dialog.offer_recovery_after_failure(
-                    None, payload["case_dir"], payload.get("text", ""))
-            else:
-                verdict = "abort"
-        except Exception:
-            verdict = "abort"
-        self.provide_recovery_answer(verdict)
+            su2_autoconfig.apply_preset(
+                os.path.join(case_dir, "config.cfg"), preset)
+        except Exception as e:
+            log_cb(f"Внимание: не удалось применить пресет '{preset}': {e}")
+            return "abort"
+        log_cb(f"Готово: применён пресет '{preset}', перезапускаю точку. {note}")
+        return "rerun_ultra" if preset == "ultra" else "rerun_safe"
 
     # ------------------------------------------------------------------
     def run(self):

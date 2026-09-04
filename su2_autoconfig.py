@@ -41,27 +41,45 @@ import shutil
 # ссылочные величины, поток и т.п. не меняются.
 # ---------------------------------------------------------------------------
 
+# «Быстро» (safe): первый порядок. Считает заметно быстрее и держится на
+# плохой сетке, но схемная вязкость первого порядка велика. Годится, чтобы
+# прикинуть подъёмную силу и отладить сходимость; Cd в этом режиме
+# физического смысла не имеет — сопротивление замкнутого тела в невязкой
+# постановке должно быть близко к нулю, а первый порядок на грубой сетке
+# даёт десятки процентов.
 PRESETS = {
     "safe": {
         "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
-        "CFL_NUMBER": "2.0",
-        "CFL_ADAPT": "NO",
+        "CFL_NUMBER": "5.0",
+        "CFL_ADAPT": "YES",
+        "CFL_ADAPT_PARAM": "( 0.5, 1.5, 1.0, 1000.0, 0.1 )",
         "MUSCL_FLOW": "NO",
         "ENTROPY_FIX_COEFF": "0.1",
-        "NUM_METHOD_GRAD": "WEIGHTED_LEAST_SQUARES",
+        "NUM_METHOD_GRAD": "GREEN_GAUSS",
     },
+    # «Точно» (ultra): второй порядок (MUSCL) с ограничителем. Единственный
+    # режим, в котором Cd стоит читать. CFL стартует низким и растёт —
+    # это и есть рампа: массив CFL_AdaptParam в CConfig.hpp подписан как
+    # «Information about the CFL ramp». Формат (Common/src/CConfig.cpp):
+    # (фактор вниз, фактор вверх, предел CFL мин, предел CFL макс,
+    #  допустимая невязка ЛУ). Ограничения из того же файла: фактор вниз
+    # < 1.0, фактор вверх > 1.0, минимум не больше максимума.
     "ultra": {
         "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
         "CFL_NUMBER": "0.5",
-        "CFL_ADAPT": "NO",
-        "MUSCL_FLOW": "NO",
-        "ENTROPY_FIX_COEFF": "0.2",
+        "CFL_ADAPT": "YES",
+        "CFL_ADAPT_PARAM": "( 0.1, 1.2, 0.5, 100.0, 0.001 )",
+        "MUSCL_FLOW": "YES",
+        "SLOPE_LIMITER_FLOW": "VENKATAKRISHNAN",
+        "VENKAT_LIMITER_COEFF": "0.05",
+        "ENTROPY_FIX_COEFF": "0.0",
         "NUM_METHOD_GRAD": "WEIGHTED_LEAST_SQUARES",
         "LINEAR_SOLVER_ITER": "20",
+        "LINEAR_SOLVER_ERROR": "0.2",
     },
 }
 
-PRESET_ORDER = ["safe", "ultra"]
+PRESET_ORDER = ["ultra", "safe"]
 
 # ВАЖНО: единственный символ комментария в config.cfg у SU2 - это '%'.
 # Знак '#' SU2 комментарием НЕ считает: в CConfig::TokenizeString() строка
@@ -454,19 +472,20 @@ def suggest(path, screen_text=None, current_preset=None):
         return "none", None, "Расчёт сошёлся - настройки менять не нужно."
     if st in ("diverged", "error", "unknown"):
         if current_preset is None:
-            return "apply_preset", "safe", \
-                "Расчёт не сошёлся. Применить устойчивый пресет (CFL 2.0, " \
-                "1-й порядок) и перезапустить?"
+            return "apply_preset", "ultra", \
+                "Расчёт не сошёлся. Применён пресет 'Точно' (второй порядок, " \
+                "CFL 0.5 с рампой до 100) и выполнен перезапуск."
         idx = PRESET_ORDER.index(current_preset) if current_preset in PRESET_ORDER else -1
         if idx < len(PRESET_ORDER) - 1:
             nxt = PRESET_ORDER[idx + 1]
             return "apply_preset", nxt, \
-                f"Пресет '{current_preset}' не помог. Попробовать более " \
-                f"мягкий пресет '{nxt}' (CFL 0.5) и перезапустить?"
+                f"Пресет '{current_preset}' не помог. Применён '{nxt}' " \
+                f"(первый порядок): сойдётся вероятнее, но схемная вязкость " \
+                f"велика и Cd в этом режиме читать нельзя."
         return "abort", None, \
-            "Даже самый мягкий пресет не помог - дело, вероятно, в сетке " \
-            "(качество ячеек у тела). Нужно перегенерировать сетку " \
-            "качеством 'Точная' или проверить геометрию."
+            "Не помог и первый порядок - дело, вероятно, в сетке " \
+            "(качество ячеек у тела). Результата, которому можно верить, " \
+            "нет: нужно перегенерировать сетку или проверить геометрию."
     return "none", None, res["detail"]
 
 

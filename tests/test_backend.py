@@ -362,9 +362,10 @@ with tempfile.TemporaryDirectory() as td:
                 "MUSCL_FLOW= YES\nINNER_ITER= 6000\n")
     out, changes = AC.apply_preset(cfg, "safe")
     txt = open(cfg, encoding="utf-8").read()
-    check("apply_preset safe: CFL_NUMBER= 2.0", "CFL_NUMBER= 2.0" in txt)
-    check("apply_preset safe: CFL_ADAPT= NO", "CFL_ADAPT= NO" in txt)
-    check("apply_preset safe: MUSCL_FLOW= NO", "MUSCL_FLOW= NO" in txt)
+    check("apply_preset safe: CFL_NUMBER= 5.0", "CFL_NUMBER= 5.0" in txt)
+    check("apply_preset safe: CFL_ADAPT= YES", "CFL_ADAPT= YES" in txt)
+    check("apply_preset safe: MUSCL_FLOW= NO (1-й порядок)", "MUSCL_FLOW= NO" in txt)
+    check("apply_preset safe: рампа CFL задана", "CFL_ADAPT_PARAM=" in txt)
     check("apply_preset safe: границы не тронуты",
           "SOLVER= EULER" in txt and "INNER_ITER= 6000" in txt)
     check("бэкап config.cfg.orig создан", os.path.isfile(cfg + ".orig"))
@@ -376,6 +377,8 @@ with tempfile.TemporaryDirectory() as td:
     txt3 = open(cfg, encoding="utf-8").read()
     check("ultra: CFL 0.5 + LINEAR_SOLVER_ITER 20",
           "CFL_NUMBER= 0.5" in txt3 and "LINEAR_SOLVER_ITER= 20" in txt3)
+    check("ultra: второй порядок MUSCL_FLOW= YES", "MUSCL_FLOW= YES" in txt3)
+    check("ultra: рампа CFL до 100", "( 0.1, 1.2, 0.5, 100.0, 0.001 )" in txt3)
     check("restore_original", AC.restore_original(cfg) is True)
     check("оригинал восстановлен", "CFL_ADAPT= YES" in
           open(cfg, encoding="utf-8").read())
@@ -400,8 +403,8 @@ with tempfile.TemporaryDirectory() as td:
     res = AC.detect_result(case)
     check("detect_result: разошёлся", res["status"] == "diverged", str(res))
     action, preset, _ = AC.suggest(case)
-    check("suggest после расхождения → safe", action == "apply_preset"
-          and preset == "safe")
+    check("suggest после расхождения → ultra (сначала точный пресет)",
+          action == "apply_preset" and preset == "ultra")
     res = AC.detect_result(case, screen_text="SU2 has diverged (Residual > 10^20 detected)")
     check("detect_result по тексту экрана", res["status"] == "diverged")
 
@@ -1239,8 +1242,8 @@ with tempfile.TemporaryDirectory() as td:
     # Все ключи пресета уже есть в базовом конфиге, поэтому они правятся
     # на месте и отдельный блок не создаётся (блок нужен только для
     # отсутствующих ключей).
-    check("пресет применён на месте: CFL 2.0 без автоподстройки",
-          "CFL_NUMBER= 2.0" in _txt and "CFL_ADAPT= NO" in _txt
+    check("пресет применён на месте: CFL 5.0 с адаптацией, 1-й порядок",
+          "CFL_NUMBER= 5.0" in _txt and "CFL_ADAPT= YES" in _txt
           and "MUSCL_FLOW= NO" in _txt)
     check("пресет применён на месте: TIME_DISCRE_FLOW= EULER_IMPLICIT",
           "TIME_DISCRE_FLOW= EULER_IMPLICIT" in _txt)

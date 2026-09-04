@@ -905,8 +905,6 @@ class MainWindow(QMainWindow):
         btn_load_lay = QHBoxLayout()
         self.btn_add_import = QPushButton("Импорт")
         self.btn_add_import.clicked.connect(self.load_stl_import)
-        self.btn_add_body = QPushButton("STL")
-        self.btn_add_body.clicked.connect(self.add_bodies)
         self.btn_add_primitive = QPushButton("Примитив")
         menu = QMenu()
         menu.addAction("Куб", lambda: self._create_primitive("Куб"))
@@ -914,7 +912,6 @@ class MainWindow(QMainWindow):
         menu.addAction("Сфера", lambda: self._create_primitive("Сфера"))
         self.btn_add_primitive.setMenu(menu)
         btn_load_lay.addWidget(self.btn_add_import)
-        btn_load_lay.addWidget(self.btn_add_body)
         btn_load_lay.addWidget(self.btn_add_primitive)
         lay3.addLayout(btn_load_lay)
         simplify_layout = QHBoxLayout()
@@ -1216,6 +1213,39 @@ class MainWindow(QMainWindow):
         q_lay.addRow("Качество:", self.combo_mesh_quality)
         q_lay.addRow("Инфо:", self.lbl_mesh_info)
         lay8.addWidget(q_group)
+
+        # === T1-визуал: Плоскости симметрии (XY/XZ/YZ) ================
+        sym_group = QGroupBox("Плоскости симметрии")
+        sym_lay = QVBoxLayout(sym_group)
+        sym_info = QLabel(
+            "Плоскости рисуются в 3D-окне. Добавленная плоскость — это и\n"
+            "есть включённая симметрия: сетка обрежется по ней, и SU2\n"
+            "посчитает только половину модели. Плоскость нужно добавить\n"
+            "ДО построения сетки, иначе резка не выполнится."
+        )
+        sym_info.setStyleSheet("color: #4A4A4A; font-size: 10px;")
+        sym_lay.addWidget(sym_info)
+
+        # Кнопки добавления
+        sym_btns = QHBoxLayout()
+        for plane in ("xy", "xz", "yz"):
+            btn = QPushButton(f"＋ {plane.upper()}")
+            btn.setToolTip(f"Добавить плоскость {plane.upper()} (через начало координат)")
+            btn.clicked.connect(lambda checked=False, p=plane: self._add_symmetry_plane(p))
+            sym_btns.addWidget(btn)
+        sym_btns.addStretch()
+        sym_lay.addLayout(sym_btns)
+
+        # Список плоскостей с кнопками удаления
+        self.sym_list_layout = QVBoxLayout()
+        self.sym_list_layout.setSpacing(2)
+        sym_lay.addLayout(self.sym_list_layout)
+        # Список плоскостей в виде списка словарей:
+        # [{"axis": "xy", "enabled": True, "actor": ...}, ...]
+        self._symmetry_planes = []
+        lay8.addWidget(sym_group)
+        # ================================================================
+
         self.btn_make_mesh = QPushButton("Построить расчётную сетку")
         self.btn_make_mesh.clicked.connect(self.make_mesh_from_bodies)
         lay8.addWidget(self.btn_make_mesh)
@@ -1400,37 +1430,6 @@ class MainWindow(QMainWindow):
         perf_lay.addRow(opts_lay)
         # =================================================================
 
-        # === T1-визуал: Плоскости симметрии (XY/XZ/YZ) ================
-        sym_group = QGroupBox("Плоскости симметрии")
-        sym_lay = QVBoxLayout(sym_group)
-        sym_info = QLabel(
-            "Плоскости рисуются в 3D-окне. Добавленная плоскость — это и\n"
-            "есть включённая симметрия: сетка обрежется по ней, и SU2\n"
-            "посчитает только половину модели. Плоскость нужно добавить\n"
-            "ДО построения сетки, иначе резка не выполнится."
-        )
-        sym_info.setStyleSheet("color: #4A4A4A; font-size: 10px;")
-        sym_lay.addWidget(sym_info)
-
-        # Кнопки добавления
-        sym_btns = QHBoxLayout()
-        for plane in ("xy", "xz", "yz"):
-            btn = QPushButton(f"＋ {plane.upper()}")
-            btn.setToolTip(f"Добавить плоскость {plane.upper()} (через начало координат)")
-            btn.clicked.connect(lambda checked=False, p=plane: self._add_symmetry_plane(p))
-            sym_btns.addWidget(btn)
-        sym_btns.addStretch()
-        sym_lay.addLayout(sym_btns)
-
-        # Список плоскостей с кнопками удаления
-        self.sym_list_layout = QVBoxLayout()
-        self.sym_list_layout.setSpacing(2)
-        sym_lay.addLayout(self.sym_list_layout)
-        # Список плоскостей в виде списка словарей:
-        # [{"axis": "xy", "enabled": True, "actor": ...}, ...]
-        self._symmetry_planes = []
-        lay8.addWidget(sym_group)
-        # ================================================================
 
         # Кнопка применения + индикатор
         cores_apply_lay = QHBoxLayout()
