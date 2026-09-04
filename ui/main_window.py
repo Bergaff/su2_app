@@ -83,7 +83,7 @@ from mesh.gmsh_generator import generate_mesh_impl
 from mesh.mesh_worker import MeshWorker, MeshAdaptWorker
 from solver.workers import (
     SU2Worker, SweepWorker, OptimizationWorker, SessionRunner,
-    hidden_subprocess_kwargs, _mesh_npoin,
+    OfficialCaseRunWorker, hidden_subprocess_kwargs, _mesh_npoin,
 )
 from solver.session import CalculationSession
 
@@ -3752,48 +3752,65 @@ class MainWindow(QMainWindow):
                 f"маркеры: {list(surf.get('markers') or {})}")
         self.update_flow_arrow()
 
+    def _start_official_run(self, case, case_dir):
+        """Запускает подготовленный официальный кейс в фоне (один клик)."""
+        compute_device = getattr(self, "_compute_device_pending", "cpu")
+        gpu_percent = int(getattr(self, "_gpu_percent_pending", 0) or 0)
+        cpu_cores = 1
+        sess = getattr(self, "session", None)
+        if sess is not None:
+            cpu_cores = int(getattr(sess, "cpu_cores", 1) or 1)
+        worker = OfficialCaseRunWorker(
+            case_dir, cpu_cores=cpu_cores,
+            compute_device=compute_device, gpu_percent=gpu_percent,
+            case_name=case.name, ref_cl=case.ref_cl, ref_cd=case.ref_cd,
+            parent=self,
+        )
+        worker.log_signal.connect(self.log_text.append)
+        worker.finished_signal.connect(self._on_official_run_finished)
+        self._official_workers = getattr(self, "_official_workers", [])
+        self._official_workers.append(worker)
+        self.log_text.append(
+            f"Внимание: запускаю официальный кейс «{case.name}» напрямую "
+            f"(его эталонная сетка SU2). Это {case.solver}-расчёт по "
+            f"официальному config.cfg.")
+        worker.start()
+
+    def _on_official_run_finished(self, ok, message):
+        self.log_text.append(message)
+        QMessageBox.information(
+            self, "Официальный кейс",
+            message if ok else f"Не удалось выполнить официальный кейс.\n\n{message}")
+
     def _prepare_official_case_run(self, case, case_id, markers):
-        """Готовит официальный кейс к прямому запуску SU2.
+        """Готовит официальный кейс к запуску и запускает его (один клик).
 
         Официальные сетки SU2 — это уже построенные телооблегающие объёмные
         меши (крыло/профиль + дальнее поле + симметрия). Они НЕ являются
         замкнутыми телами, поэтому телооблекающую сетку заново из них не
         построить — только ступеньку, на которой SU2 расходится. Вместо
-        этого кладём сетку+конфиг кейса как есть (это и есть эталонная
-        сетка) и объясняем, как её запустить.
+        этого кейс запускается как есть по официальным сетке и config.cfg
+        (это и есть эталонная сетка), а пользователь получает эталонные Cl/Cd.
         """
         import os
         out_dir = os.path.join(WORK_DIR_BASE, f"_official_{case_id}")
         try:
-            res = official_cases.prepare_case_dir(case_id, out_dir, download=True)
+            official_cases.prepare_case_run_dir(case_id, out_dir)
         except Exception as e:
             self.log_text.append(
                 f"Ошибка: не удалось подготовить официальный кейс "
                 f"«{case.name}»: {e}")
             QMessageBox.critical(
                 self, "Официальная геометрия",
-                f"Не удалось подготовить официальный кейс «{case.name}».\\n\\n"
+                f"Не удалось подготовить официальный кейс «{case.name}».\n\n"
                 f"{type(e).__name__}: {e}")
             return
-        mesh_in = res.get("mesh_in_dir")
-        cfg = res.get("config")
         self.log_text.append(
-            f"Внимание: «{case.name}» — эталонная сетка SU2, а не замкнутое "
-            f"тело, поэтому повторно облечь её сеткой нельзя (получилась бы "
-            f"ступенька и мусорные Cl/Cd). Подготовлен готовый к запуску "
-            f"кейс: {cfg}" + (f" (сетка: {mesh_in})" if mesh_in else ""))
-        QMessageBox.information(
-            self, "Официальная геометрия",
-            f"«{case.name}» — это официальная объёмная сетка SU2 "
-            f"(крыло/профиль с дальним полем и симметрией), а не замкнутое "
-            f"тело. Поверхность крыла открыта (нет торцевых/корневых крышек), "
-            f"профиль — плоский контур.\\n\\n"
-            f"Телооблекающую сетку заново построить нельзя — получилась бы "
-            f"ступенчатая, и расчёт разошёлся бы.\\n\\n"
-            f"Вместо этого подготовлен готовый к расчёту каталог:\\n  {out_dir}\\n"
-            f"В нём лежат эталонная сетка и официальный config.cfg. Запустите "
-            f"его напрямую в SU2_CFD, чтобы получить эталонные Cl/Cd "
-            f"(или сравните свой конфиг с официальным в диалоге настроек).")
+            f"Внимание: «{case.name}» — официальная объёмная сетка SU2, а не "
+            f"замкнутое тело. Повторно облечь её сеткой нельзя (получилась бы "
+            f"ступенька и мусорные Cl/Cd), поэтому кейс запускается как есть: "
+            f"эталонная сетка + официальный config.cfg.")
+        self._start_official_run(case, out_dir)
 
     # =============================================================
     # ТАБЛИЦА ТЕЛ

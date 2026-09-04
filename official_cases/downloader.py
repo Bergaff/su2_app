@@ -150,6 +150,31 @@ def prepare_case_dir(case_id: str, out_dir: str,
     }
 
 
+def prepare_case_run_dir(case_id: str, out_dir: str) -> dict:
+    """Готовит каталог, совместимый с ``SU2Worker`` (mesh.su2 + config.cfg).
+
+    В отличие от :func:`prepare_case_dir`, сетка кладётся под именем
+    ``mesh.su2`` (его ждёт ``SU2Worker.run``), а ``MESH_FILENAME`` в конфиге
+    переписывается на ``mesh.su2``. Возвращает ``{"case_dir": ..., "config":
+    ..., "mesh": ...}``.
+    """
+    case = get_case(case_id)
+    os.makedirs(out_dir, exist_ok=True)
+    target = download_mesh(case_id)
+    mesh_in_dir = os.path.join(out_dir, "mesh.su2")
+    shutil.copy2(target, mesh_in_dir)
+    text = rewrite_mesh_filename(bundled_config_text(case.config_file), "mesh.su2")
+    cfg_out = os.path.join(out_dir, "config.cfg")
+    with open(cfg_out, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    return {
+        "case_id": case_id,
+        "case_dir": out_dir,
+        "config": cfg_out,
+        "mesh": mesh_in_dir,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Информационная справка (без выхода в сеть)
 # ---------------------------------------------------------------------------

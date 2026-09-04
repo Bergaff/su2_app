@@ -62,6 +62,7 @@ from .downloader import (
     is_downloaded,
     download_mesh,
     prepare_case_dir,
+    prepare_case_run_dir,
     meshes_report,
 )
 from .loader import (
@@ -95,6 +96,7 @@ __all__ = [
     "is_downloaded",
     "download_mesh",
     "prepare_case_dir",
+    "prepare_case_run_dir",
     "meshes_report",
     "load_text",
     "parse_keys",

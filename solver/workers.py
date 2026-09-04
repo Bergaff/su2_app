@@ -1393,3 +1393,72 @@ class OptimizationWorker(QThread):
             self.log_signal.emit(f"Оптимизация завершена за {dt:.0f} сек. "
                                  f"Лучший K={best.get('k_weighted', 0):.2f}")
         self.opt_finished.emit(best if best_score > -1e17 else None)
+
+
+# ---------------------------------------------------------------------------
+# OfficialCaseRunWorker — одиночный «официальный кейс SU2» одним нажатием
+# ---------------------------------------------------------------------------
+class OfficialCaseRunWorker(QThread):
+    """Запускает готовый официальный кейс SU2 (эталонные сетка+config).
+
+    Подготавливается заранее через ``official_cases.prepare_case_run_dir``
+    (каталог с ``mesh.su2`` и ``config.cfg``), а здесь только исполняется
+    через ``SU2Worker`` — тот же механизм, что и обычная расчётная точка.
+    По завершении сравнивает полученные Cl/Cd с эталонными значениями из
+    регрессии SU2 (``ref_cl``/``ref_cd``).
+    """
+
+    log_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(int, str)
+    finished_signal = pyqtSignal(bool, str)
+
+    def __init__(self, case_dir, cpu_cores=1, compute_device="cpu",
+                 gpu_percent=0, case_name="", ref_cl=None, ref_cd=None,
+                 parent=None):
+        super().__init__(parent)
+        self.case_dir = case_dir
+        self.cpu_cores = max(1, int(cpu_cores or 1))
+        self.compute_device = str(compute_device or "cpu")
+        self.gpu_percent = int(gpu_percent or 0)
+        self.case_name = case_name or os.path.basename(case_dir)
+        self.ref_cl = ref_cl
+        self.ref_cd = ref_cd
+
+    def run(self):
+        worker = SU2Worker(
+            self.case_dir, self.cpu_cores,
+            log_cb=lambda m: self.log_signal.emit(m),
+            progress_cb=lambda p: self.progress_signal.emit(int(p), "Расчёт"),
+            compute_device=self.compute_device,
+            gpu_percent=self.gpu_percent,
+        )
+        try:
+            res = worker.run(0.0)
+        except Exception as e:                      # pragma: no cover
+            self.finished_signal.emit(False, f"Ошибка запуска официального "
+                                             f"кейса: {e}")
+            return
+        if res.get("error"):
+            msg = res.get("error_msg") or f"расчёт не сошёлся ({res.get('rms')})"
+            self.finished_signal.emit(
+                False, f"«{self.case_name}»: {msg}")
+            return
+        cl = float(res.get("cl", 0.0) or 0.0)
+        cd = float(res.get("cd", 0.0) or 0.0)
+        cm = float(res.get("cm", 0.0) or 0.0)
+        lines = [
+            f"Готово: официальный кейс «{self.case_name}»: "
+            f"CL={cl:.5f}, CD={cd:.5f}, CM={cm:.5f}.",
+        ]
+        if self.ref_cl is not None or self.ref_cd is not None:
+            lines.append("Эталон (регрессия SU2):")
+            if self.ref_cl is not None:
+                dev = abs(cl - self.ref_cl) / max(abs(self.ref_cl), 1e-9) * 100
+                lines.append(f"  CL={self.ref_cl:.5f} (отклонение {dev:.1f}%)")
+            if self.ref_cd is not None:
+                dev = abs(cd - self.ref_cd) / max(abs(self.ref_cd), 1e-9) * 100
+                lines.append(f"  CD={self.ref_cd:.5f} (отклонение {dev:.1f}%)")
+        else:
+            lines.append("Эталонные значения для этого кейса не заданы.")
+        self.log_signal.emit("\n".join(lines))
+        self.finished_signal.emit(True, "\n".join(lines))

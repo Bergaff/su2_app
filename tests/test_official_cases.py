@@ -38,7 +38,9 @@ from official_cases import (
     read_su2_boundary,
     is_manifold_closed,
 )
-from official_cases.downloader import fetch_remote, download_mesh, meshes_dir
+from official_cases.downloader import (
+    fetch_remote, download_mesh, meshes_dir, prepare_case_run_dir,
+)
 
 # Ожидаемые id в реестре
 EXPECTED_IDS = {
@@ -330,6 +332,28 @@ def test_download_mesh_caches():
     _ok("download_mesh(): кэширует сетку в meshes/")
 
 
+def test_prepare_case_run_dir():
+    """prepare_case_run_dir собирает SU2Worker-совместимый кейс (mesh.su2)."""
+    import os
+    import tempfile
+    import official_cases.downloader as _DL
+    from unittest import mock
+    out = tempfile.mkdtemp(prefix="oc_run_")
+    # Подменяем сетку на маленький файл, чтобы не качать и не зависеть от сети.
+    fake_mesh = os.path.join(tempfile.mkdtemp(prefix="oc_fakemesh_"), "m.su2")
+    with open(fake_mesh, "w", encoding="utf-8") as f:
+        f.write("NDIME= 3\nNPOIN= 1\n0 0 0\n")
+    with mock.patch.object(_DL, "download_mesh", return_value=fake_mesh):
+        res = prepare_case_run_dir("inv_naca0012", out)
+    assert os.path.exists(res["config"])
+    assert os.path.basename(res["mesh"]) == "mesh.su2", res["mesh"]
+    assert os.path.exists(res["mesh"])
+    with open(res["config"], encoding="utf-8") as f:
+        txt = f.read()
+    assert "MESH_FILENAME= mesh.su2" in txt, txt
+    _ok("prepare_case_run_dir() кладёт mesh.su2 + config.cfg (MESH_FILENAME=mesh.su2)")
+
+
 def test_is_manifold_closed():
     # Замкнутый тетраэдр из 4 треугольников — замкнут.
     closed = [(0, 1, 2), (0, 2, 3), (0, 3, 1), (1, 3, 2)]
@@ -388,4 +412,5 @@ if __name__ == "__main__":
     test_downloader_avoids_rate_limit_via_raw()
     test_downloader_fallback_to_api()
     test_download_mesh_caches()
+    test_prepare_case_run_dir()
     print("== OK ==")
