@@ -173,22 +173,34 @@ def _boundary_faces(tets):
 
 
 def _faces_on_body(points, tets, body_pts, tol):
-    """Индексы граничных граней, лежащих на поверхности тела.
+    """Индексы граней тетраэдров, лежащих НА поверхности тела.
 
-    Грань считается находящейся на теле, если все три её вершины лежат в
-    пределах ``tol`` от поверхности тела (cKDTree по вершинам тела).
-    Возвращает массив троек индексов узлов и их число.
+    Ищем по ВСЕМ уникальным граням, а не только по граничным (count==1):
+    gmsh ``mesh.embed`` встраивает поверхность тела в объём, и такая грань
+    используется И внутренним (внутри тела) и наружным тетраэдром — она
+    встречается дважды и в ``_boundary_faces`` (грани, встречающиеся ровно
+    один раз) не попадает. Правильный признак — геометрический: все три
+    вершины грани лежат в пределах ``tol`` от поверхности тела.
+
+    Возвращает массив троек индексов узлов (сортированных).
     """
-    if not HAS_SCIPY or len(body_pts) == 0:
+    if not HAS_SCIPY or len(body_pts) == 0 or len(tets) == 0:
+        return np.zeros((0, 3), dtype=np.int64)
+    t = np.asarray(tets, dtype=np.int64)
+    flat = np.sort(np.stack([
+        t[:, [0, 1, 2]],
+        t[:, [1, 2, 3]],
+        t[:, [0, 2, 3]],
+        t[:, [0, 1, 3]],
+    ], axis=1).reshape(-1, 3), axis=1)
+    uniq = np.unique(flat, axis=0)
+    if len(uniq) == 0:
         return np.zeros((0, 3), dtype=np.int64)
     tree = cKDTree(np.asarray(body_pts, dtype=float))
-    bface = _boundary_faces(tets)
-    if len(bface) == 0:
-        return np.zeros((0, 3), dtype=np.int64)
-    d, _ = tree.query(np.asarray(points, dtype=float)[np.asarray(bface).ravel()])
-    d = d.reshape(len(bface), 3)
+    d, _ = tree.query(np.asarray(points, dtype=float)[uniq.ravel()])
+    d = d.reshape(len(uniq), 3)
     on_body = (d.max(axis=1) <= tol)
-    return np.asarray(bface[on_body], dtype=np.int64)
+    return np.asarray(uniq[on_body], dtype=np.int64)
 
 
 def _load_bodyfit_tetgen():
@@ -524,6 +536,18 @@ def _gmsh_mesh(stl_path, body_pts, body_faces, bounds,
                            tets_new]).ravel()
         ctypes = np.full(len(tets_new), pv.CellType.TETRA, dtype=np.uint8)
         grid = pv.UnstructuredGrid(cells, ctypes, points_new)
+
+        # Грани тела в координатах НАРУЖНОЙ сетки (входные индексы body_keys
+        # — полной сетки, а dict потребляют в индексах наружной части).
+        ext_bnd = _boundary_faces(tets_new)
+        ext_bnd_set = {tuple(int(x) for x in r) for r in ext_bnd}
+        body_keys_final = []
+        for row in body_keys:
+            r = tuple(sorted(int(remap[x]) for x in row))
+            if all(v >= 0 for v in r) and r in ext_bnd_set:
+                body_keys_final.append(r)
+        body_keys = np.asarray(body_keys_final, dtype=np.int64) \
+            if body_keys_final else np.zeros((0, 3), dtype=np.int64)
 
         # Покрытие: доля входных граней тела, попавших на границу наружной
         # сетки (для gmsh — покрытие, т.к. поверхность могла перестроиться).
