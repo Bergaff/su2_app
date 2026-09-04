@@ -150,11 +150,79 @@ def test_collect_airfoil_facets_uses_vmap():
           f"old_marker={len(old_marker)}")
 
 
+def test_make_graded_axis():
+    """Ось: монотонна, покрывает [lo, hi], мелкая в центре, крупная по краям."""
+    m = _load_bodyfit()
+    ax = m.make_graded_axis(-33.0, 33.0, -11.0, 11.0, 0.135, 5.5)
+    check("graded_axis монотонна", np.all(np.diff(ax) > 0))
+    check("graded_axis покрывает диапазон", ax[0] <= -33.0 + 1e-9 and ax[-1] >= 33.0 - 1e-9)
+    # Шаг в центре (_мелкий_) меньше шага на краях (_крупный_).
+    n = len(ax)
+    mid = np.diff(ax)[n // 2 - 3: n // 2 + 3]
+    edge = np.diff(ax)[:3]
+    check("в центре шаг мельче, чем на краях",
+          float(mid.min()) < float(edge.max()),
+          f"mid={mid.min():.4f}, edge={edge.max():.4f}")
+
+
+def test_size_field_for_points():
+    """Размер: h_near у поверхности, h_far вдали, монотонный без скачка."""
+    m = _load_bodyfit()
+    # Точка «тела» в начале координат.
+    body_pts = np.array([[0.0, 0, 0], [1.0, 0, 0], [0.0, 1, 0]], dtype=float)
+    h_near, h_far, L = 0.1, 6.0, 20.0
+    pts = np.array([
+        [0.0, 0, 0.0],    # на поверхности -> h_near
+        [0.0, 0, 5.0],    # в переходе
+        [0.0, 0, 30.0],   # за L -> h_far
+    ], dtype=float)
+    h = m.size_field_for_points(pts, body_pts, h_near, h_far, L)
+    check("у поверхности размер ~h_near", abs(h[0] - h_near) < 1e-9, str(h))
+    check("вдали размер ~h_far", abs(h[2] - h_far) < 1e-9, str(h))
+    check("размер монотонно растёт с расстоянием", h[0] < h[1] < h[2], str(h))
+    check("размер всегда в [h_near, h_far]", h.min() >= h_near and h.max() <= h_far)
+
+
+def test_size_field_h_far_no_less_than_near():
+    """Если h_far <= h_near — поле вырождается в константу (нет скачка)."""
+    m = _load_bodyfit()
+    body_pts = np.array([[0.0, 0, 0]], dtype=float)
+    h = m.size_field_for_points([[0.0, 0, 0], [0.0, 0, 50.0]],
+                                body_pts, 0.1, 0.1, 20.0)
+    check("h_far<=h_near -> размер константен", np.all(np.abs(h - 0.1) < 1e-9), str(h))
+
+
+def test_bg_grid_ordering():
+    """Фоновая сетка: порядок точек = мировой C-порядок, 6 тетов на гекс,
+    target_size не разъезжается с точками."""
+    m = _load_bodyfit()
+    axes = [np.array([0.0, 1.0]), np.array([0.0, 1.0]), np.array([0.0, 1.0])]
+    pts = m._structured_grid_pts(axes)
+    check("решётка 2x2x2 = 8 точек", pts.shape == (8, 3), str(pts.shape))
+    check("порядок точек: первая в начале координат", np.allclose(pts[0], [0, 0, 0]))
+    check("порядок точек: последняя в противоположном углу",
+          np.allclose(pts[-1], [1, 1, 1]))
+    tets = m._structured_tet_cells(axes)
+    check("на 1 гекс — 6 тетраэдров", tets.shape[0] == 6, str(tets.shape))
+    check("индексы тетов в пределах числа точек",
+          tets.min() >= 0 and tets.max() < len(pts))
+    # target_size выровнен по порядку точек (тест на смещение поля).
+    sizes = m.size_field_for_points(pts, np.array([[0.0, 0, 0]]), 0.1, 6.0, 20.0)
+    check("target_size той же длины, что и точки",
+          len(sizes) == len(pts))
+    check("у ближней точки размер ~h_near", abs(sizes[0] - 0.1) < 1e-9)
+    check("вдали размер больше, чем у тела", sizes[-1] > sizes[0])
+
+
 if __name__ == "__main__":
     print("== test_bodyfit_tetgen ==")
     test_classify_exterior_blocks_body_faces()
     test_classify_exterior_no_seed_all_inside()
     test_four_face_keys()
     test_collect_airfoil_facets_uses_vmap()
+    test_make_graded_axis()
+    test_size_field_for_points()
+    test_size_field_h_far_no_less_than_near()
+    test_bg_grid_ordering()
     print("== " + ("OK" if not FAIL else f"FAIL {len(FAIL)}") + " ==")
     sys.exit(1 if FAIL else 0)

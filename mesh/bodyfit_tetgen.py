@@ -51,6 +51,18 @@ vmap) почти 100%. Если же поверхность дырявая, за
 на границу: меньше `min_recovery` — возвращается None и честное сообщение
 о дырявой поверхности.
 
+Поле размера (mesh sizing function)
+-----------------------------------
+Помимо правильного вырезания внутренности, сетка должна быть **конформна
+полю размера**: у тела ячейки мелкие (~`target_edge`), к коробу — плавный
+рост до `extent/12`. Изотропное поле задаётся через TetGen `-m` и фоновую
+сетку с `target_size` в узлах (`build_size_field_background`). Без него ячейки
+у тела (~0.1 м) и у короба (~6 м) разделены резким скачком — растянутые
+тетраэдры взрываются на 2-м порядке (замерено: `Residual > 10^20` на полном
+самолёте). Поле уменьшает этот контраст до плавного роста. Если TetGen не
+поддерживает `bgmesh` или фоновая сетка не строится, путь тихо падает на
+прежний вызов без поля — сетка остаётся облегающей, просто грубее.
+
 Если TetGen или движок булевых операций недоступны, функция возвращает
 None, и вызывающий код остаётся на прежнем картезианском пути.
 """
@@ -303,11 +315,252 @@ def box_surface(bounds, h_box):
             np.ascontiguousarray(faces, dtype=np.int64))
 
 
+# ---------------------------------------------------------------------------
+# Поле размера (mesh sizing function) для TetGen (-m + .mtr / bgmesh)
+# ---------------------------------------------------------------------------
+# Максимум узлов фоновой сетки поля размера. Поле лог-линейное (гладкое),
+# поэтому фон нужен только как решётка для линейной интерполяции TetGen —
+# сгущать до размера ячеек у тела не требуется: их размер задаёт входная
+# поверхность (ключ Y её не дробит), а поле лишь сглаживает переход к
+# дальнему полю. Скачок «0.1 м у тела -> 6 м у короба» без промежуточных
+# ячеек и вызывал расходимость 2-го порядка. Умеренный фон ускоряет сборку
+# и не съедает память.
+MAX_BG_NODES = 60_000
+
+
+def make_graded_axis(lo, hi, inner_lo, inner_hi, h_near, h_far):
+    """Ось с мелким шагом ``h_near`` в зоне [inner_lo, inner_hi] и крупным
+    ``h_far`` за её пределами. Возвращает монотонный набор координат.
+
+    Это та же кластеризация, что и у картезианского пути в gmsh_generator:
+    вокруг тела густо, к границе области — реже и плавно (без одного
+    гигантского скачка). Нужна, чтобы фоновая сетка поля размера имела узлы
+    там, где размер ячеек меняется быстрее всего, — у самой поверхности.
+    """
+    lo, hi = float(lo), float(hi)
+    inner_lo = max(lo, float(inner_lo))
+    inner_hi = min(hi, float(inner_hi))
+    if inner_hi <= inner_lo:
+        inner_lo = inner_hi = 0.5 * (lo + hi)
+    h_near = max(float(h_near), 1e-9)
+    h_far = max(float(h_far), h_near)
+
+    n_in = max(1, int(round((inner_hi - inner_lo) / h_near)))
+    inner = np.linspace(inner_lo, inner_hi, n_in + 1)
+
+    left = np.array([inner_lo])
+    if inner_lo > lo + 1e-9:
+        n_left = max(1, int(np.ceil((inner_lo - lo) / h_far)))
+        left = np.linspace(lo, inner_lo, n_left + 1)
+
+    right = np.array([inner_hi])
+    if hi > inner_hi + 1e-9:
+        n_right = max(1, int(np.ceil((hi - inner_hi) / h_far)))
+        right = np.linspace(inner_hi, hi, n_right + 1)
+
+    return np.unique(np.concatenate([left, inner[1:], right[1:]]))
+
+
+def _nearest_distances(pts, body_pts):
+    """Расстояние от каждой точки ``pts`` до ближайшей вершины поверхности тела."""
+    pts = np.asarray(pts, dtype=float)
+    body_pts = np.asarray(body_pts, dtype=float)
+    if HAS_SCIPY:
+        return cKDTree(body_pts).query(pts, k=1)[0].ravel()
+    # Запасной вариант для малых выборок (тесты без scipy).
+    d = np.sqrt(((pts[:, None, :] - body_pts[None, :, :]) ** 2).sum(-1))
+    return d.min(axis=1)
+
+
+def size_field_for_points(points, body_pts, h_near, h_far, L):
+    """Целевая длина ребра в точках ``points`` по расстоянию до тела.
+
+    У поверхности ``h_near``, при расстоянии >= ``L`` — ``h_far``, а между
+    ними — гладкая геометрическая интерполяция (постоянный логарифмический
+    рост). Важно, что рост монотонный и без скачка: именно скачок «мелко у
+    тела -> крупно у короба» давал растянутые ячейки, которые взрывались на
+    2-м порядке.
+
+    ``L`` — расстояние, на котором размер достигает ``h_far`` (обычно 2-3
+    габарита модели). Возвращает массив размера ``len(points)``.
+    """
+    d = _nearest_distances(points, body_pts)
+    h_near = max(float(h_near), 1e-9)
+    h_far = max(float(h_far), h_near)
+    L = max(float(L), 1e-9)
+    t = np.clip(d / L, 0.0, 1.0)
+    h = h_near * (h_far / h_near) ** t
+    return np.clip(h, h_near, h_far)
+
+
+def build_size_field_background(bounds, body_min, body_max, body_pts,
+                                h_near, h_far, log=print):
+    """Тетраэдральная фоновая сетка ``target_size`` для ``-m`` TetGen.
+
+    Сетка покрывает весь расчётный короб (``bounds``), узлы сгущены к телу
+    (шаг ``h_near``) и разрежены вдали (``h_far``); в каждом узле лежит
+    целевая длина ребра из :func:`size_field_for_points`. TetGen линейно
+    интерполирует это поле и строит объёмные ячейки, конформные ему.
+
+    Возвращает ``pyvista.UnstructuredGrid`` (тетраэдры) или ``None``, если
+    построить нельзя (нет pyvista/scipy либо слишком многo узлов).
+    """
+    if not HAS_PYVISTA or not HAS_SCIPY:
+        log("   Внимание: для поля размера нужны pyvista и scipy — пропускаю.")
+        return None
+    x0, x1, y0, y1, z0, z1 = [float(b) for b in bounds]
+    h_near = max(float(h_near), 1e-9)
+    h_far = max(float(h_far), h_near)
+    if h_far <= h_near * 1.05:
+        # Поле не даст выигрыша: весь домен одного масштаба.
+        return None
+
+    bmin = np.asarray(body_min, dtype=float) - 2.0 * h_near
+    bmax = np.asarray(body_max, dtype=float) + 2.0 * h_near
+    orders = [(x0, x1, bmin[0], bmax[0]),
+              (y0, y1, bmin[1], bmax[1]),
+              (z0, z1, bmin[2], bmax[2])]
+
+    # Первый проход; если узлов слишком много — огрубляем шаг у тела.
+    for _ in range(4):
+        axes = [make_graded_axis(lo, hi, ilo, ihi, h_near, h_far)
+                for (lo, hi, ilo, ihi) in orders]
+        n_nodes = int(len(axes[0]) * len(axes[1]) * len(axes[2]))
+        if n_nodes <= MAX_BG_NODES:
+            break
+        h_near = h_near * 1.6
+    else:
+        log("   Внимание: фоновая сетка поля размера слишком велика — "
+            "строю без неё.")
+        return None
+
+    pts = _structured_grid_pts(axes)
+
+    extent = max(x1 - x0, y1 - y0, z1 - z0)
+    span = float(np.max(bmax - bmin))
+    # Расстояние, на котором размер достигает h_far: ~2 габарита тела, но не
+    # больше 0.55 габарита области, чтобы у короба поле уже было крупным и
+    # согласовалось с его триангуляцией.
+    L = max(2.0 * span, 0.05 * extent)
+    L = min(L, 0.55 * extent)
+
+    sizes = size_field_for_points(pts, body_pts, h_near, h_far, L)
+    grid = _hex_to_tets(axes, pts, sizes)
+
+    log("   Фоновая сетка поля размера: %d узлов, шаг у тела %.4f м, "
+        "вдали %.4f м (переход ~%.1f м)"
+        % (int(grid.n_points), h_near, h_far, L))
+    return grid
+
+
+def _structured_grid_pts(axes):
+    """Точки решётки (axes) в C-порядке meshgrid(..., indexing='ij')."""
+    xg, yg, zg = np.meshgrid(axes[0], axes[1], axes[2], indexing="ij")
+    return np.column_stack([xg.ravel(), yg.ravel(), zg.ravel()])
+
+
+def _structured_tet_cells(axes):
+    """Тетраэдры структурированной решётки (axes) — по 6 на гекс.
+
+    Чистая numpy-часть (без pyvista), чтобы её можно было проверить в тестах.
+    Тот же шаблон, что у картезианского пути в gmsh_generator.
+    """
+    nx = max(1, len(axes[0]) - 1)
+    ny = max(1, len(axes[1]) - 1)
+    nz = max(1, len(axes[2]) - 1)
+
+    def idx(i, j, k):
+        return (i * (ny + 1) + j) * (nz + 1) + k
+
+    ii, jj, kk = np.meshgrid(np.arange(nx), np.arange(ny), np.arange(nz),
+                             indexing="ij")
+    corners = np.stack([
+        idx(ii, jj, kk).ravel(),
+        idx(ii + 1, jj, kk).ravel(),
+        idx(ii + 1, jj + 1, kk).ravel(),
+        idx(ii, jj + 1, kk).ravel(),
+        idx(ii, jj, kk + 1).ravel(),
+        idx(ii + 1, jj, kk + 1).ravel(),
+        idx(ii + 1, jj + 1, kk + 1).ravel(),
+        idx(ii, jj + 1, kk + 1).ravel(),
+    ], axis=1)
+
+    pattern = np.array([
+        [0, 1, 2, 6], [0, 2, 3, 6], [0, 5, 1, 6],
+        [0, 4, 5, 6], [0, 3, 7, 6], [0, 7, 4, 6],
+    ], dtype=np.int64)
+    return np.ascontiguousarray(corners[:, pattern].reshape(-1, 4),
+                                dtype=np.int64)
+
+
+def _hex_to_tets(axes, pts, sizes):
+    """Тетраэдральная фоновая сетка из решётки (axes) с point_data['target_size'].
+
+    Строим UnstructuredGrid ВРУЧНУЮ (6 тетов на каждый гекс), а не через
+    ``StructuredGrid.triangulate()``: так порядок точек ровно тот, в котором
+    посчитан ``sizes``, и поле не разъезжается. ``cell_connectivity`` у
+    UnstructuredGrid — ровно 4 числа на тет, что и ожидает TetGen.
+    """
+    tets = _structured_tet_cells(axes)
+    cells = np.hstack([np.full((len(tets), 1), 4, dtype=np.int64),
+                       tets]).ravel()
+    ctypes = np.full(len(tets), pv.CellType.TETRA, dtype=np.uint8)
+    grid = pv.UnstructuredGrid(cells, ctypes, np.asarray(pts, dtype=float))
+    grid.point_data["target_size"] = np.asarray(sizes, dtype=float)
+    return grid
+
+
+def _tetgen_supports_size_field():
+    """True, если обёртка tetgen принимает ``bgmesh`` (поле размера, >= 0.8.0).
+
+    Возвращает False при заведомо старой версии, True — если параметр есть,
+    None — если сигнатуру не удалось прочитать (тогда решает try/except).
+    """
+    try:
+        import inspect
+        sig = inspect.signature(getattr(TetGen, "tetrahedralize"))
+        return "bgmesh" in sig.parameters
+    except Exception:
+        return None
+
+
+def _tetgen_tetrahedralize(tg, switches, bgmesh=None, log=print):
+    """Вызвать TetGen, по возможности с полем размера (``bgmesh`` -> ``-m``).
+
+    Если установленная обёртка ``tetgen`` не принимает ``bgmesh`` (или поле
+    не применилось), падаем на обычный вызов — никакой регрессии.
+    Возвращает True, если поле размера применилось, иначе False.
+    """
+    if bgmesh is not None:
+        supported = _tetgen_supports_size_field()
+        if supported is False:
+            log("   Внимание: установленная версия tetgen не поддерживает "
+                "поле размера (-m, понадобится tetgen >= 0.8.0) — строю без "
+                "него; скачок размера ячеек у тела сохранится.")
+        else:
+            try:
+                # metric=1 -> добавит '-m'; bgmesh -> подставит фоновую сетку.
+                tg.tetrahedralize(order=1, verbose=0, switches=switches,
+                                  bgmesh=bgmesh, metric=1)
+                return True
+            except TypeError:
+                log("   Внимание: установленная версия tetgen не поддерживает "
+                    "поле размера (-m, понадобится tetgen >= 0.8.0) — строю "
+                    "без него; скачок размера ячеек у тела сохранится.")
+            except Exception as e:                                # pragma: no cover
+                log("   Внимание: поле размера не применилось (%s: %s) — "
+                    "строю без него." % (type(e).__name__, e))
+    tg.tetrahedralize(order=1, verbose=0, switches=switches)
+    return False
+
+
 def tetrahedralize_plc(body_pts, body_faces, bounds,
-                       min_ratio=2.0, max_volume=None, h_box=None, log=print):
+                       min_ratio=2.0, max_volume=None, h_box=None,
+                       bgmesh=None, log=print):
     """Триангулировать PLC «тело + короб».
 
     Ключ Y (nobisect) обязателен — без него теряются грани тела.
+    ``bgmesh`` — фоновая сетка поля размера (для ``-m``), см. выше.
     Возвращает (points, tets) или None.
     """
     if not HAS_TETGEN:
@@ -330,7 +583,7 @@ def tetrahedralize_plc(body_pts, body_faces, bounds,
 
     try:
         tg = TetGen(pts, faces)
-        tg.tetrahedralize(order=1, verbose=0, switches=switches)
+        used_field = _tetgen_tetrahedralize(tg, switches, bgmesh, log)
     except Exception as e:
         log("   Внимание: TetGen не смог построить сетку (%s: %s)"
             % (type(e).__name__, e))
@@ -338,8 +591,9 @@ def tetrahedralize_plc(body_pts, body_faces, bounds,
 
     tets = np.asarray(tg.grid.cells).reshape(-1, 5)[:, 1:]
     points = np.asarray(tg.grid.points, dtype=float)
-    log("   Готово: TetGen (%s): %d тетраэдров, %d узлов"
-        % (switches, len(tets), len(points)))
+    _info = " с полем размера (-m)" if used_field else ""
+    log("   Готово: TetGen (%s%s): %d тетраэдров, %d узлов"
+        % (switches, _info, len(tets), len(points)))
     return points, np.ascontiguousarray(tets, dtype=np.int64)
 
 
@@ -563,8 +817,18 @@ def collect_airfoil_facets(points, tets, ext, vmap, body_faces):
 def build_body_fitted_grid(body_meshes, body_min, body_max, margin,
                            min_ratio=2.0, max_volume=None,
                            min_recovery=DEFAULT_MIN_RECOVERY, log=print,
-                           target_edge=None, max_surface_faces=400_000):
+                           target_edge=None, max_surface_faces=400_000,
+                           size_field=True):
     """Построить телообтекающую сетку.
+
+    ``target_edge`` — целевой шаг у тела (приходит из пресета качества).
+    Если задан и ``size_field`` — на всей области включается изотропное поле
+    размера (``-m``): у тела шаг ``target_edge``, к дальнему полю плавный рост
+    до ``extent/12`` (как у поверхности короба). Без поля ячейки у тела были
+    бы ~0.1 м, а у короба ~6 м без промежуточного роста — такие растянутые
+    ячейки взрывались на 2-м порядке.
+
+    Возвращает dict:
 
     Возвращает dict:
         grid         — pyvista.UnstructuredGrid (только наружные тетраэдры)
@@ -610,9 +874,30 @@ def build_body_fitted_grid(body_meshes, body_min, body_max, margin,
                     "сетка строится по исходной триангуляции" % e)
 
     bounds = farfield_bounds(body_min, body_max, margin)
+
+    # Поле размера (изотропное): мелко у тела, плавный рост к коробу.
+    # Фоновая сетка строится по телу (body_pts) и габаритам области, а
+    # TetGen конформит ей объёмные ячейки. Если не вышло (нет поддержки
+    # bgmesh / слишком густая сетка) — остаёмся на прежнем пути: сетка
+    # строится, просто с резким скачком размера (не хуже, чем сейчас).
+    bgmesh = None
+    if size_field and target_edge and target_edge > 0:
+        _extent = max(bounds[1] - bounds[0], bounds[3] - bounds[2],
+                      bounds[5] - bounds[4])
+        _h_far = max(_extent / 12.0, float(target_edge))
+        try:
+            bgmesh = build_size_field_background(
+                bounds, body_min, body_max, body_pts,
+                float(target_edge), _h_far, log=log)
+        except Exception as e:                                     # pragma: no cover
+            log("   Внимание: фоновая сетка поля размера не построена (%s) — "
+                "без неё." % e)
+            bgmesh = None
+
     points, tets = tetrahedralize_plc(body_pts, body_faces, bounds,
                                       min_ratio=min_ratio,
-                                      max_volume=max_volume, log=log)
+                                      max_volume=max_volume,
+                                      bgmesh=bgmesh, log=log)
     if points is None or len(tets) == 0:
         return None
 
