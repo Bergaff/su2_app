@@ -1,0 +1,185 @@
+# -*- coding: utf-8 -*-
+"""
+tests/test_official_cases.py — проверки библиотеки официальных кейсов SU2.
+
+Модуль написан stdlib-only (без numpy/Qt/сети), поэтому работает в
+CI-песочнице без тяжёлых зависимостей.
+
+Запуск:
+    python tests/test_official_cases.py
+    (или через pytest)
+"""
+
+import os
+import sys
+
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from official_cases import (
+    OFFICIAL_CASES,
+    list_cases,
+    get_case,
+    find_by_mach,
+    find_by_solver,
+    nearest_for,
+    diagnose,
+    compare_file,
+    render_diagnosis,
+    parse_keys,
+    bundled_config_text,
+    bundled_config_path,
+    mesh_local_path,
+    prepare_case_dir,
+    meshes_report,
+)
+
+# Ожидаемые id в реестре
+EXPECTED_IDS = {
+    "inv_oneram6", "turb_oneram6", "inv_crm",  # 3D крылья / самолёт
+    "inv_naca0012", "turb_naca0012_sa",     # 2D профили (EULER/RANS)
+    "turb_rae2822_sa",
+    "inc_naca0012", "inc_turb_naca0012",    # несжимаемые (малые скорости)
+}
+
+
+def _ok(label):
+    print("  ✅ " + label)
+
+
+def test_catalogue():
+    ids = list_cases()
+    assert EXPECTED_IDS.issubset(set(ids)), (EXPECTED_IDS - set(ids))
+    _ok(f"реестр содержит {len(ids)} кейсов, все id в OFFICIAL_CASES")
+
+    for cid in ids:
+        c = get_case(cid)
+        assert c.id == cid
+        assert c.solver, cid
+        assert c.dimension in (2, 3), cid
+        # Встроенный конфиг существует и в нём есть SOLVER
+        assert os.path.exists(c.config_path), c.config_file
+        text = bundled_config_text(c.config_file)
+        assert "=" in text, c.config_file
+        _ok(f"конфиг {c.config_file!r} присутствует, SOLVER={c.solver}")
+
+
+def test_get_case_unknown():
+    got = False
+    try:
+        get_case("no_such_case")
+    except KeyError:
+        got = True
+    assert got
+    _ok("get_case неизвестного id -> KeyError")
+
+
+def test_find_by():
+    assert find_by_mach(0.84)            # ONERA M6 случаи
+    # Near M=0 incompressible (mach None) cases are never matched.
+    for c in find_by_mach(0.0):
+        assert c.mach is not None
+    assert find_by_solver("INC_RANS")    # несжимаемый кейс
+    assert find_by_solver("INC_EULER")
+    assert find_by_solver("EULER")       # хотя бы один EULER
+    _ok("find_by_mach / find_by_solver работают")
+
+
+def test_nearest_for():
+    # Низкомаховый режим AeroOpt (M≈0.176) должен подтянуть близкий кейс
+    nearest = nearest_for(0.176, "EULER")
+    assert nearest, "не должно быть пусто"
+    # Для типичного низкого числа Маха предпочитаем кейс с Mach поближе
+    assert any(c.mach is not None and abs(c.mach - 0.176) < 0.1
+               for c in nearest)
+    _ok("nearest_for на M=0.176 находит ближайший кейс")
+
+
+def test_loader_helpers():
+    text = "SOLVER= EULER\n% comment\nMESH_FILENAME= mesh.su2\n"
+    cfg = parse_keys(text)
+    assert cfg["SOLVER"] == "EULER"
+    assert cfg["MESH_FILENAME"] == "mesh.su2"
+    assert "COMMENT" not in cfg
+    _ok("parse_keys игнорирует '%' комментарии")
+
+
+def test_diagnose_low_mach_euler():
+    text = (
+        "SOLVER= EULER\n"
+        "MACH_NUMBER= 0.176\n"
+        "AOA= 3.0\n"
+        "REF_AREA= 12.0\n"
+        "CFL_ADAPT= YES\n"
+        "CFL_ADAPT_PARAM= ( 0.5, 1.2, 0.5, 5.0 )\n"
+    )
+    res = diagnose(text)
+    # Режим — сжимаемый низкомаховый
+    assert res["regime"] == "compressible-low-mach", res["regime"]
+    assert res["mach"] == 0.176
+    # Должна появиться запись про «большой Cd» (severity high)
+    highs = [f for f in res["findings"] if f["severity"] == "high"]
+    assert any("источник большого Cd" in f["title"] for f in highs)
+    # Рекомендация — несжимаемый
+    assert res["suggested_solver"] == "INC_EULER", res["suggested_solver"]
+    # Есть дифф с официальным кейсом
+    assert res.get("case_id"), res.get("case_id")
+    assert isinstance(res["diff"], list)
+    _ok("diagnose() для низкомахового EULER даёт high-замечание и INC_EULER")
+
+
+def test_compare_file():
+    import tempfile
+    d = tempfile.mkdtemp(prefix="oc_")
+    cfg = os.path.join(d, "config.cfg")
+    with open(cfg, "w", encoding="utf-8") as f:
+        f.write(
+            "SOLVER= RANS\nMACH_NUMBER= 0.15\nAOA= 10.0\n"
+            "REYNOLDS_NUMBER= 6.0E6\nMUSCL_FLOW= YES\n"
+        )
+    res = compare_file(cfg)
+    assert res["solver"] == "RANS"
+    # Должен подобраться кейс; трудно сказать какой именно, но это RANS-ish
+    assert res.get("case_id") in list_cases()
+    txt = render_diagnosis(res)
+    assert "официальный" in txt.lower() or "Замечаний" in txt
+    _ok("compare_file() + render_diagnosis() работают")
+
+
+def test_prepare_case_dir_offline():
+    # Без сети: только конфиг, сетка не качается
+    import tempfile
+    d = tempfile.mkdtemp(prefix="oc_prep_")
+    res = prepare_case_dir("inv_oneram6", d, download=False)
+    assert os.path.exists(res["config"])
+    with open(res["config"], encoding="utf-8") as f:
+        txt = f.read()
+    assert "SOLVER= EULER" in txt, "должен быть официальный конфиг"
+    assert "MESH_FILENAME" in txt
+    # download=False => mesh не должен быть заполнен
+    assert res.get("mesh") is None
+    _ok("prepare_case_dir(download=False) кладёт официальный конфиг")
+
+
+def test_meshes_report():
+    rows = meshes_report()
+    assert rows, "должна быть таблица сеток"
+    by_id = {r["id"]: r for r in rows}
+    assert by_id["inv_oneram6"]["available"] is True
+    assert "mesh_ONERAM6" in by_id["inv_oneram6"]["mesh"]
+    _ok("meshes_report() перечисляет официальные 3D-сетки")
+
+
+if __name__ == "__main__":
+    print("== test_official_cases ==")
+    test_catalogue()
+    test_get_case_unknown()
+    test_find_by()
+    test_nearest_for()
+    test_loader_helpers()
+    test_diagnose_low_mach_euler()
+    test_compare_file()
+    test_prepare_case_dir_offline()
+    test_meshes_report()
+    print("== OK ==")

@@ -49,6 +49,14 @@ except ImportError:  # PySide2
 
 import su2_autoconfig
 
+# Официальные кейсы SU2 (конфиги + 3D-сетки) — вспомогательный stdlib-пакет.
+# Если его нет (например, при частичной сборке), диалог просто скроет
+# соответствующую группу.
+try:
+    import official_cases
+except Exception:                                        # pragma: no cover
+    official_cases = None
+
 
 # ---------------------------------------------------------------------------
 # Где хранятся пользовательские пресеты
@@ -444,6 +452,9 @@ class Su2ConfigDialog(QDialog):
         root.addWidget(self.lbl_preset_params)
         self._show_preset_params()
 
+        # ---- официальные кейсы SU2 (конфиги + 3D-сетки) ----
+        self._build_official_group(root)
+
         # ---- кнопки ----
         btns = QHBoxLayout()
         btns.addStretch(1)
@@ -682,6 +693,167 @@ class Su2ConfigDialog(QDialog):
             del presets[name]
             save_user_presets(presets)
             self._reload_preset_combo()
+
+    # ---- официальные кейсы SU2 (эталонные конфиги и 3D-сетки) ----
+    def _build_official_group(self, root):
+        """Добавляет группу «Официальные кейсы SU2» в диалог.
+
+        Полностью вспомогательная: не меняет существующие пресеты и поля,
+        а даёт доступ к официальным config.cfg SU2, скачиванию официальных
+        3D-сеток и диагностике «неправдоподобных значений».
+        """
+        box = QGroupBox("Официальные кейсы SU2 (эталонные конфиги)")
+        lay = QVBoxLayout(box)
+
+        if official_cases is None:
+            lay.addWidget(QLabel(
+                "Пакет official_cases не загружен — эталонные кейсы SU2 "
+                "недоступны."))
+            root.addWidget(box)
+            return
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Кейс:"))
+        self.official_combo = QComboBox()
+        self._reload_official_combo()
+        self.official_combo.currentTextChanged.connect(
+            self._on_official_selected)
+        row.addWidget(self.official_combo, 1)
+        lay.addLayout(row)
+
+        self.lbl_official = QLabel("")
+        self.lbl_official.setWordWrap(True)
+        self.lbl_official.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_official.setStyleSheet(
+            "color: #4A4A4A; font-size: 10px; "
+            "font-family: Consolas, monospace;")
+        lay.addWidget(self.lbl_official)
+        self._on_official_selected()
+
+        btns = QHBoxLayout()
+        b_dl = QPushButton("Скачать 3D-сетку")
+        b_dl.setToolTip("Скачать официальную сетку SU2 (3D-модель) в "
+                        "official_cases/meshes/.")
+        b_dl.clicked.connect(self._on_official_download)
+        btns.addWidget(b_dl)
+        b_wr = QPushButton("Записать конфиг рядом…")
+        b_wr.setToolTip("Сохранить официальный config.cfg в каталог "
+                        "текущего config.cfg (файл official_<id>.cfg), не "
+                        "трогая ваш config.cfg.")
+        b_wr.clicked.connect(self._on_official_write)
+        btns.addWidget(b_wr)
+        b_cmp = QPushButton("Сравнить с моим")
+        b_cmp.setToolTip("Разобрать ваш config.cfg и объяснить, почему "
+                         "значения могут быть неправдоподобно большими.")
+        b_cmp.clicked.connect(self._on_official_compare)
+        btns.addWidget(b_cmp)
+        lay.addLayout(btns)
+
+        root.addWidget(box)
+
+    def _reload_official_combo(self):
+        if official_cases is None:
+            return
+        self.official_combo.clear()
+        for cid in official_cases.list_cases():
+            case = official_cases.get_case(cid)
+            self.official_combo.addItem("%s — %s" % (cid, case.name), cid)
+
+    def _selected_official_id(self):
+        if official_cases is None:
+            return None
+        return self.official_combo.currentData()
+
+    def _on_official_selected(self):
+        cid = self._selected_official_id()
+        if not cid:
+            return
+        try:
+            case = official_cases.get_case(cid)
+        except Exception:
+            self.lbl_official.setText("")
+            return
+        parts = [
+            "%s (%sD)" % (case.solver, case.dimension),
+        ]
+        if case.mach is not None:
+            parts.append("M=%.3f" % case.mach)
+        if case.aoa is not None:
+            parts.append("AoA=%.2f°" % case.aoa)
+        if case.reynolds is not None:
+            parts.append("Re=%.3g" % case.reynolds)
+        lines = [case.name]
+        lines.append(" · ".join(parts) if parts else "")
+        if case.ref_cl is not None:
+            lines.append("Эталон SU2 (итер. %s): CL=%s, CD=%s" % (
+                case.ref_iter or "?", case.ref_cl, case.ref_cd))
+        mesh_note = "Сетка: %s" % case.mesh_filename if case.mesh_filename else \
+            "Сетка: нет"
+        if case.mesh_size:
+            mesh_note += " (%s байт)" % case.mesh_size
+        lines.append(mesh_note)
+        if case.notes:
+            lines.append("  " + case.notes)
+        self.lbl_official.setText("\n".join(lines))
+
+    def _on_official_download(self):
+        cid = self._selected_official_id()
+        if not cid:
+            return
+        try:
+            path = official_cases.download_mesh(cid)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Официальные кейсы SU2",
+                "Не удалось скачать сетку «%s»:\n%s\n\n"
+                "Нужен доступ к api.github.com (сетки SU2 качаются по "
+                "требованию)." % (cid, e))
+            return
+        QMessageBox.information(
+            self, "Официальные кейсы SU2",
+            "Сетка скачана:\n%s\n\n"
+            "Положите её рядом с config.cfg кейса, чтобы SU2 её нашёл." % path)
+
+    def _on_official_write(self):
+        cid = self._selected_official_id()
+        if not cid:
+            return
+        try:
+            case = official_cases.get_case(cid)
+        except Exception as e:
+            QMessageBox.critical(self, "Официальные кейсы SU2", str(e))
+            return
+        case_dir = os.path.dirname(os.path.abspath(self.config_path)) \
+            if self.config_path else os.getcwd()
+        out = os.path.join(case_dir, "official_%s.cfg" % cid)
+        text = official_cases.bundled_config_text(case.config_file)
+        try:
+            with open(out, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+        except OSError as e:
+            QMessageBox.critical(self, "Официальные кейсы SU2",
+                                 "Не удалось записать файл:\n%s" % e)
+            return
+        QMessageBox.information(
+            self, "Официальные кейсы SU2",
+            "Официальный config.cfg записан:\n%s\n\n"
+            "Ваш config.cfg не изменён. Этот файл можно открыть и сравнить "
+            "с текущим (например, через «Сравнить с моим»)." % out)
+
+    def _on_official_compare(self):
+        if not self.config_path or not os.path.exists(self.config_path):
+            QMessageBox.warning(self, "Официальные кейсы SU2",
+                                "Сначала откройте config.cfg кейса.")
+            return
+        try:
+            res = official_cases.compare_file(self.config_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Официальные кейсы SU2",
+                                 "Не удалось разобрать config.cfg:\n%s" % e)
+            return
+        QMessageBox.information(
+            self, "Официальные кейсы SU2",
+            official_cases.render_diagnosis(res))
 
     # ---- прочее ----
     def _pick_config(self):

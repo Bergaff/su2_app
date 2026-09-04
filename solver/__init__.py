@@ -4,7 +4,7 @@ from .workers import (SU2Worker, SweepWorker, SessionRunner,
                       parse_history, parse_iteration_line, symmetry_scale,
                       find_su2_adapt_exe, run_su2_adapt, _mesh_npoin)
 from .config_builder import (build_su2_config, write_su2_config,
-                             write_case_config)
+                             write_case_config, low_mach_incompressible_solver)
 
 __all__ = [
     "CalculationSession",
@@ -22,4 +22,5 @@ __all__ = [
     "build_su2_config",
     "write_su2_config",
     "write_case_config",
+    "low_mach_incompressible_solver",
 ]

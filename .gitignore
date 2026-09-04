@@ -26,3 +26,6 @@ _skipped.node
 
 # артефакты тестов
 tests/_tmp_*/
+
+# официальные 3D-сетки SU2 (качаются official_cases.downloader, крупные файлы)
+official_cases/meshes/

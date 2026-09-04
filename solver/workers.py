@@ -1267,10 +1267,16 @@ class OptimizationWorker(QThread):
                 mesh_dst = os.path.join(case_dir, "mesh.su2")
                 if os.path.exists(MESH_FILE):
                     shutil.copy2(MESH_FILE, mesh_dst)
-                from solver.config_builder import build_su2_config
+                from solver.config_builder import (
+                    build_su2_config, low_mach_incompressible_solver)
                 planes = self._enabled_symmetry_planes(mesh_dst)
+                # T-low-mach: на малых скоростях считаем несжимаемым решателем
+                # (как и в основном прогоне через write_case_config), иначе
+                # оптимизация получает тот же завышенный Cd сжимаемого EULER.
+                solver_eff = low_mach_incompressible_solver(
+                    self.solver, self.physics.get("mach"))
                 text = build_su2_config(
-                    fp.aoa, self.physics, self.solver, self.ref_data,
+                    fp.aoa, self.physics, solver_eff, self.ref_data,
                     mesh_quality=getattr(self, "mesh_quality", None),
                     use_symmetry=bool(planes),
                     symmetry_planes=planes,

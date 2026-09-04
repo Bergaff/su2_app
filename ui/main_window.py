@@ -1360,6 +1360,9 @@ class MainWindow(QMainWindow):
             "Euler (невязкий)",
             "RANS SA (вязкий, Спаларт-Аллмарас)",
             "RANS SST (вязкий, Menter k-ω)",
+            "INC Euler (несжимаемый, малые скорости)",
+            "INC RANS SA (несжимаемый вязкий)",
+            "INC RANS SST (несжимаемый вязкий)",
         ])
         s_lay.addWidget(self.combo_solver)
         lay9.addWidget(solver_group)
@@ -2947,6 +2950,9 @@ class MainWindow(QMainWindow):
             "use_ramp_aoa": bool(getattr(self, "chk_use_ramp_aoa", None) and
                                 self.chk_use_ramp_aoa.isChecked()),
             "turb_model": self.get_turb_model() if hasattr(self, "combo_solver") else "SA",
+            # Тип решателя (в т.ч. INC_* для малых скоростей) — чтобы после
+            # загрузки проекта комбо-бокс снова показывал выбранное.
+            "solver": self.get_solver() if hasattr(self, "combo_solver") else "EULER",
         }
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -3101,7 +3107,29 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         turb_model = data.get("turb_model")
-        if turb_model in ("SA", "SST") and hasattr(self, "combo_solver"):
+        # Тип решателя из сохранённого проекта (0..5). Если его нет — откат
+        # на прежнее поведение по турбомодели (Euler=0, RANS SA=1, RANS SST=2).
+        solver_restore = {
+            "EULER": 0,
+            "RANS": -1,          # разрешается по турбомодели ниже
+            "INC_EULER": 3,
+            "INC_RANS": -1,      # разрешается по турбомодели ниже (4/5)
+        }
+        solved = data.get("solver")
+        if isinstance(solved, str) and hasattr(self, "combo_solver"):
+            try:
+                idx = solver_restore.get(solved.upper())
+                if idx is not None and idx >= 0:
+                    self.combo_solver.setCurrentIndex(idx)
+                elif solved.upper().startswith("INC_RANS"):
+                    self.combo_solver.setCurrentIndex(
+                        5 if turb_model == "SST" else 4)
+                elif idx == -1:
+                    self.combo_solver.setCurrentIndex(
+                        2 if turb_model == "SST" else 1)
+            except Exception:
+                pass
+        elif turb_model in ("SA", "SST") and hasattr(self, "combo_solver"):
             try:
                 # Euler=0, RANS SA=1, RANS SST=2
                 self.combo_solver.setCurrentIndex(2 if turb_model == "SST" else 1)
@@ -6093,6 +6121,12 @@ class MainWindow(QMainWindow):
             return "RANS"
         if idx == 2:
             return "RANS"
+        if idx == 3:
+            return "INC_EULER"
+        if idx == 4:
+            return "INC_RANS"
+        if idx == 5:
+            return "INC_RANS"
         return "EULER"
 
     def get_turb_model(self) -> str:
@@ -6101,7 +6135,7 @@ class MainWindow(QMainWindow):
             idx = int(self.combo_solver.currentIndex())
         except Exception:
             return "SA"
-        if idx == 2:
+        if idx in (2, 5):
             return "SST"
         return "SA"
 

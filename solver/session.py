@@ -37,6 +37,10 @@ class CalculationSession:
         self.n_bodies = 0
         self.n_points = 0
         self.cfl_aggressive = False
+        # True — на малых скоростях (M<0.3) автоматически считать НЕСЖИМАЕМЫМ
+        # решателем (INC_EULER / INC_RANS) вместо сжимаемого EULER/RANS,
+        # который на таких режимах завышает Cd. По умолчанию включено.
+        self.use_incompressible_at_low_mach = True
 
     # ------------------------------------------------------------------
     def start_new(self, mode, solver, physics, ref_data, active_markers,
@@ -62,6 +66,7 @@ class CalculationSession:
             self.n_points = int(n_points)
         if cfl_aggressive is not None:
             self.cfl_aggressive = bool(cfl_aggressive)
+        self.use_incompressible_at_low_mach = True
         self.case_dirs = [os.path.join(self.work_dir,
                                        f"case_{self.session_id}",
                                        f"aoa_{a:+.2f}")
@@ -130,6 +135,7 @@ class CalculationSession:
             "finished": self.finished,
             "results": self.results,
             "case_dirs": self.case_dirs,
+            "use_incompressible_at_low_mach": self.use_incompressible_at_low_mach,
         }
         try:
             with open(self.meta_path(), "w", encoding="utf-8") as f:
@@ -165,6 +171,10 @@ class CalculationSession:
         self.finished = d.get("finished", False)
         self.results = d.get("results", [])
         self.case_dirs = d.get("case_dirs", [])
+        # Старые сессии без этого поля работают как раньше: по умолчанию
+        # включаем несжимаемый решатель на малых скоростях.
+        self.use_incompressible_at_low_mach = bool(
+            d.get("use_incompressible_at_low_mach", True))
         return True
 
     def clear(self):

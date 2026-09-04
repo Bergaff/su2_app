@@ -257,6 +257,13 @@ def build():
     for pkg in local_packages:
         cmd.append(f"--collect-submodules={pkg}")
 
+    # Официальные кейсы SU2: конфиги (.cfg) — это данные, PyInstaller их сам
+    # не подхватит. Сетки в official_cases/meshes/ качаются в рантайме и в
+    # сборку не входят (они в .gitignore).
+    _oc_cfgs = os.path.join(project_root, "official_cases", "configs")
+    if os.path.isdir(_oc_cfgs):
+        cmd.append(f"--add-data={_oc_cfgs}{os.pathsep}official_cases/configs")
+
     # gmsh — сторонняя либа с нативной DLL/данными, собираем целиком.
     try:
         import importlib.util

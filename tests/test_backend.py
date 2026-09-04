@@ -232,7 +232,8 @@ if _MW is not None:
 
 # ---------------------------------------------------------------- config_builder
 print("== solver.config_builder ==")
-from solver.config_builder import build_su2_config, write_case_config
+from solver.config_builder import (
+    build_su2_config, write_case_config, low_mach_incompressible_solver)
 
 class _FakeSession:
     solver = "RANS"
@@ -287,6 +288,42 @@ _check_euler = build_su2_config(aoa=0.0, physics=_FakeSession.physics,
                                 ref_data=_FakeSession.ref_data)
 check("EULER-конфиг собирается", "SOLVER= EULER" in _check_euler
       and "CARBON_MODEL" not in _check_euler)
+
+# --- T-low-mach: несжимаемый решатель (INC_EULER / INC_RANS) ---------------
+_inc_phys = {"mach": 0.176, "rho": 1.225, "speed": 60.0,
+             "pressure": 101325.0, "temperature": 288.15}
+_inc_euler = build_su2_config(aoa=3.0, physics=_inc_phys, solver="INC_EULER",
+                              ref_data=(1.20, 12.0, 0.25, 0.0, 0.0),
+                              markers=["airfoil"])
+check("INC_EULER-конфиг собирается",
+      "SOLVER= INC_EULER" in _inc_euler
+      and "MACH_NUMBER" not in _inc_euler
+      and "CARBON_MODEL" not in _inc_euler)
+check("INC_EULER: заданы плотность и скорость потока",
+      "INC_DENSITY_INIT=" in _inc_euler and "INC_VELOCITY_INIT=" in _inc_euler
+      and "INC_NONDIM= INITIAL_VALUES" in _inc_euler)
+check("INC_EULER: официальная схема FDS",
+      "CONV_NUM_METHOD_FLOW= FDS" in _inc_euler)
+check("INC_EULER: угол атаки в скорости (u=Vcos, w=Vsin)",
+      "59.917772" in _inc_euler and "3.140157" in _inc_euler)
+_inc_rans = build_su2_config(aoa=3.0, physics=_inc_phys, solver="INC_RANS",
+                             ref_data=(1.20, 12.0, 0.25, 0.0, 0.0),
+                             markers=["airfoil"], turb_model="SST")
+check("INC_RANS-конфиг собирается",
+      "SOLVER= INC_RANS" in _inc_rans and "KIND_TURB_MODEL= SST" in _inc_rans
+      and "MARKER_HEATFLUX=" in _inc_rans)
+import su2_autoconfig as _AC  # noqa: E402 — лёгкий импорт для локальной проверки
+check("INC_L2: оба INC-конфига читаемы для SU2 (lint-чистые)",
+      _AC.su2_lint_lines(_inc_euler) == [] and _AC.su2_lint_lines(_inc_rans) == [])
+check("low_mach_incompressible_solver: малый Mach -> INC_*",
+      low_mach_incompressible_solver("EULER", 0.176) == "INC_EULER"
+      and low_mach_incompressible_solver("RANS", 0.176) == "INC_RANS")
+check("low_mach_incompressible_solver: большой Mach не трогается",
+      low_mach_incompressible_solver("RANS", 0.5) == "RANS")
+check("low_mach_incompressible_solver: INC_* сохраняется",
+      low_mach_incompressible_solver("INC_RANS", 0.176) == "INC_RANS")
+check("low_mach_incompressible_solver: без Mach — без переключения",
+      low_mach_incompressible_solver("EULER", None) == "EULER")
 
 with tempfile.TemporaryDirectory() as td:
     p = write_case_config(td, 6.0, _FakeSession())
@@ -1515,13 +1552,16 @@ _SU2_V8_OPTIONS = frozenset({
     "REYNOLDS_LENGTH", "REYNOLDS_NUMBER", "SCREEN_OUTPUT", "SCREEN_WRT_FREQ_INNER",
     "SIDESLIP_ANGLE", "SLOPE_LIMITER_FLOW", "SLOPE_LIMITER_TURB", "SOLUTION_FILENAME",
     "SOLVER", "SURFACE_FILENAME", "TIME_DISCRE_FLOW", "TIME_DISCRE_TURB",
-    "VENKAT_LIMITER_COEFF", "VOLUME_FILENAME"
+    "VENKAT_LIMITER_COEFF", "VOLUME_FILENAME",
+    # Несжимаемый решатель INC_* (малые скорости): параметры инициализации.
+    "INC_DENSITY_INIT", "INC_VELOCITY_INIT", "INC_NONDIM",
+    "INC_DENSITY_REF", "INC_VELOCITY_REF", "INC_TEMPERATURE_REF",
 })
 
 def _aeroopt_option_keys():
     """Все имена опций, которые AeroOpt пишет или предлагает в config.cfg."""
     found = set()
-    for eq in ("EULER", "RANS"):
+    for eq in ("EULER", "RANS", "INC_EULER", "INC_RANS"):
         for sym in ([], ["xz"]):
             for tm in ("SA", "SST"):
                 txt = _bsc(3.0, _phys, eq, _ref, markers=["airfoil"],
