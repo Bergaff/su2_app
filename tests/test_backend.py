@@ -364,7 +364,8 @@ with tempfile.TemporaryDirectory() as td:
     out, changes = AC.apply_preset(cfg, "safe")
     txt = open(cfg, encoding="utf-8").read()
     check("apply_preset safe: CFL_NUMBER= 5.0", "CFL_NUMBER= 5.0" in txt)
-    check("apply_preset safe: CFL_ADAPT= YES", "CFL_ADAPT= YES" in txt)
+    check("apply_preset safe: CFL_ADAPT= NO (как во всех кейсах SU2)",
+          "CFL_ADAPT= NO" in txt)
     check("apply_preset safe: MUSCL_FLOW= NO (1-й порядок)", "MUSCL_FLOW= NO" in txt)
     check("apply_preset safe: рампа CFL задана", "CFL_ADAPT_PARAM=" in txt)
     check("apply_preset safe: границы не тронуты",
@@ -378,8 +379,8 @@ with tempfile.TemporaryDirectory() as td:
     txt3 = open(cfg, encoding="utf-8").read()
     check("ultra: второй порядок, CFL 1.0",
           "CFL_NUMBER= 1.0" in txt3 and "MUSCL_FLOW= YES" in txt3)
-    check("ultra: линейный решатель как в базовом конфиге (1e-6)",
-          "LINEAR_SOLVER_ERROR= 1e-6" in txt3 and "LINEAR_SOLVER_ITER= 15" in txt3)
+    check("ultra: линейный решатель как в базовом конфиге (1e-6, 5 итераций)",
+          "LINEAR_SOLVER_ERROR= 1e-6" in txt3 and "LINEAR_SOLVER_ITER= 5" in txt3)
     check("ultra: второй порядок MUSCL_FLOW= YES", "MUSCL_FLOW= YES" in txt3)
     check("ultra: рампа CFL до 5.0, как в базовом конфиге",
           "( 0.5, 1.2, 0.5, 5.0 )" in txt3)
@@ -513,6 +514,19 @@ with tempfile.TemporaryDirectory() as td:
     _ok_lm, _err_lm = AC.validate_config(_cfg_lm)
     check("EULER-конфиг с прекондиционером валиден для SU2", _ok_lm,
           str(_err_lm[:2]))
+    # Во всех восьми официальных кейсах SU2 адаптация CFL выключена, а
+    # итераций линейного решателя 2..5. Именно рост CFL по рампе и давал
+    # расходимость в прогонах.
+    check("базовый конфиг: CFL_ADAPT= NO без явного флага",
+          "CFL_ADAPT= NO" in _txt)
+    check("флаг агрессивного CFL по-прежнему включает адаптацию",
+          "CFL_ADAPT= YES" in _CB2.build_euler_config(
+              _ph, markers=["airfoil"], cfl_aggressive=True))
+    check("базовый конфиг: 5 итераций линейного решателя",
+          "LINEAR_SOLVER_ITER= 5" in _txt)
+    check("ultra совпадает с базовым конфигом по CFL_ADAPT и итерациям",
+          AC.PRESETS["ultra"]["CFL_ADAPT"] == "NO"
+          and AC.PRESETS["ultra"]["LINEAR_SOLVER_ITER"] == "5")
     _ph2 = dict(_ph, mach=0.85)
     _txt2 = _CB2.build_euler_config(_ph2, markers=["airfoil"])
     check("RANS-шаблон тоже содержит ключ (единый код)",
@@ -1391,8 +1405,8 @@ with tempfile.TemporaryDirectory() as td:
     # Все ключи пресета уже есть в базовом конфиге, поэтому они правятся
     # на месте и отдельный блок не создаётся (блок нужен только для
     # отсутствующих ключей).
-    check("пресет применён на месте: CFL 5.0 с адаптацией, 1-й порядок",
-          "CFL_NUMBER= 5.0" in _txt and "CFL_ADAPT= YES" in _txt
+    check("пресет применён на месте: CFL 5.0 без адаптации, 1-й порядок",
+          "CFL_NUMBER= 5.0" in _txt and "CFL_ADAPT= NO" in _txt
           and "MUSCL_FLOW= NO" in _txt)
     check("пресет применён на месте: TIME_DISCRE_FLOW= EULER_IMPLICIT",
           "TIME_DISCRE_FLOW= EULER_IMPLICIT" in _txt)

@@ -78,6 +78,10 @@ def low_mach_lines(mach) -> str:
     return "LOW_MACH_PREC= %s\nLOW_MACH_CORR= %s" % (on, on)
 
 
+# Итераций линейного решателя. Во всех восьми официальных кейсах SU2 это
+# 2..5 (3 — четыре кейса, 5 — три, 2 — один); 15 не встречается ни разу.
+LINEAR_SOLVER_ITER = 5
+
 CFL_PARAM_SAFE = "( 0.5, 1.2, 0.5, 5.0 )"
 CFL_PARAM_FAST = "( 0.1, 2.0, 10.0, 1000.0 )"
 
@@ -192,6 +196,13 @@ def build_euler_config(p: Mapping, markers=None, restart: bool = False,
     else:
         inner_iter, inner_why = _inner_iter_for_quality(mesh_quality), ""
     cfl_param = CFL_PARAM_FAST if cfl_aggressive else CFL_PARAM_SAFE
+    # Адаптация CFL включается только по явному желанию. Во всех восьми
+    # официальных кейсах SU2 (TestCases/euler/*, TestCases/navierstokes/*)
+    # стоит CFL_ADAPT= NO либо ключ не задан вовсе, то есть по умолчанию
+    # выключен: фиксированный CFL — норма, а не осторожность. Именно рост
+    # CFL по рампе и ронял расчёт в расходимость.
+    cfl_adapt = "YES" if cfl_aggressive else "NO"
+    lin_iter = LINEAR_SOLVER_ITER
     lm_lines = low_mach_lines(p['mach'])
     # === T1: MARKER_SYM — плоскости симметрии ========================
     # Если включены плоскости (XY/XZ/YZ) и в сетке есть
@@ -244,13 +255,13 @@ ENTROPY_FIX_COEFF= 0.005
 NUM_METHOD_GRAD= WEIGHTED_LEAST_SQUARES
 {lm_lines}
 CFL_NUMBER= 1.0
-CFL_ADAPT= YES
+CFL_ADAPT= {cfl_adapt}
 CFL_ADAPT_PARAM= {cfl_param}
 TIME_DISCRE_FLOW= EULER_IMPLICIT
 LINEAR_SOLVER= FGMRES
 LINEAR_SOLVER_PREC= ILU
 LINEAR_SOLVER_ERROR= 1e-6
-LINEAR_SOLVER_ITER= 15
+LINEAR_SOLVER_ITER= {lin_iter}
 INNER_ITER= {inner_iter}
 CONV_RESIDUAL_MINVAL= -7
 CONV_STARTITER= 50
@@ -296,6 +307,13 @@ def build_rans_config(p: Mapping, markers=None, restart: bool = False,
     else:
         inner_iter, inner_why = _inner_iter_for_quality(mesh_quality), ""
     cfl_param = CFL_PARAM_FAST if cfl_aggressive else CFL_PARAM_SAFE
+    # Адаптация CFL включается только по явному желанию. Во всех восьми
+    # официальных кейсах SU2 (TestCases/euler/*, TestCases/navierstokes/*)
+    # стоит CFL_ADAPT= NO либо ключ не задан вовсе, то есть по умолчанию
+    # выключен: фиксированный CFL — норма, а не осторожность. Именно рост
+    # CFL по рампе и ронял расчёт в расходимость.
+    cfl_adapt = "YES" if cfl_aggressive else "NO"
+    lin_iter = LINEAR_SOLVER_ITER
     lm_lines = low_mach_lines(p['mach'])
 
     # === ENABLE_CUDA: GPU-ветка произведения матрицы на вектор =========
@@ -378,14 +396,14 @@ ENTROPY_FIX_COEFF= 0.005
 NUM_METHOD_GRAD= WEIGHTED_LEAST_SQUARES
 {lm_lines}
 CFL_NUMBER= 1.0
-CFL_ADAPT= YES
+CFL_ADAPT= {cfl_adapt}
 CFL_ADAPT_PARAM= {cfl_param}
 TIME_DISCRE_FLOW= EULER_IMPLICIT
 TIME_DISCRE_TURB= EULER_IMPLICIT
 LINEAR_SOLVER= FGMRES
 LINEAR_SOLVER_PREC= ILU
 LINEAR_SOLVER_ERROR= 1e-6
-LINEAR_SOLVER_ITER= 15
+LINEAR_SOLVER_ITER= {lin_iter}
 INNER_ITER= {inner_iter}
 CONV_RESIDUAL_MINVAL= -7
 CONV_STARTITER= 50
