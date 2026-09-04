@@ -39,6 +39,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import shutil
 import subprocess
@@ -221,6 +222,42 @@ def is_unknown_gpu_option(stderr: str) -> bool:
         "unrecognized option: -gpu",
     )
     return any(n in s for n in needles)
+
+
+# Имена рантаймов CUDA/HIP, по которым видно, что SU2 собрана с GPU.
+_GPU_LIB_PATTERNS = (
+    "cudart*.dll", "cublas*.dll", "cufft*.dll",
+    "libcudart*.so*", "libcublas*.so*",
+    "amdhip64*.dll", "libamdhip64*",
+)
+
+
+def su2_gpu_capable(su2_exe: str) -> bool:
+    """Лежит ли рядом с SU2_CFD рантайм CUDA или HIP.
+
+    Стандартные сборки SU2 с su2code.org собираются без GPU-поддержки,
+    и ``OMP_TARGET_OFFLOAD=MANDATORY`` в них ничего никуда не выгружает.
+    Единственный способ узнать это заранее, не запуская решатель, —
+    посмотреть, есть ли в каталоге установки библиотеки GPU-рантайма.
+    """
+    if not su2_exe:
+        return False
+    d = os.path.dirname(os.path.abspath(str(su2_exe)))
+    for _ in range(3):                      # каталог exe, bin/, корень
+        if not d or not os.path.isdir(d):
+            break
+        try:
+            names = [n.lower() for n in os.listdir(d)]
+        except OSError:
+            break
+        for pat in _GPU_LIB_PATTERNS:
+            if fnmatch.filter(names, pat):
+                return True
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return False
 
 
 def is_openmp_offload_unavailable(stderr: str) -> bool:

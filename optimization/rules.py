@@ -120,12 +120,12 @@ class RuleSet:
                 continue
             ok, viol = res
             if ok:
-                messages.append(f"✓ {rule.name}: {rule.parameter} {rule.operator.value} "
+                messages.append(f"Готово: {rule.name}: {rule.parameter} {rule.operator.value} "
                                 f"{rule.value} — OK")
                 continue
             entry = {"rule": rule.name, "violation": viol,
                      "severity": rule.severity.value}
-            messages.append(f"✗ {rule.name}: {rule.parameter} нарушает "
+            messages.append(f"Ошибка: {rule.name}: {rule.parameter} нарушает "
                             f"{rule.operator.value} {rule.value} (дельта {viol:.4f})")
             if rule.severity == RuleSeverity.HARD:
                 hard.append(entry)

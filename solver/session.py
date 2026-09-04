@@ -27,10 +27,21 @@ class CalculationSession:
         self.finished = False
         self.results = []
         self.case_dirs = []
+        # True — писать в config.cfg ENABLE_CUDA= YES. Выставляется только
+        # когда SU2_CFD реально собран с поддержкой CUDA: иначе SU2
+        # завершится с ошибкой «ENABLE_CUDA is set to YES».
+        self.enable_cuda = False
+        # Данные для оценки потолка итераций и выбора CFL. Нули и False
+        # означают «не задано» — тогда сборщик конфига работает по прежней
+        # схеме, привязанной только к качеству сетки.
+        self.n_bodies = 0
+        self.n_points = 0
+        self.cfl_aggressive = False
 
     # ------------------------------------------------------------------
     def start_new(self, mode, solver, physics, ref_data, active_markers,
-                  aoa_list, cpu_cores=1):
+                  aoa_list, cpu_cores=1, n_bodies=None, n_points=None,
+                  cfl_aggressive=None):
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.mode = mode
         self.solver = solver
@@ -45,6 +56,12 @@ class CalculationSession:
         self.cancelled = False
         self.finished = False
         self.results = []
+        if n_bodies is not None:
+            self.n_bodies = int(n_bodies)
+        if n_points is not None:
+            self.n_points = int(n_points)
+        if cfl_aggressive is not None:
+            self.cfl_aggressive = bool(cfl_aggressive)
         self.case_dirs = [os.path.join(self.work_dir,
                                        f"case_{self.session_id}",
                                        f"aoa_{a:+.2f}")

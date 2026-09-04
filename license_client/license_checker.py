@@ -705,18 +705,18 @@ class LicenseChecker:
 
     def get_status_text(self) -> str:
         texts = {
-            LicenseStatus.ACTIVE:        "✅ Лицензия активна",
-            LicenseStatus.GRACE:         "⚠️ Grace-период (продлите лицензию)",
-            LicenseStatus.EXPIRED:       "❌ Лицензия истекла",
-            LicenseStatus.INVALID:       "❌ Недействительная лицензия",
-            LicenseStatus.NO_KEY:        "🔑 Лицензия не активирована",
-            LicenseStatus.NETWORK_ERROR: "🌐 Нет связи с сервером лицензий",
+            LicenseStatus.ACTIVE:        "Готово: Лицензия активна",
+            LicenseStatus.GRACE:         "Внимание: Grace-период (продлите лицензию)",
+            LicenseStatus.EXPIRED:       "Ошибка: Лицензия истекла",
+            LicenseStatus.INVALID:       "Ошибка: Недействительная лицензия",
+            LicenseStatus.NO_KEY:        "Лицензия не активирована",
+            LicenseStatus.NETWORK_ERROR: "Нет связи с сервером лицензий",
         }
         result = texts.get(self._status, "Неизвестный статус")
         if self._status == LicenseStatus.REVOKED:
-            result = "❌ Лицензия отозвана"
+            result = "Ошибка: Лицензия отозвана"
         elif self._status == LicenseStatus.HWID_LIMIT:
-            result = "⚠️ Достигнут лимит машин"
+            result = "Внимание: Достигнут лимит машин"
         if self._expires_at and self._status in (
                 LicenseStatus.ACTIVE, LicenseStatus.GRACE):
             try:

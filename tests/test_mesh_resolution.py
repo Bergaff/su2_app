@@ -1,0 +1,691 @@
+# -*- coding: utf-8 -*-
+"""Проверка разрешающей способности фоновой сетки.
+
+Сетка строится вырезанием ячеек фона: ячейка удаляется, если её ЦЕНТР
+попал внутрь тела. Поэтому тело тоньше одного шага фона попадает в сетку
+как ступенчатая пластина в одну ячейку — или не попадает вовсе.
+
+На полном самолёте при качестве «Средняя» шаг у тела считается от размаха
+(~9 м) и равен ~0.135 м, а толщина ГО/ВО/руля (хорда 0.70 м, профиль 12%)
+— 0.084 м, то есть 0.62 шага. Расчёт на такой сетке расходится.
+
+Тест гоняет настоящий generate_mesh_impl на двух телах — тонком и
+толстом — и проверяет, что генератор печатает честный отчёт.
+
+Отдельный файл: tests/qt_stubs.py подменяет pyvista заглушкой, а здесь
+нужен настоящий. Модуль грузится по пути файла, потому что mesh/__init__.py
+тянет PyQt5.
+
+Запуск:  python tests/test_mesh_resolution.py
+"""
+import io
+import os
+import sys
+import tempfile
+from contextlib import redirect_stdout
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+try:
+    import pyvista as pv
+except ImportError as exc:                      # pragma: no cover
+    print("ПРОПУЩЕНО: нет pyvista (%s)" % exc)
+    raise SystemExit(0)
+
+import importlib.util                           # noqa: E402
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_spec = importlib.util.spec_from_file_location(
+    "gmsh_generator_standalone",
+    os.path.join(_ROOT, "mesh", "gmsh_generator.py"))
+_gm = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_gm)
+
+_passed = 0
+_failed = []
+
+
+def check(name, cond, extra=None):
+    global _passed
+    if cond:
+        _passed += 1
+        print("  ✅ %s" % name)
+    else:
+        _failed.append(name)
+        print("  ❌ %s%s" % (name, "" if extra is None else " %s" % (extra,)))
+
+
+def main():
+    workdir = tempfile.mkdtemp()
+    fus = os.path.join(workdir, "fuselage.stl")
+    tail = os.path.join(workdir, "h_stab.stl")
+
+    # Фюзеляж: диаметр 1.20 м. ГО: хорда 0.70 м, профиль 12% -> 0.084 м.
+    pv.Box(bounds=(-4, 4, -0.6, 0.6, -0.6, 0.6)).triangulate().save(fus)
+    pv.Box(bounds=(-0.35, 0.35, -0.5, 0.5, -0.042, 0.042)).triangulate().save(tail)
+
+    buf = io.StringIO()
+    logged = []          # то, что ушло в лог приложения через log_cb
+    with redirect_stdout(buf):
+        # Этот тест проверяет предупреждение картезианского фона о том,
+        # что тонкое тело не разрешается его шагом. Телооблекающая сетка
+        # (TetGen) поверхность облегает и предупреждение не печатает —
+        # поэтому путь TetGen здесь отключён, иначе проверялся бы не тот
+        # код. Поведение TetGen покрыто в tests/test_bodyfit_tetgen.py.
+        import types as _types
+        _stub = _types.ModuleType("mesh.bodyfit_tetgen")
+
+        def _stub_build(*a, **k):
+            # Настоящий генератор объясняет отказ через тот же колбэк,
+            # поэтому и заглушка обязана это делать: проверяется канал,
+            # а не только текст.
+            k.get("log", lambda *_: None)(
+                "   Внимание: TetGen недоступен, картезианская сетка фона")
+            return None
+
+        _stub.build_body_fitted_grid = _stub_build
+        _saved = sys.modules.get("mesh.bodyfit_tetgen")
+        sys.modules["mesh.bodyfit_tetgen"] = _stub
+        try:
+            ok, msg = _gm.generate_mesh_impl(
+                [fus, tail], quality_text="Средняя",
+                progress_cb=lambda p, t: None,
+                log_cb=logged.append)
+        finally:
+            if _saved is None:
+                sys.modules.pop("mesh.bodyfit_tetgen", None)
+            else:
+                sys.modules["mesh.bodyfit_tetgen"] = _saved
+    log = buf.getvalue()
+
+    print("== отчёт о разрешающей способности ==")
+    for line in log.splitlines():
+        if "шага" in line or "Проверка разрешающей" in line:
+            print("   " + line.strip())
+    print()
+
+    check("генератор отработал", ok is True, msg)
+    check("отчёт о разрешающей способности напечатан",
+          "Проверка разрешающей способности" in log)
+
+    # У собранного exe окна консоли нет (CREATE_NO_WINDOW), поэтому stdout
+    # не видит никто. Диагностика обязана доходить и до лога приложения.
+    joined = "\n".join(logged)
+    check("log_cb получил строки диагностики", len(logged) > 0,
+          "получено %d" % len(logged))
+    check("причина отката на картезианский путь дошла до лога",
+          "TetGen недоступен" in joined, joined[:80])
+    check("отчёт о разрешении дошёл до лога",
+          "Проверка разрешающей способности" in joined)
+    check("вердикт по тонкому телу дошёл до лога",
+          "НЕ РАЗРЕШАЕТСЯ" in joined)
+    check("диагностика не дублируется в логе",
+          joined.count("Проверка разрешающей способности") == 1,
+          "%d раз" % joined.count("Проверка разрешающей способности"))
+    check("тонкое тело помечено как неразрешаемое",
+          "h_stab.stl" in log and "НЕ РАЗРЕШАЕТСЯ" in log)
+    check("толстое тело помечено как разрешаемое",
+          "fuselage.stl: мин. габарит 1.2000 м" in log and "разрешается" in log)
+    check("число шагов для ГО посчитано верно (0.084/h < 1)",
+          "0.70 шага" in log or "0.62 шага" in log,
+          [l for l in log.splitlines() if "h_stab" in l])
+    check("объяснена причина — сетка не облегает поверхность",
+          "не облегает поверхность" in log)
+    check("предложено два выхода: мельче шаг или gmsh по STL",
+          "облегающая поверхность" in log and "gmsh по STL" in log
+          and "шаг у тела не более" in log)
+
+    # Тонкое тело действительно почти не вырезается из фона — это и есть
+    # механизм расходимости, а не теория.
+    import re as _re
+    _removed = dict()
+    for _m in _re.finditer(r"Компонент (\d+): удалено (\d+) ячеек", log):
+        _removed[int(_m.group(1))] = int(_m.group(2))
+    check("удалено ячеек по обоим компонентам", len(_removed) == 2, _removed)
+    if len(_removed) == 2:
+        _thick = max(_removed.values())
+        _thin = min(_removed.values())
+        check("тонкое тело вырезается на порядки хуже толстого",
+              _thin * 20 < _thick, "%d против %d" % (_thin, _thick))
+
+    # ---------------------------------------------------------------
+    # Диагностика обязана доходить до лога приложения, а не только в
+    # stdout: у собранного exe окна консоли нет (CREATE_NO_WINDOW), и
+    # причину отката на картезианскую сетку пользователь иначе не видит.
+    # Проверяется настоящий MeshWorker с настоящим Qt.
+    print()
+    print("== диагностика доходит до лога приложения ==")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+    _qapp = QApplication.instance() or QApplication([])
+    import mesh.mesh_worker as _msw
+
+    _seen = []
+    _done = []
+    _orig = _msw.generate_mesh_impl
+
+    def _fake(paths, quality_text="Средняя", progress_cb=None,
+              cancel_cb=None, use_symmetry=False, symmetry_planes=None,
+              log_cb=None):
+        _seen.append(log_cb)
+        if log_cb:
+            log_cb("Внимание: откат на картезианскую сетку фона")
+        return True, "тестовая сетка"
+
+    _msw.generate_mesh_impl = _fake
+    try:
+        _w = _msw.MeshWorker(["a.stl"], "Средняя")
+        _w.log_signal.connect(_done.append)
+        _w.run()      # напрямую, без потока: соединение прямое
+    finally:
+        _msw.generate_mesh_impl = _orig
+
+    check("MeshWorker передаёт log_cb в генератор",
+          len(_seen) == 1 and _seen[0] is not None,
+          "вызовов %d" % len(_seen))
+    check("log_cb привязан к этому воркеру",
+          bool(_seen) and getattr(_seen[0], "__self__", None) is _w)
+    check("текст диагностики доходит до сигнала дословно",
+          _done == ["Внимание: откат на картезианскую сетку фона"], str(_done))
+
+    # Метод подключения в окне — исполняется настоящий код MainWindow.
+    from ui.main_window import MainWindow as _MW
+    _ui = _MW.__new__(_MW)
+    _lines = []
+
+    class _FakeLog:
+        def append(self, s):
+            _lines.append(s)
+
+    _ui.log_text = _FakeLog()
+    _w2 = _msw.MeshWorker(["a.stl"])
+    _MW._connect_mesh_log(_ui, _w2)
+    _w2.log_signal.emit("проверка канала")
+    check("_connect_mesh_log направляет сигнал в лог окна",
+          _lines == ["проверка канала"], str(_lines))
+
+    class _NoSig:
+        pass
+
+    _MW._connect_mesh_log(_ui, _NoSig())
+    check("_connect_mesh_log терпит воркер без log_signal", True)
+
+    # ---------------------------------------------------------------
+    # Абсолютный пол шага у тела (0.05/0.08/0.04 м) на мелкой модели
+    # перевешивает пресет, и сетка становится непригодной. Раньше
+    # условие `h_near < _h_floor` не срабатывало никогда — h_near уже
+    # посчитан как max(пресет, пол), а пресет «Средней» равен
+    # body_size*0.015, то есть самому _h_floor. Предупреждение было
+    # мёртвым кодом: на модели 0.065 м шаг молча становился 0.0500 м.
+    print()
+    print("== предупреждение о применённом поле шага ==")
+    tiny = os.path.join(workdir, "tiny.stl")
+    pv.Box(bounds=(0, 0.065, 0, 0.019, 0, 0.0015)).triangulate().save(tiny)
+    _stub2 = _types.ModuleType("mesh.bodyfit_tetgen")
+    _stub2.build_body_fitted_grid = lambda *a, **k: None
+    _saved2 = sys.modules.get("mesh.bodyfit_tetgen")
+    sys.modules["mesh.bodyfit_tetgen"] = _stub2
+    try:
+        _tiny_log = []
+        _buf2 = io.StringIO()
+        with redirect_stdout(_buf2):
+            _ok2, _msg2 = _gm.generate_mesh_impl(
+                [tiny], quality_text="Средняя", log_cb=_tiny_log.append)
+    finally:
+        if _saved2 is None:
+            sys.modules.pop("mesh.bodyfit_tetgen", None)
+        else:
+            sys.modules["mesh.bodyfit_tetgen"] = _saved2
+    _tiny_joined = "\n".join(_tiny_log)
+    # На модели 0.065 м генератор закономерно отказывает: при шаге
+    # 0.05 м центр ни одной ячейки не попадает в пластину толщиной
+    # 0.0015 м. Отказ правильный, а предупреждение объясняет причину
+    # до него, а не после.
+    check("на модели 0.065 м генератор честно отказывает",
+          _ok2 is False and "не вырезана" in str(_msg2), str(_msg2)[:80])
+    check("предупреждение о применённом поле шага напечатано",
+          "ниже допустимого минимума" in _tiny_joined, _tiny_joined[:90])
+    check("в предупреждении названа доля размера модели",
+          "%" in _tiny_joined and "габарите модели" in _tiny_joined)
+    check("предупреждение подсказывает проверить масштаб",
+          "масштаб" in _tiny_joined)
+
+    # Негативный контроль: на модели нормального размера пол не
+    # применяется, и предупреждения быть не должно.
+    _stub3 = _types.ModuleType("mesh.bodyfit_tetgen")
+    _stub3.build_body_fitted_grid = lambda *a, **k: None
+    sys.modules["mesh.bodyfit_tetgen"] = _stub3
+    try:
+        _norm_log = []
+        _buf3 = io.StringIO()
+        with redirect_stdout(_buf3):
+            _gm.generate_mesh_impl([fus, tail], quality_text="Средняя",
+                                   log_cb=_norm_log.append)
+    finally:
+        if _saved2 is None:
+            sys.modules.pop("mesh.bodyfit_tetgen", None)
+        else:
+            sys.modules["mesh.bodyfit_tetgen"] = _saved2
+    check("на модели 8 м пол не применяется и не пугает зря",
+          "ниже допустимого минимума" not in "\n".join(_norm_log),
+          "\n".join(_norm_log)[:90])
+
+    # ---------------------------------------------------------------
+    # Причина отката на картезианский фон обязана доходить до лога.
+    # Раньше отказ импорта mesh.bodyfit_tetgen проглатывался голым
+    # except, и пользователь получал сетку без объяснений.
+    print()
+    print("== причина отката на картезианский фон видна в логе ==")
+    import types as _t2
+
+    class _Boom(_t2.ModuleType):
+        def __getattr__(self, name):
+            raise ImportError("No module named 'tetgen'")
+
+    _real = sys.modules.get("mesh.bodyfit_tetgen")
+    sys.modules["mesh.bodyfit_tetgen"] = _Boom("mesh.bodyfit_tetgen")
+    try:
+        _imp_log = []
+        _buf4 = io.StringIO()
+        with redirect_stdout(_buf4):
+            _gm.generate_mesh_impl([fus, tail], quality_text="Средняя",
+                                   log_cb=_imp_log.append)
+    finally:
+        if _real is None:
+            sys.modules.pop("mesh.bodyfit_tetgen", None)
+        else:
+            sys.modules["mesh.bodyfit_tetgen"] = _real
+    _imp_joined = "\n".join(_imp_log)
+    check("отказ импорта модуля попал в лог",
+          "телооблекающая сетка недоступна" in _imp_joined, _imp_joined[:90])
+    check("в сообщении сказано, чем это грозит",
+          "не облегает" in _imp_joined)
+
+    import mesh.bodyfit_tetgen as _BF
+    check("tetgen_missing перечисляет tetgen при его отсутствии",
+          _BF.tetgen_available() is True or "tetgen" in _BF.tetgen_missing(),
+          str(_BF.tetgen_missing()))
+    _keep = (_BF.HAS_TETGEN, _BF.HAS_TRIMESH, _BF.HAS_SCIPY, _BF.HAS_PYVISTA)
+    _BF.HAS_TETGEN, _BF.HAS_TRIMESH = False, True
+    try:
+        check("tetgen_missing называет именно отсутствующий пакет",
+              _BF.tetgen_missing() == ["tetgen"], str(_BF.tetgen_missing()))
+    finally:
+        (_BF.HAS_TETGEN, _BF.HAS_TRIMESH,
+         _BF.HAS_SCIPY, _BF.HAS_PYVISTA) = _keep
+    check("tetgen_missing пуст, когда всё на месте",
+          _BF.tetgen_available() is False or _BF.tetgen_missing() == [],
+          str(_BF.tetgen_missing()))
+
+    # ---------------------------------------------------------------
+    # Вырожденное тело: нулевая толщина. Киль в UI был именно таким —
+    # v_stabilizer.stl уходил в сеточник с мин. габаритом 0.0000 м, а
+    # совет «нужен шаг у тела не более 0.0000 м» был бессмыслицей.
+    print()
+    print("== вырожденное тело названо, а не послано в бесконечное сгущение ==")
+    _flat_stl = os.path.join(workdir, "_flat_plate.stl")
+    pv.Plane(i_size=1.0, j_size=0.8).triangulate().save(_flat_stl)
+    _flat_log = []
+    _buf5 = io.StringIO()
+    with redirect_stdout(_buf5):
+        _gm.generate_mesh_impl([_flat_stl, tail], quality_text="Средняя",
+                               log_cb=_flat_log.append)
+    _flat_joined = "\n".join(_flat_log)
+    check("плоское тело помечено как вырожденное",
+          "ВЫРОЖДЕННОЕ" in _flat_joined, _flat_joined[:120])
+    check("сказано, что сгущение сетки не поможет",
+          "нулевая толщина" in _flat_joined)
+    check("имя плоского компонента названо",
+          "_flat_plate.stl" in _flat_joined)
+    check("совет «шаг не более 0.0000 м» больше не выдаётся",
+          "не более 0.0000 м" not in _flat_joined, _flat_joined[:120])
+    check("для тонкого, но объёмного тела совет сохранился",
+          "Нужен шаг у тела не более" in _flat_joined
+          and "не более 0.0000" not in _flat_joined)
+
+    # ---------------------------------------------------------------
+    # Вердикт о сетке должен доходить до сессии как ПРЕДУПРЕЖДЕНИЕ.
+    # Пресеты автоконфига меняют только CFL/MUSCL/entropy fix — сетку они
+    # не трогают, поэтому число будет неточным. Но обрывать повтор нельзя:
+    # пресет меняет устойчивость схемы, и на картезианской сетке это часто
+    # единственный способ получить результат вообще.
+    print()
+    print("== сессия знает о качестве сетки, но повтор не обрывает ==")
+    import config.settings as _CS
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location(
+        "wk_probe", os.path.join(_ROOT, "solver", "workers.py"))
+    _wk = _ilu.module_from_spec(_spec)
+    sys.modules["wk_probe"] = _wk
+    _spec.loader.exec_module(_wk)
+
+    _flat_stl2 = os.path.join(workdir, "_flat_plate2.stl")
+    pv.Plane(i_size=1.0, j_size=0.8).triangulate().save(_flat_stl2)
+    _buf6 = io.StringIO()
+    with redirect_stdout(_buf6):
+        _gm.generate_mesh_impl([fus, tail, _flat_stl2],
+                               quality_text="Средняя")
+    check("вердикт: сетка не облегает тело",
+          _CS.MESH_DIAGNOSIS["body_fitted"] is False)
+    check("вердикт: тонкий компонент перечислен",
+          "h_stab.stl" in _CS.MESH_DIAGNOSIS["unresolved"],
+          str(_CS.MESH_DIAGNOSIS["unresolved"]))
+    check("вердикт: плоский компонент перечислен",
+          "_flat_plate2.stl" in _CS.MESH_DIAGNOSIS["flat"],
+          str(_CS.MESH_DIAGNOSIS["flat"]))
+    # Замечание, а не запрет. Замер пользователя на plane_wing.step:
+    # на картезианской сетке первый прогон встал на 0.60, а повтор с
+    # пресетом пошёл (0.410, -1.864, -2.295, -2.728) и точка завершилась
+    # успешно. Обрывать такой повтор — значит оставить без результата.
+    _note = _wk.mesh_quality_note()
+    check("сессия получает замечание о качестве сетки",
+          bool(_note) and "нулевая толщина" in _note, str(_note))
+
+    _CS.MESH_DIAGNOSIS.update({"body_fitted": True, "unresolved": [],
+                               "flat": [], "reason": ""})
+    check("негативный контроль: при облегающей сетке замечаний нет",
+          _wk.mesh_quality_note() is None)
+    _CS.MESH_DIAGNOSIS.update({"body_fitted": False, "unresolved": [],
+                               "flat": [], "reason": "причина X"})
+    check("причина отката доходит до сессии",
+          _wk.mesh_quality_note() == "причина X")
+    _CS.MESH_DIAGNOSIS.update({"body_fitted": True, "unresolved": [],
+                               "flat": [], "reason": ""})
+
+    _wk_src = open(os.path.join(_ROOT, "solver", "workers.py"),
+                   encoding="utf-8").read()
+    _i_rec = _wk_src.index("verdict = self._recover(")
+    _i_guard = _wk_src.index("_mesh_note = mesh_quality_note()")
+    check("замечание о сетке стоит ДО вызова автоконфига", _i_guard < _i_rec,
+          "%d против %d" % (_i_guard, _i_rec))
+    # Именно это и было регрессией: замечание обрывало цикл повторов.
+    _tail = _wk_src[_i_guard:_i_guard + 1200]
+    check("замечание не прерывает повтор прогона",
+          "break" not in _tail.split("verdict = self._recover(")[0],
+          _tail[:160])
+    # Прежняя проверка искала "_mesh_note_shown" в тексте workers.py и
+    # потому пропустила настоящий баг: атрибут был объявлен в SU2Worker, а
+    # читался в SessionRunner.run, и первый же повтор падал с
+    # AttributeError. Проверка обязана создавать объект.
+    _runner = _wk.SessionRunner(object())
+    check("SessionRunner создаётся и флаг замечания на месте",
+          hasattr(_runner, "_mesh_note_shown")
+          and _runner._mesh_note_shown is False)
+    check("флаг принадлежит SessionRunner, а не SU2Worker",
+          "_mesh_note_shown" not in getattr(_wk.SU2Worker.__init__,
+                                            "__code__", None).co_names)
+
+    # ---------------------------------------------------------------
+    # Повтор пишется в тот же каталог и перезаписывает history.csv.
+    # Без сравнения в отчёт уходит последний прогон, а не лучший:
+    # на plane_wing.step первый дошёл до -3.33, повтор с пресетом выдал
+    # Cd=0.851 при L/D=0.40 — и в CSV попал именно он.
+    print()
+    print("== в отчёт идёт лучший прогон, а не последний ==")
+    _hist_dir = os.path.join(workdir, "_hist_case")
+    os.makedirs(_hist_dir, exist_ok=True)
+    with open(os.path.join(_hist_dir, "history.csv"), "w",
+              encoding="utf-8") as _fh:
+        _fh.write('"Iteration","rms[Rho]","CL","CD","CMz"\n')
+        _fh.write('"1","0.60900","0.010","0.020","0.001"\n')
+        _fh.write('"2","-3.33000","0.337","0.851","0.054"\n')
+    _h = _wk.parse_history(_hist_dir)
+    check("parse_history возвращает невязку", _h is not None
+          and abs(_h["rms"] - (-3.33)) < 1e-9, str(_h))
+    check("parse_history возвращает коэффициенты",
+          abs(_h["cl"] - 0.337) < 1e-9 and abs(_h["cd"] - 0.851) < 1e-9)
+
+    _prev = {"aoa": 3.0, "cl": 0.337, "cd": 0.851, "rms": -3.33,
+             "error": True, "error_msg": "встал", "stopped": False}
+    _new = {"aoa": 3.0, "cl": 0.100, "cd": 0.900, "rms": -1.20,
+            "error": False, "error_msg": "", "stopped": False}
+    _notes = []
+    _kept = _wk.SessionRunner._better_result(_prev, _new, _notes.append)
+    check("оставлен прогон с меньшей невязкой",
+          _kept["rms"] == -3.33 and _kept["cl"] == 0.337, str(_kept))
+    check("пользователю сказано, что оставлен первый прогон",
+          len(_notes) == 1 and "первого прогона" in _notes[0], str(_notes))
+    check("оставленный результат не помечен ошибкой",
+          _kept["error"] is False)
+    check("несходимость всё равно упомянута",
+          "-4" in _kept["error_msg"], _kept["error_msg"])
+
+    _better_new = {"aoa": 3.0, "cl": 0.20, "cd": 0.02, "rms": -5.0,
+                   "error": False, "error_msg": "", "stopped": False}
+    _notes2 = []
+    check("если повтор лучше — остаётся повтор",
+          _wk.SessionRunner._better_result(_prev, _better_new,
+                                           _notes2.append)["rms"] == -5.0
+          and _notes2 == [])
+    _noRms = {"aoa": 3.0, "cl": 0.0, "cd": 0.0, "rms": None,
+              "error": False, "error_msg": "", "stopped": False}
+    check("без невязки сравнивать нечего — остаётся новый",
+          _wk.SessionRunner._better_result(_prev, _noRms,
+                                           lambda m: None) is _noRms)
+
+    _wk_src2 = open(os.path.join(_ROOT, "solver", "workers.py"),
+                    encoding="utf-8").read()
+    check("цикл повторов сравнивает прогоны",
+          "res = self._better_result(_prev, res, log_cb)" in _wk_src2)
+
+    # ---------------------------------------------------------------
+    # SU2 требует, чтобы у каждой грани маркера был ровно один соседний
+    # тетраэдр. На полном самолёте mesh.su2 этому не удовлетворял:
+    #   The surface element (0, 195) doesn't have an associated volume
+    #   element
+    # и точка перезапускалась трижды с одним и тем же файлом.
+    print()
+    print("== маркеры согласованы с объёмной сеткой (инвариант SU2) ==")
+    import numpy as np
+    _outer = pv.Box(bounds=(-5, 5, -5, 5, -5, 5)).triangulate().points
+    _sph = pv.Sphere(radius=1.0, theta_resolution=24,
+                     phi_resolution=24).triangulate()
+    _grid = pv.PolyData(np.vstack([_outer, _sph.points])).delaunay_3d()
+    _cc = _grid.cell_centers().points
+    _keep = np.flatnonzero(np.linalg.norm(_cc, axis=1) > 1.05)
+    _grid = _grid.extract_cells(_keep)
+
+    _surf = _grid.extract_surface(algorithm="dataset_surface").triangulate()
+    _sf = np.asarray(_surf.faces).reshape(-1, 4)[:, 1:]
+    _sp = np.asarray(_surf.points).copy()
+    # грань, которой нет среди тетраэдров — ровно та, что ломает SU2
+    _sp = np.vstack([_sp, [[0.2, 0.2, 0.98], [0.6, 0.1, 0.85],
+                           [0.1, 0.6, 0.85]]])
+    _sf = np.vstack([_sf, [[len(_sp) - 3, len(_sp) - 2, len(_sp) - 1]]])
+    _bad = pv.PolyData(_sp, np.hstack([[3, *t] for t in _sf]).astype(np.int64))
+
+    _wlog = []
+    _out = os.path.join(workdir, "_marker_check.su2")
+    _gm.write_su2(_grid, _bad, _out, log_cb=_wlog.append)
+    _wj = "\n".join(_wlog)
+    check("грань без соседнего тетраэдра обнаружена и названа в логе",
+          "которых нет на границе объёмной сетки" in _wj, _wj[:160])
+
+    _lines = open(_out, encoding="ascii", errors="replace").read().split("\n")
+    _i = 0; _tets2 = []; _mk = {}
+    while _i < len(_lines):
+        _t = _lines[_i].split("%")[0].strip()
+        if _t.startswith("NELEM="):
+            _n = int(_t.split("=")[1])
+            _tets2 = [tuple(int(x) for x in _lines[_i + 1 + _k].split()[1:5])
+                      for _k in range(_n)]
+            _i += _n
+        elif _t.startswith("MARKER_TAG="):
+            _tag = _t.split("=")[1].strip()
+            _k2 = int(_lines[_i + 1].split("%")[0].strip().split("=")[1])
+            _mk[_tag] = [tuple(int(x) for x in _lines[_i + 2 + _j].split()[1:4])
+                         for _j in range(_k2)]
+            _i += _k2 + 1
+        _i += 1
+    _t2 = np.asarray(_tets2)
+    _tf2 = np.vstack([_t2[:, [0, 1, 2]], _t2[:, [0, 1, 3]],
+                      _t2[:, [0, 2, 3]], _t2[:, [1, 2, 3]]])
+    _u2, _c2 = np.unique(np.sort(_tf2, axis=1), axis=0, return_counts=True)
+    _bnd = set(map(tuple, _u2[_c2 == 1]))
+    _all = set(map(tuple, _u2))
+    _viol = 0
+    _cov = set()
+    for _tag, _fs in _mk.items():
+        for _f in _fs:
+            _k3 = tuple(sorted(_f))
+            _cov.add(_k3)
+            if _k3 not in _bnd or len(set(_f)) < 3:
+                _viol += 1
+        _srt = [tuple(sorted(_f)) for _f in _fs]
+        _viol += len(_srt) - len(set(_srt))
+    # Маркеры намеренно не правятся — только диагностируются. Поэтому
+    # injected-грань остаётся в файле, и важно, что детектор назвал ровно
+    # её, а не половину сетки.
+    check("нарушение ровно одно — добавленная грань, ложных срабатываний нет "
+          "(нарушителей %d)" % _viol, _viol == 1, "нарушителей %d" % _viol)
+    check("маркер airfoil непустой", len(_mk.get("airfoil", [])) > 0)
+
+    # Негативный контроль: на поверхности без посторонних граней детектор
+    # молчит, то есть не гудит на каждой сетке подряд.
+    _clean_log = []
+    _out2 = os.path.join(workdir, "_marker_clean.su2")
+    _gm.write_su2(_grid, _surf, _out2, log_cb=_clean_log.append)
+    _cj = "\n".join(_clean_log)
+    check("на чистой поверхности детектор молчит",
+          "которых нет на границе объёмной сетки" not in _cj, _cj[:160])
+
+    # ---------------------------------------------------------------
+    # Резка по плоскости симметрии ломала инвариант SU2. На полном
+    # самолёте с плоскостью XZ замерено: 422 висячих и 122 дубля в
+    # airfoil, 54 висячих в farfield — SU2 падал на SetBoundVolume.
+    # Плюс NMARK был жёстко 2 при четырёх записанных маркерах, и одни
+    # грани писались дважды: symmetry_plane и symmetry_xz.
+    print()
+    print("== симметрия не ломает инвариант SU2 ==")
+    import numpy as _np
+    gg_mesh = _gm.MESH_FILE
+    _sym_log = []
+    _buf7 = io.StringIO()
+    with redirect_stdout(_buf7):
+        _ok_sym, _msg_sym = _gm.generate_mesh_impl(
+            [fus], quality_text="Средняя", log_cb=_sym_log.append,
+            use_symmetry=True, symmetry_planes=["xz"])
+    check("сетка с симметрией построилась (%s)" % _msg_sym, bool(_ok_sym))
+    _sl = open(gg_mesh, encoding="ascii", errors="replace").read().split("\n")
+    _i = 0; _t3 = []; _mk3 = {}; _nmark = None
+    while _i < len(_sl):
+        _t = _sl[_i].split("%")[0].strip()
+        if _t.startswith("NELEM="):
+            _n = int(_t.split("=")[1])
+            _t3 = [tuple(int(x) for x in _sl[_i + 1 + _k].split()[1:5])
+                   for _k in range(_n)]
+            _i += _n
+        elif _t.startswith("NMARK="):
+            _nmark = int(_t.split("=")[1])
+        elif _t.startswith("MARKER_TAG="):
+            _tag = _t.split("=")[1].strip()
+            _k2 = int(_sl[_i + 1].split("%")[0].strip().split("=")[1])
+            _mk3[_tag] = [tuple(int(x) for x in _sl[_i + 2 + _j].split()[1:4])
+                          for _j in range(_k2)]
+            _i += _k2 + 1
+        _i += 1
+    check("NMARK равен числу записанных маркеров (%s против %d)"
+          % (_nmark, len(_mk3)), _nmark == len(_mk3))
+    check("маркер симметрии один, без дубля symmetry_plane",
+          "symmetry_plane" not in _mk3 and "symmetry_xz" in _mk3,
+          str(sorted(_mk3)))
+    _t3a = _np.asarray(_t3)
+    _tf3 = _np.vstack([_t3a[:, [0, 1, 2]], _t3a[:, [0, 1, 3]],
+                       _t3a[:, [0, 2, 3]], _t3a[:, [1, 2, 3]]])
+    _u3, _c3 = _np.unique(_np.sort(_tf3, axis=1), axis=0, return_counts=True)
+    _bnd3 = set(map(tuple, _u3[_c3 == 1].tolist()))
+    _v3 = 0
+    for _tag, _fs in _mk3.items():
+        _srt = [tuple(sorted(_f)) for _f in _fs]
+        _v3 += sum(1 for _f in _srt if _f not in _bnd3)
+        _v3 += len(_srt) - len(set(_srt))
+    check("с симметрией нарушений инварианта нет (нарушителей %d)" % _v3,
+          _v3 == 0)
+
+    # ---------------------------------------------------------------
+    # Плоскость симметрии не должна попадать в маркер стенки. Коробка
+    # расчётной области симметрична относительно плоскости реза, слой её
+    # узлов лежит ровно на Y=0, и clip() переиспользует эти точки как
+    # старые. Признак «все вершины созданы резкой» такие грани отвергал,
+    # они уходили в airfoil, и SU2 получал MARKER_EULER и
+    # MARKER_MONITORING на плоской плите в невозмущённом потоке.
+    # Замерено на самолёте: airfoil 3105.9 м2, из них 3078.8 м2 — ровно
+    # плоскость Y=0; настоящая поверхность тела 27.1 м2. Расчёт по такой
+    # сетке дал Cd=0.184 и Cm=9.23 при норме ~0.02 и ~0.1.
+    _i3 = 0
+    _P3 = None
+    while _i3 < len(_sl):
+        _t = _sl[_i3].split("%")[0].strip()
+        if _t.startswith("NPOIN="):
+            _n3 = int([x for x in _t.replace("=", " ").split() if x][-1])
+            _P3 = _np.asarray([[float(v) for v in _sl[_i3 + 1 + _k].split()[:3]]
+                               for _k in range(_n3)])
+            break
+        _i3 += 1
+    _lo3, _hi3 = _P3.min(axis=0), _P3.max(axis=0)
+    _sec3 = (_hi3[0] - _lo3[0]) * (_hi3[2] - _lo3[2])   # сечение области Y=0
+
+    def _marea(_tris):
+        _A = _np.asarray(_tris)
+        _Q = _P3[_A]
+        return float(0.5 * _np.linalg.norm(
+            _np.cross(_Q[:, 1] - _Q[:, 0], _Q[:, 2] - _Q[:, 0]), axis=1).sum())
+
+    _afl = _np.asarray(_mk3["airfoil"])
+    _cy3 = _P3[_afl].mean(axis=1)[:, 1]
+    _inpl = int((_np.abs(_cy3) < 1e-9).sum())
+    _apl = _marea(_afl)
+    check("в маркере airfoil нет граней из плоскости симметрии (нашлось %d)"
+          % _inpl, _inpl == 0)
+    check("площадь airfoil %.1f м2 не сравнима с сечением области %.0f м2"
+          % (_apl, _sec3), _apl < 0.1 * _sec3,
+          "%.1f против %.0f" % (_apl, _sec3))
+    _syapl = _marea(_np.asarray(_mk3["symmetry_xz"]))
+    check("срез области полностью ушёл в симметрию (%.0f из %.0f м2)"
+          % (_syapl, _sec3), _syapl > 0.9 * _sec3,
+          "%.0f против %.0f" % (_syapl, _sec3))
+
+    # ---------------------------------------------------------------
+    # SU2 берёт нормаль грани маркера из порядка её вершин и больше
+    # ниоткуда. Грань, записанная с обходом внутрь тела, даёт вклад в
+    # силу с обратным знаком, поэтому завышались и Cl, и Cd
+    # одновременно: расчёт самолёта дал Cl=0.739, Cd=0.360 и L/D=2.05,
+    # хотя в невязкой постановке сопротивление замкнутого тела близко к
+    # нулю. Замер показал 911 из 12367 граней airfoil (7.37%) с обходом
+    # внутрь и ещё 17 в symmetry_xz.
+    _Tw = _np.asarray(_t3)
+    _ow = {}
+    for _miss in range(4):
+        _f = _Tw[:, [j for j in range(4) if j != _miss]]
+        _p = _P3[_f]
+        _n = _np.cross(_p[:, 1] - _p[:, 0], _p[:, 2] - _p[:, 0])
+        _fl = _np.einsum('ij,ij->i', _n,
+                         _p.mean(axis=1) - _P3[_Tw[:, _miss]]) < 0.0
+        _f = _np.where(_fl[:, None], _f[:, [0, 2, 1]], _f)
+        for _k, _v in zip(map(tuple, _np.sort(_f, axis=1)), _f):
+            _ow[_k] = _v
+    _inward = 0
+    for _tag, _fs in _mk3.items():
+        for _a, _b, _c in _fs:
+            _v = _ow.get(tuple(sorted((_a, _b, _c))))
+            if _v is None:
+                continue
+            _q = _P3[[_a, _b, _c]]
+            _w = _P3[list(_v)]
+            if _np.dot(_np.cross(_q[1] - _q[0], _q[2] - _q[0]),
+                       _np.cross(_w[1] - _w[0], _w[2] - _w[0])) < 0:
+                _inward += 1
+    check("все грани маркеров записаны с внешним обходом (внутрь %d)"
+          % _inward, _inward == 0)
+
+    print()
+    print("Пройдено: %d" % _passed)
+    if _failed:
+        print("ПРОВАЛЕНО ТЕСТОВ: %d → %s" % (len(_failed), _failed))
+        raise SystemExit(1)
+    print("Все проверки пройдены.")
+
+
+if __name__ == "__main__":
+    main()

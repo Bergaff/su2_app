@@ -4,7 +4,8 @@ from .generators import (WingParameters, generate_fuselage_mesh, generate_wing,
                          generate_vertical_stabilizer_geometry,
                          create_primitive, create_vtail_support,
                          horizontal_area, _project_outline_to_plane,
-                         _compute_closed_area_centroid)
+                         _compute_closed_area_centroid, cad_to_stl,
+                         CAD_EXTENSIONS)
 from .stl_healer import heal_stl_mesh, HealReportDialog, STLHealer
 
 __all__ = [
@@ -21,6 +22,8 @@ __all__ = [
     "horizontal_area",
     "_project_outline_to_plane",
     "_compute_closed_area_centroid",
+    "cad_to_stl",
+    "CAD_EXTENSIONS",
     "heal_stl_mesh",
     "HealReportDialog",
     "STLHealer",

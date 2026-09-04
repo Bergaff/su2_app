@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import math
+import os
+
 import numpy as np
+import re
 import pyvista as pv
 
 from physics.airfoils import generate_naca4_section
@@ -58,6 +61,89 @@ def _cap_faces(start_idx, n_points, center_idx):
         j = (i + 1) % n_points
         faces.append([3, center_idx, start_idx + i, start_idx + j])
     return faces
+
+
+def _ring_chord_steps(ring_a, ring_b):
+    """Длины хордовых рёбер между двумя контурами (по точке i -> i+1)."""
+    n = len(ring_a)
+    out = []
+    for i in range(n):
+        j = (i + 1) % n
+        da = math.dist(ring_a[i], ring_a[j])
+        db = math.dist(ring_b[i], ring_b[j])
+        out.append(0.5 * (da + db))
+    return out
+
+
+def _loft_rings(rings, cap_aspect=3.0):
+    """Лофт последовательности контуров с адаптивным числом сечений.
+
+    Это то, из-за чего сетка оперения получалась непригодной. Прежний
+    ``_loft_sections`` соединял соседние контуры ОДНИМ поясом четырёхуголь-
+    ников: у ГО на размахе 2.8 м выходило две панели по 1.4 м при шаге
+    точек хорды около 0.015 м, то есть соотношение сторон 90:1. После
+    триангуляции это иглы: измерено на готовом ГО — максимальное ребро
+    1.4277 м при минимальном 4.6e-04 м. Такая поверхность не принимает
+    уплотнение без вырожденных треугольников, и объёмный сеточник её
+    отвергает.
+
+    Здесь между каждой парой контуров вставляется столько промежуточных
+    сечений, чтобы отношение пролёта к медианному хордовому шагу не
+    превышало ``cap_aspect``. Сечения получаются линейной интерполяцией,
+    поэтому для прямого лофта поверхность не меняется вовсе — меняется
+    только её триангуляция.
+
+    Промежуточных сечений столько же у всех хордовых полос пары: если
+    брать своё число на полосу, на стыках появляются висячие узлы
+    (T-пересечения) и поверхность перестаёт быть замкнутой.
+
+    ``rings`` — список контуров одинаковой длины, каждый замкнут неявно.
+    Возвращает ``(points, faces)`` в формате pyvista (плоский список).
+    """
+    pts = []
+    faces = []
+    for k in range(len(rings) - 1):
+        a, b = rings[k], rings[k + 1]
+        n = len(a)
+        steps = _ring_chord_steps(a, b)
+        d_med = float(np.median(steps)) if steps else 0.0
+        d_span = float(np.mean([math.dist(a[i], b[i]) for i in range(n)]))
+        if d_med > 0.0 and d_span > 0.0:
+            m = int(math.ceil(d_span / max(cap_aspect * d_med, 1e-12)))
+        else:
+            m = 1
+        m = max(1, m)
+        # Кольца пары: t = 0 .. m. Первое берём из уже накопленных точек,
+        # чтобы не дублировать вершины на стыке контуров.
+        base = []
+        for t in range(m + 1):
+            w = t / m
+            if t == 0 and pts:
+                base.append(list(range(len(pts) - n, len(pts))))
+                continue
+            row = []
+            for i in range(n):
+                row.append(len(pts))
+                pts.append([a[i][0] + (b[i][0] - a[i][0]) * w,
+                            a[i][1] + (b[i][1] - a[i][1]) * w,
+                            a[i][2] + (b[i][2] - a[i][2]) * w])
+            base.append(row)
+        for t in range(m):
+            r0, r1 = base[t], base[t + 1]
+            for i in range(n):
+                j = (i + 1) % n
+                p00, p01, p11, p10 = r0[i], r0[j], r1[j], r1[i]
+                # Диагональ выбираем короткую: у четырёхугольника 1.4 x 0.015
+                # разрез по длинной диагонали даёт две иглы, по короткой —
+                # два нормальных треугольника.
+                if (math.dist(pts[p00], pts[p11])
+                        <= math.dist(pts[p01], pts[p10])):
+                    faces.append([3, p00, p01, p11])
+                    faces.append([3, p00, p11, p10])
+                else:
+                    faces.append([3, p00, p01, p10])
+                    faces.append([3, p01, p11, p10])
+    return pts, faces
 
 
 def _loft_sections(n, section_count, with_caps=True):
@@ -187,79 +273,51 @@ def generate_wing_mesh(span, chord_root, chord_tip, sweep_deg, twist_deg,
         x_tip = half_span * math.tan(sweep_in)
     stations.append((1.0, chord_tip, x_tip, twist_deg))
 
-    loops = []
+    # Консоли строятся адаптивным лофтом. Прежний код соединял соседние
+    # станции одним поясом четырёхугольников: при размахе 9.02 м панель
+    # консоли была 4.59 м при хордовом шаге около 0.02 м, а измеренное
+    # максимальное ребро готового крыла — 4.5913 м.
+    #
+    # Заодно убран дефект, из-за которого крыло вообще не было объёмом.
+    # Корневая станция (eta=0) давала левый и правый контур в одной точке
+    # y=0, то есть два геометрически совпадающих, но топологически разных
+    # контура, и каждый закрывался своей крышкой. Измерено на старом коде:
+    # 79 дублей граней, 632 ребра с тремя и более соседями,
+    # is_watertight=False, is_volume=False. Теперь корневой контур один,
+    # он общий для обеих консолей, и крышка в корне не нужна вовсе.
+    sec_pts = []
     for eta, chord, x_le, tw in stations:
         rx, rz = generate_naca4_section(chord, naca_code, twist=tw)
-        n = len(rx)
-        # две консоли: влево и вправо от оси симметрии
-        y_left = -eta * half_span
-        y_right = +eta * half_span
-        loops.append((n, x_le, y_left, y_right))
+        yL = -eta * half_span + pos_y * 0
+        yR = +eta * half_span
+        left = [[x_le + rx[i] + pos_x, yL, pos_z + rz[i]] for i in range(len(rx))]
+        right = [[x_le + rx[i] + pos_x, yR, pos_z + rz[i]] for i in range(len(rx))]
+        sec_pts.append((left, right))
 
-    points = []
-    all_faces = []
-    # строим лофт по секциям: каждая секция — левая и правая точки
-    # структура: [sec0_L, sec0_R, sec1_L, sec1_R, ...]
-    sec_meshes_pts = []
-    for n, x_le, yL, yR in loops:
-        chord = loops[len(sec_meshes_pts)][3] if False else None
-    # проще: пересобираем заново с известными хордами
-    sec_pts = []
-    for (eta, chord, x_le, tw), (n, _xl, yL, yR) in zip(stations, loops):
-        rx, rz = generate_naca4_section(chord, naca_code, twist=tw)
-        left = [[x_le + rx[i], yL + pos_y * 0, pos_z + rz[i]] for i in range(n)]
-        right = [[x_le + rx[i], yR, pos_z + rz[i]] for i in range(n)]
-        for p in left:
-            p[0] += pos_x
-            p[1] += 0.0
-        for p in right:
-            p[0] += pos_x
-        sec_pts.append((left, right, n))
+    # В корне левый и правый контуры совпадают — берём один.
+    root = sec_pts[0][0]
+    left_rings = [sp[0] for sp in sec_pts[1:]][::-1] + [root]
+    right_rings = [root] + [sp[1] for sp in sec_pts[1:]]
 
-    points = []
-    for left, right, n in sec_pts:
-        points.extend(left)
-        points.extend(right)
+    pts_l, faces_l = _loft_rings(left_rings)
+    pts_r, faces_r = _loft_rings(right_rings)
 
-    nsec = len(sec_pts)
-    n = sec_pts[0][2]
-    # локальные индексы: секция k -> начало 2*k*n
-    def LI(k, side):  # side 0=left,1=right
-        return 2 * k * n + side * n
+    off = len(pts_l)
+    points = list(pts_l) + list(pts_r)
+    all_faces = list(faces_l) + [[f[0]] + [i + off for i in f[1:]] for f in faces_r]
 
-    for k in range(nsec - 1):
-        # левая консоль: от секции k к k+1 (движение к корню, т.е. отрицательному y)
-        for i in range(n - 1):
-            all_faces.append([4, LI(k + 1, 0) + i, LI(k + 1, 0) + i + 1,
-                              LI(k, 0) + i + 1, LI(k, 0) + i])
-        all_faces.append([4, LI(k + 1, 0) + n - 1, LI(k + 1, 0),
-                          LI(k, 0), LI(k, 0) + n - 1])
-        # правая консоль
-        for i in range(n - 1):
-            all_faces.append([4, LI(k, 1) + i, LI(k, 1) + i + 1,
-                              LI(k + 1, 1) + i + 1, LI(k + 1, 1) + i])
-        all_faces.append([4, LI(k, 1) + n - 1, LI(k, 1),
-                          LI(k + 1, 1), LI(k + 1, 1) + n - 1])
-
-    # крышки на концах (левый конец первой секции, правый конец последней)
-    def LI(k, side):
-        return 2 * k * n + side * n
-
+    n = len(root)
+    # Крышки только на концах: левый конец левой консоли и правый конец
+    # правой. Корень закрыт самим стыком консолей. Начало последнего
+    # контура фиксируем ДО первого append — иначе len(points) сдвигается
+    # на центроид и правая крышка уходит на чужой контур.
+    last_start = len(points) - n
     c1 = len(points)
-    points.append(_centroid(points, LI(0, 0), n))
-    all_faces.extend(_cap_faces(LI(0, 0), n, c1))
+    points.append(_centroid(points, 0, n))
+    all_faces.extend(_cap_faces(0, n, c1))
     c2 = len(points)
-    points.append(_centroid(points, LI(nsec - 1, 1), n))
-    all_faces.extend(_cap_faces(LI(nsec - 1, 1), n, c2))
-
-    # стык секций в центре (корневая нервюра): крышка между секцией 0 L и R
-    # нужна, только если крыло разомкнуто в центре — у нас две консоли, закрываем
-    c3 = len(points)
-    points.append(_centroid(points, LI(0, 1), n))
-    all_faces.extend(_cap_faces(LI(0, 1), n, c3))
-    c4 = len(points)
-    points.append(_centroid(points, LI(nsec - 1, 0), n))
-    all_faces.extend(_cap_faces(LI(nsec - 1, 0), n, c4))
+    points.append(_centroid(points, last_start, n))
+    all_faces.extend(_cap_faces(last_start, n, c2))
 
     flat = [v for f in all_faces for v in f]
     mesh = pv.PolyData(np.array(points), np.array(flat)).triangulate().clean(tolerance=1e-6)
@@ -304,17 +362,18 @@ def _mech_panel_mesh(span_part, chord_ref, sweep_offset_end, naca_code,
                     pts_row = [pos_x - slide_ratio * chord_ref + xr, y,
                                pos_z - 0.02 * chord_ref + zr]
                     (pts_in if y_abs == y_start_ratio else pts_out).append(pts_row)
-        points = pts_in + pts_out
-        faces = []
-        for i in range(n - 1):
-            faces.append([4, i, i + 1, n + i + 1, n + i])
-        faces.append([4, n - 1, 0, n, 2 * n - 1])
-        c1 = len(points)
+        # Два контура на всю ширину панели давали четырёхугольники шириной
+        # в десятки сантиметров при хордовом шаге около сантиметра. Тот же
+        # адаптивный лофт, что и у оперения.
+        points, faces = _loft_rings([pts_in, pts_out])
+        n_loft = len(points)
+        last_start = n_loft - n
+        c1 = n_loft
         points.append(_centroid(points, 0, n))
         faces.extend(_cap_faces(0, n, c1))
         c2 = len(points)
-        points.append(_centroid(points, n, n))
-        faces.extend(_cap_faces(n, n, c2))
+        points.append(_centroid(points, last_start, n))
+        faces.extend(_cap_faces(last_start, n, c2))
         return points, faces
 
     p1, f1 = make_half(+1)
@@ -358,7 +417,15 @@ def generate_slats_mesh(span, chord_root, chord_tip, slat_deflection,
 
 
 def generate_fuselage_mesh(param_group: dict, n_len=80, n_circ=48) -> pv.PolyData:
-    """Запасной (быстрый) фюзеляж по n1/n2/n3, если UI не переопределяет."""
+    """Запасной (быстрый) фюзеляж по n1/n2/n3, если UI не переопределяет.
+
+    Торцы закрыты конусами из треугольников. Без заглушек оболочка не
+    замкнута: у неё есть край, и булево объединение с другими телами
+    становится невозможным (trimesh честно возвращает незамкнутую
+    поверхность, а union от неё отказывается). Основной фюзеляж
+    приложения в ui/main_window.py заглушки имеет — эта функция должна
+    вести себя так же, иначе запасной путь даёт необъединяемую модель.
+    """
     L = float(param_group.get("n1", 5.0))
     R = float(param_group.get("n2", 0.6))
     nose_frac = float(param_group.get("n3", 0.35))
@@ -369,21 +436,46 @@ def generate_fuselage_mesh(param_group: dict, n_len=80, n_circ=48) -> pv.PolyDat
     tail = xs > 0.75
     de = (xs[tail] - 0.75) / 0.25
     r[tail] = (1.0 - (de ** 0.8) / (de ** 0.8 + (1 - de) ** 2))
-    theta = np.linspace(0.0, 2 * np.pi, n_circ)
-    X = np.repeat(xs * L, n_circ)
-    T = np.tile(theta, n_len)
-    Y = np.repeat(r * R, n_circ) * np.cos(T)
-    Z = np.repeat(r * R, n_circ) * np.sin(T)
-    pts = np.column_stack([X, Y, Z])
-    faces = []
-    for i in range(n_len - 1):
+    theta = np.linspace(0.0, 2 * np.pi, n_circ, endpoint=False)
+
+    points = []
+    rings = []
+    for i, (x_n, ri) in enumerate(zip(xs, r)):
+        # Кольца нулевого радиуса (сам нос и самый срез хвоста) не нужны:
+        # они стягиваются в одну точку, и clean() схлопывает их, оставляя
+        # вырожденные грани. Вместо них ниже ставятся вершины-конусы.
+        if ri < 1e-9:
+            continue
+        ring = []
         for j in range(n_circ):
-            a = i * n_circ + j
-            b = i * n_circ + (j + 1) % n_circ
-            c = (i + 1) * n_circ + (j + 1) % n_circ
-            d = (i + 1) * n_circ + j
-            faces += [4, a, b, c, d]
-    return pv.PolyData(pts, np.array(faces)).clean()
+            ring.append(len(points))
+            points.append([x_n * L, ri * R * np.cos(theta[j]),
+                           ri * R * np.sin(theta[j])])
+        rings.append(ring)
+    if len(rings) < 2:
+        return pv.PolyData(np.zeros((1, 3)), np.array([], dtype=np.int64))
+
+    faces = []
+    nose_tip = len(points)
+    points.append([float(xs[0]) * L, 0.0, 0.0])
+    tail_tip = len(points)
+    points.append([float(xs[-1]) * L, 0.0, 0.0])
+
+    first = rings[0]
+    for j in range(n_circ):
+        faces.append([3, nose_tip, first[(j + 1) % n_circ], first[j]])
+    for k in range(len(rings) - 1):
+        r1, r2 = rings[k], rings[k + 1]
+        for j in range(n_circ):
+            faces.append([4, r1[j], r1[(j + 1) % n_circ],
+                          r2[(j + 1) % n_circ], r2[j]])
+    last = rings[-1]
+    for j in range(n_circ):
+        faces.append([3, last[j], last[(j + 1) % n_circ], tail_tip])
+
+    flat = np.array([v for f in faces for v in f], dtype=np.int64)
+    return pv.PolyData(np.array(points), flat).triangulate().clean(
+        tolerance=1e-9)
 
 
 def generate_tail_surface(airfoil_manager, airfoil_name, span, chord_root,
@@ -393,23 +485,28 @@ def generate_tail_surface(airfoil_manager, airfoil_name, span, chord_root,
     half_span = span / 2.0
     sweep = math.radians(sweep_deg)
     sweep_offset = half_span * math.tan(sweep)
-    rx, rz = generate_naca4_section(chord_root, airfoil_name.replace("NACA", ""), 0.0)
-    tx, tz = generate_naca4_section(chord_tip, airfoil_name.replace("NACA", ""), 0.0)
+    rx, rz = generate_naca4_section(chord_root, airfoil_name.replace("NACA", ""),
+                                    0.0, n=n_chord)
+    tx, tz = generate_naca4_section(chord_tip, airfoil_name.replace("NACA", ""),
+                                    0.0, n=n_chord)
     n = len(rx)
-    points = []
-    for i in range(n):
-        points.append([tx[i] + sweep_offset + x_offset, -half_span, tz[i] + z_offset])
-    for i in range(n):
-        points.append([rx[i] + x_offset, 0.0, rz[i] + z_offset])
-    for i in range(n):
-        points.append([tx[i] + sweep_offset + x_offset, +half_span, tz[i] + z_offset])
-    faces = _loft_sections(n, 3)
-    left_c = len(points)
+    tip_l = [[tx[i] + sweep_offset + x_offset, -half_span, tz[i] + z_offset]
+             for i in range(n)]
+    root = [[rx[i] + x_offset, 0.0, rz[i] + z_offset] for i in range(n)]
+    tip_r = [[tx[i] + sweep_offset + x_offset, +half_span, tz[i] + z_offset]
+             for i in range(n)]
+    points, faces = _loft_rings([tip_l, root, tip_r])
+    # Начало последнего контура фиксируем ДО добавления центроидов: после
+    # первого append len(points) сдвигается, и правая крышка уходит на
+    # центроид левой (проверено: 4 граничных ребра длиной 2.803 м).
+    n_loft = len(points)
+    last_start = n_loft - n
+    left_c = n_loft
     points.append(_centroid(points, 0, n))
     faces.extend(_cap_faces(0, n, left_c))
     right_c = len(points)
-    points.append(_centroid(points, 2 * n, n))
-    faces.extend(_cap_faces(2 * n, n, right_c))
+    points.append(_centroid(points, last_start, n))
+    faces.extend(_cap_faces(last_start, n, right_c))
     flat = [v for f in faces for v in f]
     mesh = pv.PolyData(np.array(points), np.array(flat)).triangulate().clean(tolerance=1e-6)
     mesh.compute_normals(auto_orient_normals=True, inplace=True)
@@ -422,21 +519,38 @@ def generate_vertical_stabilizer_geometry(airfoil_manager, airfoil_name, height,
     """ВО: лофт корень→конец по высоте."""
     sweep = math.radians(sweep_deg)
     sweep_offset = height * math.tan(sweep)
-    rx, rz = generate_naca4_section(chord_root, airfoil_name.replace("NACA", ""), 0.0)
-    tx, tz = generate_naca4_section(chord_tip, airfoil_name.replace("NACA", ""), 0.0)
+    # ry/ty — координата толщины профиля. Для киля она откладывается
+    # по Y, а лофт идёт по Z (высоте).
+    #
+    # Раньше координата толщины уходила в глобальный Z, а Y у обоих
+    # сечений был жёстко нулём:
+    #     points.append([rx[i], 0.0, rz[i] + z_offset])
+    #     points.append([tx[i] + sweep_offset, 0.0, tz[i] + z_offset + height])
+    # Киль получался плоским листом нулевой толщины. Последствия:
+    #   - размах по Y ровно 0, поэтому при выборе шага уплотнения такое
+    #     тело давало min_dim=0 и в refine_within_budget забирало весь
+    #     бюджет граней (501932 из 600000), оставляя фюзеляж без
+    #     уплотнения;
+    #   - лист не является объёмом, поэтому trimesh.boolean.union падает
+    #     с "Not all meshes are volumes!" — объединить компоненты в одну
+    #     замкнутую поверхность для сеточника не удаётся;
+    #   - у киля нет объёма и, значит, никаких структурных характеристик.
+    rx, ry = generate_naca4_section(chord_root, airfoil_name.replace("NACA", ""),
+                                    0.0, n=n_chord)
+    tx, ty = generate_naca4_section(chord_tip, airfoil_name.replace("NACA", ""),
+                                    0.0, n=n_chord)
     n = len(rx)
-    points = []
-    for i in range(n):
-        points.append([rx[i], 0.0, rz[i] + z_offset])
-    for i in range(n):
-        points.append([tx[i] + sweep_offset, 0.0, tz[i] + z_offset + height])
-    faces = _loft_sections(n, 2)
-    bottom_c = len(points)
+    bottom = [[rx[i], ry[i], z_offset] for i in range(n)]
+    top = [[tx[i] + sweep_offset, ty[i], z_offset + height] for i in range(n)]
+    points, faces = _loft_rings([bottom, top])
+    n_loft = len(points)
+    last_start = n_loft - n
+    bottom_c = n_loft
     points.append(_centroid(points, 0, n))
     faces.extend(_cap_faces(0, n, bottom_c))
     top_c = len(points)
-    points.append(_centroid(points, n, n))
-    faces.extend(_cap_faces(n, n, top_c))
+    points.append(_centroid(points, last_start, n))
+    faces.extend(_cap_faces(last_start, n, top_c))
     flat = [v for f in faces for v in f]
     mesh = pv.PolyData(np.array(points), np.array(flat)).triangulate().clean(tolerance=1e-6)
     mesh.compute_normals(auto_orient_normals=True, inplace=True)
@@ -453,3 +567,301 @@ def generate_wing(params: WingParameters, airfoil_manager=None) -> pv.PolyData:
         kink_pos_ratio=params.kink_pos if params.flap_kink else None,
     )
     return mesh
+
+
+# ---------------------------------------------------------------------------
+# Direct CAD Import: STEP/IGES/BREP/… → STL через gmsh (OCC-ядро)
+# ---------------------------------------------------------------------------
+# gmsh уже есть в зависимостях приложения (используется для объёмной сетки),
+# поэтому новых тяжёлых библиотек не добавляется. Конвертация идёт через
+# OpenCascade: модель открывается, поверхности триангулируются и пишутся в STL.
+
+CAD_EXTENSIONS = (".step", ".stp", ".iges", ".igs", ".x_t", ".x_b", ".sat",
+                  ".brep", ".bdf", ".nas", ".ply", ".obj", ".off")
+
+_SI_PREFIX_TO_M = {
+    "MICRO": 1e-6, "MILLI": 1e-3, "CENTI": 1e-2, "DECI": 1e-1,
+    "": 1.0, "$": 1.0, "NONE": 1.0,
+    "DEKA": 1e1, "HECTO": 1e2, "KILO": 1e3,
+}
+
+_SI_UNIT_RE = re.compile(
+    r"SI_UNIT\s*\(\s*\.(?P<prefix>[A-Z$]*)\.\s*,\s*\.METRE\.\s*\)",
+    re.IGNORECASE)
+_CONV_UNIT_RE = re.compile(
+    r"CONVERSION_BASED_UNIT\s*\(\s*'(?P<name>[^']+)'",
+    re.IGNORECASE)
+_NAMED_TO_M = {"INCH": 0.0254, "FOOT": 0.3048, "FEET": 0.3048,
+               "THOU": 0.0000254, "MIL": 0.0000254}
+
+
+def cad_detect_units(path: str):
+    """Единицы длины, объявленные в CAD-файле.
+
+    Возвращает ``(название, множитель в метры)`` или ``None``, если
+    объявление найти не удалось (IGES и бинарные форматы единиц не
+    печатают).
+
+    Нужно потому, что координаты STEP читаются как есть и дальше
+    называются метрами. Файл FreeCAD по умолчанию объявляет
+    ``SI_UNIT(.MILLI.,.METRE.)``: деталь 65 мм превращается в «крыло
+    размахом 65.077 м», и всё downstream — справочные данные, шаг
+    сетки, число Рейнольдса — считается от этого.
+
+    Пример из plane_wing.step:
+        #2118 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            head = f.read(4_000_000)
+    except Exception:
+        return None
+    m = _SI_UNIT_RE.search(head)
+    if m:
+        prefix = (m.group("prefix") or "").upper()
+        factor = _SI_PREFIX_TO_M.get(prefix)
+        if factor is None:
+            return None
+        names = {"MICRO": "мкм", "MILLI": "мм", "CENTI": "см", "DECI": "дм",
+                 "": "м", "$": "м", "NONE": "м", "DEKA": "дам",
+                 "HECTO": "гм", "KILO": "км"}
+        return names.get(prefix, prefix.lower()), factor
+    m = _CONV_UNIT_RE.search(head)
+    if m:
+        name = m.group("name").strip().upper()
+        if name in _NAMED_TO_M:
+            return name.lower(), _NAMED_TO_M[name]
+    return None
+
+
+def cad_to_stl(src_path: str, out_path: str, log=None,
+               scale: float = 1.0) -> str:
+    """Конвертирует CAD-модель в STL триангуляцией поверхностей через gmsh.
+
+    Параметры:
+        src_path — исходный CAD-файл (STEP/IGES/BREP/…)
+        out_path — куда писать STL (расширение .stl)
+        log      — опциональный callable(msg) для лога
+
+    Возвращает out_path. При ошибке поднимает RuntimeError.
+    """
+    if log:
+        log(f"  Конвертация CAD → STL: {os.path.basename(src_path)}")
+    try:
+        import gmsh
+    except Exception as e:
+        raise RuntimeError(
+            "Модуль gmsh недоступен — Direct CAD Import требует gmsh. "
+            f"({e})") from e
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Verbosity", 2)
+        gmsh.open(src_path)            # OCC читает STEP/IGES/BREP/…
+        gmsh.model.occ.synchronize()
+        # Координаты STEP читаются как есть. Если файл объявляет
+        # миллиметры, а расчёт идёт в метрах, модель надо привести к
+        # метрам здесь — иначе габарит в 65 мм приедет в решатель как
+        # 65 м, и ни шаг сетки, ни число Рейнольдса не будут иметь
+        # отношения к реальной детали.
+        try:
+            _k = float(scale)
+        except Exception:
+            _k = 1.0
+        if _k > 0 and abs(_k - 1.0) > 1e-12:
+            _ents = gmsh.model.occ.getEntities()
+            if _ents:
+                gmsh.model.occ.dilate(_ents, 0.0, 0.0, 0.0, _k, _k, _k)
+                gmsh.model.occ.synchronize()
+                if log:
+                    log(f"  Масштаб CAD → модель: {_k:g}")
+        gmsh.model.mesh.generate(2)    # триангуляция поверхностей
+        gmsh.write(out_path)           # STL
+    except Exception as e:
+        raise RuntimeError(f"Не удалось импортировать CAD-модель: {e}") from e
+    finally:
+        try:
+            gmsh.finalize()
+        except Exception:
+            pass
+
+    if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+        raise RuntimeError("gmsh не создал STL-файл (пустой результат).")
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Direct CAD Import: многодетальные сборки (ТЗ, п. 4)
+# ---------------------------------------------------------------------------
+# STEP/IGES-сборка обычно содержит несколько тел (solid). Если триангулировать
+# файл целиком, все детали попадают в один STL и теряют индивидуальные имена —
+# их нельзя ни скрыть, ни назначить им разные граничные условия. Функции ниже
+# раскладывают сборку на отдельные STL: по одному на тело.
+
+def count_stl_triangles(path: str) -> int:
+    """Число треугольников в STL (бинарном или текстовом).
+
+    Чистый Python, без внешних зависимостей — используется и для контроля
+    результата конвертации CAD, и в тестах.
+    """
+    if not os.path.isfile(path):
+        return 0
+    size = os.path.getsize(path)
+    if size < 84:
+        # точно не бинарный STL — считаем как текстовый
+        n = 0
+        with open(path, "r", encoding="ascii", errors="ignore") as f:
+            for ln in f:
+                if ln.strip().lower().startswith("facet"):
+                    n += 1
+        return n
+    with open(path, "rb") as f:
+        head = f.read(84)
+        n_bin = int.from_bytes(head[80:84], "little")
+        # бинарный STL: 84 байта заголовка + 50 байт на треугольник
+        if size == 84 + 50 * n_bin:
+            return n_bin
+    n = 0
+    with open(path, "r", encoding="ascii", errors="ignore") as f:
+        for ln in f:
+            if ln.strip().lower().startswith("facet"):
+                n += 1
+    return n
+
+
+def _stl_name_for_solid(base: str, index: int, name: str, tag) -> str:
+    """Имя файла STL для отдельного тела сборки (без gmsh — тестируемо)."""
+    clean = "".join(ch if (ch.isalnum() or ch in "-_") else "_"
+                    for ch in str(name or "")).strip("_")
+    clean = clean[:48]
+    if not clean:
+        clean = f"solid_{tag}"
+    return f"{base}_{index:02d}_{clean}.stl"
+
+
+def cad_inspect(src_path: str, log=None) -> list:
+    """Состав CAD-сборки: список тел (твёрдых тел) с объёмами и габаритами.
+
+    Возвращает список словарей ``{"tag", "name", "volume", "bbox",
+    "n_surfaces"}``. Не требует триангуляции — только чтение геометрии,
+    поэтому работает быстро даже на больших сборках.
+    """
+    try:
+        import gmsh
+    except Exception as e:
+        raise RuntimeError(
+            "Модуль gmsh недоступен — разбор CAD-сборки требует gmsh. "
+            f"({e})") from e
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Verbosity", 1)
+        gmsh.open(src_path)
+        gmsh.model.occ.synchronize()
+        out = []
+        for dim, tag in gmsh.model.getEntities(3):
+            try:
+                volume = float(gmsh.model.occ.getMass(3, tag))
+            except Exception:
+                volume = 0.0
+            try:
+                bbox = [float(x) for x in gmsh.model.getBoundingBox(3, tag)]
+            except Exception:
+                bbox = [0.0] * 6
+            try:
+                n_surf = len(gmsh.model.getBoundary([(3, tag)], oriented=False))
+            except Exception:
+                n_surf = 0
+            out.append({"tag": int(tag),
+                        "name": gmsh.model.getEntityName(3, tag) or "",
+                        "volume": volume, "bbox": bbox,
+                        "n_surfaces": int(n_surf)})
+        if log:
+            log(f"  В сборке тел: {len(out)}")
+        return out
+    except Exception as e:
+        raise RuntimeError(f"Не удалось разобрать CAD-сборку: {e}") from e
+    finally:
+        try:
+            gmsh.finalize()
+        except Exception:
+            pass
+
+
+def cad_split_to_stl(src_path: str, out_dir: str, log=None,
+                     min_volume: float = 1e-9,
+                     lin_size: float = 0.0) -> list:
+    """Раскладывает многодетальную CAD-сборку на отдельные STL.
+
+    Для каждого твёрдого тела сборки пишется свой файл
+    ``<имя>_NN_<имя_тела>.stl``; тела объёмом меньше ``min_volume``
+    (крепёж, точки, мусор) пропускаются.
+
+    Возвращает список ``{"tag", "name", "stl", "triangles", "volume"}``.
+    Если тело в сборке одно, результат эквивалентен :func:`cad_to_stl`.
+    """
+    try:
+        import gmsh
+    except Exception as e:
+        raise RuntimeError(
+            "Модуль gmsh недоступен — Direct CAD Import требует gmsh. "
+            f"({e})") from e
+
+    solids = cad_inspect(src_path, log=log)
+    keep = [s for s in solids if s.get("volume", 0.0) > min_volume]
+    if not keep:
+        keep = list(solids)
+    if not keep:
+        raise RuntimeError("В CAD-файле не найдено ни одного твёрдого тела.")
+
+    os.makedirs(out_dir or ".", exist_ok=True)
+    base = os.path.splitext(os.path.basename(src_path))[0]
+    results = []
+    for i, info in enumerate(keep, start=1):
+        tag = info["tag"]
+        out_path = os.path.join(
+            out_dir, _stl_name_for_solid(base, i, info.get("name", ""), tag))
+        gmsh.initialize()
+        try:
+            gmsh.option.setNumber("General.Verbosity", 1)
+            gmsh.open(src_path)
+            gmsh.model.occ.synchronize()
+            # удаляем все тела, кроме нужного
+            others = [(3, t) for _d, t in gmsh.model.getEntities(3) if t != tag]
+            if others:
+                gmsh.model.removeEntities(others, deleteMesh=False)
+            gmsh.model.occ.synchronize()
+            if lin_size and lin_size > 0:
+                gmsh.option.setNumber("Mesh.CharacteristicLengthMax",
+                                      float(lin_size))
+            gmsh.model.mesh.generate(2)
+            gmsh.write(out_path)
+        except Exception as e:
+            try:
+                gmsh.finalize()
+            except Exception:
+                pass
+            if log:
+                log(f"  Внимание: Тело #{tag} ({info.get('name') or 'без имени'}) "
+                    f"не конвертировано: {e}")
+            continue
+        finally:
+            try:
+                gmsh.finalize()
+            except Exception:
+                pass
+        n_tri = count_stl_triangles(out_path)
+        if n_tri == 0:
+            if log:
+                log(f"  Внимание: Тело #{tag}: пустая триангуляция, пропущено")
+            continue
+        results.append({"tag": tag, "name": info.get("name", ""),
+                        "stl": out_path, "triangles": n_tri,
+                        "volume": info.get("volume", 0.0)})
+        if log:
+            log(f"  Готово: {os.path.basename(out_path)}: {n_tri} треугольников, "
+                f"V={info.get('volume', 0.0):.4g} м³")
+
+    if not results:
+        raise RuntimeError("Не удалось триангулировать ни одно тело сборки.")
+    return results

@@ -35,6 +35,126 @@ def _format_marker_value_pairs(markers: Optional[Iterable[str]],
     return f"( {', '.join(pairs)} )"
 
 
+# Потолок CFL. Формат CFL_ADAPT_PARAM в SU2 —
+# (коэффициент вниз, коэффициент вверх, CFL минимум, CFL максимум).
+#
+# Старое значение ( 0.5, 1.2, 0.5, 5.0 ) не давало CFL подняться выше 5.0.
+# Для неявной схемы EULER_IMPLICIT это крайне робкий шаг: официальный
+# туториал SU2 по невязкому обтеканию ONERA M6 — тот же класс задач —
+# использует ( 0.1, 2.0, 100.0, 1e10 ), а туториал по соплу
+# ( 0.1, 2.0, 10.0, 1000.0 ). То есть прежний потолок был в 20 раз ниже
+# минимума из туториала.
+#
+# Агрессивный вариант включается отдельным флагом, а не подменяет
+# осторожный по умолчанию: на сетке, которая не разрешает геометрию,
+# высокий CFL не ускоряет расчёт, а роняет его быстрее. Пока маркер
+# airfoil берётся из лестницы объёмной сетки, безопаснее остаться на 5.0.
+# Порог, ниже которого сжимаемый решатель становится жёстким по акустике:
+# звуковые волны идут в 1/M раз быстрее потока, поэтому невязка плотности
+# почти не падает, как бы долго ни шёл расчёт. На V=60 м/с у земли это
+# M=0.176 — то есть типичный режим AeroOpt, а не редкий случай.
+LOW_MACH_THRESHOLD = 0.3
+
+
+# Автоматическое включение прекондиционера ВЫКЛЮЧЕНО. Проверено прогоном:
+# базовый конфиг без него на M=0.176 не расходился, а стоял на
+# log10(rms[Rho]) = -2.34; тот же конфиг с LOW_MACH_PREC/CORR= YES
+# разошёлся на 1111-й итерации (Residual > 10^20). Официальный кейс
+# TestCases/euler/turbofan_MFR_coupling использует этот прекондиционер на
+# M=0.167, но со схемой JST и MUSCL_FLOW= NO, а у нас ROE с MUSCL_FLOW=
+# YES — сочетание, которое ни один кейс не подтверждает. Опция оставлена
+# в диалоге настроек SU2: включать её нужно осознанно, одним прогоном, а
+# не по умолчанию.
+LOW_MACH_AUTO = False
+
+
+def low_mach_lines(mach, auto=LOW_MACH_AUTO) -> str:
+    """Строки прекондиционирования для малых чисел Маха.
+
+    ``LOW_MACH_PREC`` — прекондиционер Roe-Turkel, снимает жёсткость
+    системы по акустике; ``LOW_MACH_CORR`` — поправка после реконструкции
+    MUSCL на избыточную диссипацию схемы Роу. Обе в SU2 по умолчанию
+    выключены (Common/src/CConfig.cpp:1920 и 1922), а CONV_NUM_METHOD_FLOW=
+    ROE задан у нас явно — то есть это ровно тот случай, для которого они
+    сделаны.
+
+    Без них на M=0.176 невязка встаёт на log10(res) ~ -2.3 и не идёт ниже
+    даже за 6000 итераций, а сопротивление выходит в разы больше
+    индуктивного: схема Роу на низких махах вносит лишнюю вязкость.
+    """
+    if not auto:
+        return "LOW_MACH_PREC= NO\nLOW_MACH_CORR= NO"
+    try:
+        m = float(mach)
+    except (TypeError, ValueError):
+        m = 0.0
+    on = "YES" if 0.0 < m < LOW_MACH_THRESHOLD else "NO"
+    return "LOW_MACH_PREC= %s\nLOW_MACH_CORR= %s" % (on, on)
+
+
+# Итераций линейного решателя. В официальных кейсах SU2 это 2..5, но там
+# препроцессор LU_SGS, а у нас ILU: при меньшем числе итераций ньютоновский
+# шаг решается грубее. Снижение до 5 было проверено прогоном вместе с
+# прекондиционером и дало расходимость, поэтому возвращено проверенное 15.
+LINEAR_SOLVER_ITER = 15
+
+CFL_PARAM_SAFE = "( 0.5, 1.2, 0.5, 5.0 )"
+CFL_PARAM_FAST = "( 0.1, 2.0, 10.0, 1000.0 )"
+
+
+def inner_iter_estimate(mesh_quality=None, n_bodies=1, n_points=0,
+                        is_rans=False):
+    """Оценка потолка итераций и пояснение, из чего она получилась.
+
+    Прежняя привязка была только к качеству сетки: Грубая 2000, Средняя
+    6000, Точная 12000 — и не зависела от того, что именно считается.
+    Одиночное крыло получало те же 6000 итераций, что и самолёт из пяти
+    компонентов с механизацией, хотя сошёлось бы за пятую часть.
+
+    Здесь число компонентов — главный множитель, а размер сетки влияет
+    слабо (в четвёртой степени), потому что сам по себе он плохой
+    прогнозатор: грубая сетка сложной формы требует больше итераций, чем
+    мелкая сетка простого тела. RANS добавляет полтора раза — уравнения
+    турбулентности сходятся медленнее.
+
+    Важно, что это ПОТОЛОК, а не цель. Сходящийся расчёт останавливается
+    сам на CONV_RESIDUAL_MINVAL, а расходящийся теперь прерывается
+    детектором застоя в solver/workers.py. Поэтому значение можно брать с
+    запасом: оно почти не влияет на время успешного расчёта.
+
+    Возвращает (число, пояснение).
+    """
+    base = _inner_iter_for_quality(mesh_quality)
+
+    nb = max(1, int(n_bodies or 1))
+    # Один компонент — множитель 1.0, дальше +0.15 за каждый, потолок 1.8.
+    complexity = min(1.8, 1.0 + 0.15 * (nb - 1))
+
+    np_ = max(0, int(n_points or 0))
+    if np_ > 0:
+        # Зависимость намеренно слабая: размер сетки — плохой прогнозатор,
+        # грубая сетка сложной формы требует больше итераций, чем мелкая
+        # сетка простого тела. Степень 0.12 и узкий коридор 0.90..1.25
+        # дают поправку, а не вторую привязку к сетке.
+        mesh_factor = float(min(1.25, max(0.90, (np_ / 100000.0) ** 0.12)))
+    else:
+        mesh_factor = 1.0
+
+    turb = 1.5 if is_rans else 1.0
+
+    value = int(round(base * complexity * mesh_factor * turb / 500.0) * 500)
+    # Жёсткий потолок: при «Точной» на семи компонентах с RANS оценка
+    # уходит за 48 тысяч, а столько не нужен ни один осмысленный прогон.
+    value = max(500, min(20000, value))
+
+    parts = ["база %d" % base, "компонентов %d (x%.2f)" % (nb, complexity)]
+    if np_ > 0:
+        parts.append("узлов %d (x%.2f)" % (np_, mesh_factor))
+    if is_rans:
+        parts.append("RANS (x1.5)")
+    return value, ", ".join(parts)
+
+
 def _inner_iter_for_quality(mesh_quality) -> int:
     """Подбор INNER_ITER в зависимости от качества сетки.
 
@@ -65,8 +185,10 @@ def _sym_marker_names(planes):
     names = []
     for p in (planes or []):
         p = str(p).lower()
-        if p == "xz" and "symmetry_plane" not in names:
-            names.append("symmetry_plane")
+        if p == "xz" and "symmetry_xz" not in names:
+            # Раньше сюда добавлялось и старое имя symmetry_plane. В
+            # mesh.su2 те же грани больше не дублируются под двумя
+            # маркерами, поэтому в MARKER_SYM остаётся одно имя.
             names.append("symmetry_xz")
         elif p == "xy":
             names.append("symmetry_xy")
@@ -78,10 +200,26 @@ def _sym_marker_names(planes):
 def build_euler_config(p: Mapping, markers=None, restart: bool = False,
                       mesh_quality=None,
                       use_symmetry: bool = False,
-                      symmetry_planes: list = None) -> str:
+                      symmetry_planes: list = None,
+                      enable_cuda: bool = False,
+                      n_bodies: int = 0, n_points: int = 0,
+                      cfl_aggressive: bool = False) -> str:
     restart_str = "YES" if restart else "NO"
     body_markers = format_marker_list(markers)
-    inner_iter = _inner_iter_for_quality(mesh_quality)
+    if n_bodies or n_points:
+        inner_iter, inner_why = inner_iter_estimate(
+            mesh_quality, n_bodies=n_bodies, n_points=n_points, is_rans=False)
+    else:
+        inner_iter, inner_why = _inner_iter_for_quality(mesh_quality), ""
+    cfl_param = CFL_PARAM_FAST if cfl_aggressive else CFL_PARAM_SAFE
+    # Адаптация CFL остаётся включённой по умолчанию: именно с ней базовый
+    # конфиг дошёл до log10(rms[Rho]) = -2.34 без расходимости, а
+    # выключение было проверено прогоном и в расходимость не спасло.
+    # В официальных кейсах SU2 адаптация выключена везде (8 из 8), но там
+    # другие сетки; менять проверенное на рекомендованное сразу нельзя.
+    cfl_adapt = "YES"
+    lin_iter = LINEAR_SOLVER_ITER
+    lm_lines = low_mach_lines(p['mach'])
     # === T1: MARKER_SYM — плоскости симметрии ========================
     # Если включены плоскости (XY/XZ/YZ) и в сетке есть
     # соответствующие маркеры, SU2 посчитает только симметричную
@@ -95,6 +233,12 @@ def build_euler_config(p: Mapping, markers=None, restart: bool = False,
     else:
         sym_line = "% MARKER_SYM= ( symmetry_xy symmetry_xz symmetry_yz )  # выключено"
     # ==================================================================
+
+    # ENABLE_CUDA включает в SU2 GPU-ветку произведения матрицы на вектор
+    # (CMatrixVectorProduct.hpp). Без неё видеокарта не используется,
+    # даже если SU2_CFD собран с -Denable-cuda=true.
+    cuda_line = ("ENABLE_CUDA= YES" if enable_cuda
+                 else "% ENABLE_CUDA= NO   # выключено")
 
     return f"""SOLVER= EULER
 MATH_PROBLEM= DIRECT
@@ -114,6 +258,7 @@ REF_ORIGIN_MOMENT_X= {float(p['ox']):.12g}
 REF_ORIGIN_MOMENT_Y= {float(p['oy']):.12g}
 REF_ORIGIN_MOMENT_Z= {float(p['oz']):.12g}
 MARKER_EULER= {body_markers}
+{cuda_line}
 MARKER_FAR= ( farfield )
 {sym_line}
 MARKER_MONITORING= {body_markers}
@@ -124,14 +269,15 @@ SLOPE_LIMITER_FLOW= VENKATAKRISHNAN
 VENKAT_LIMITER_COEFF= 0.05
 ENTROPY_FIX_COEFF= 0.005
 NUM_METHOD_GRAD= WEIGHTED_LEAST_SQUARES
+{lm_lines}
 CFL_NUMBER= 1.0
-CFL_ADAPT= YES
-CFL_ADAPT_PARAM= ( 0.5, 1.2, 0.5, 5.0 )
+CFL_ADAPT= {cfl_adapt}
+CFL_ADAPT_PARAM= {cfl_param}
 TIME_DISCRE_FLOW= EULER_IMPLICIT
 LINEAR_SOLVER= FGMRES
 LINEAR_SOLVER_PREC= ILU
 LINEAR_SOLVER_ERROR= 1e-6
-LINEAR_SOLVER_ITER= 15
+LINEAR_SOLVER_ITER= {lin_iter}
 INNER_ITER= {inner_iter}
 CONV_RESIDUAL_MINVAL= -7
 CONV_STARTITER= 50
@@ -154,7 +300,10 @@ def build_rans_config(p: Mapping, markers=None, restart: bool = False,
                       turb_model: str = "SA",
                       use_symmetry: bool = False,
                       symmetry_planes: list = None,
-                      use_ramp_aoa: bool = False) -> str:
+                      use_ramp_aoa: bool = False,
+                      enable_cuda: bool = False,
+                      n_bodies: int = 0, n_points: int = 0,
+                      cfl_aggressive: bool = False) -> str:
     """Шаблон config.cfg для RANS.
 
     Параметры:
@@ -168,7 +317,24 @@ def build_rans_config(p: Mapping, markers=None, restart: bool = False,
     restart_str = "YES" if restart else "NO"
     body_markers = format_marker_list(markers)
     heatflux_markers = _format_marker_value_pairs(markers, 0.0)
-    inner_iter = _inner_iter_for_quality(mesh_quality)
+    if n_bodies or n_points:
+        inner_iter, inner_why = inner_iter_estimate(
+            mesh_quality, n_bodies=n_bodies, n_points=n_points, is_rans=True)
+    else:
+        inner_iter, inner_why = _inner_iter_for_quality(mesh_quality), ""
+    cfl_param = CFL_PARAM_FAST if cfl_aggressive else CFL_PARAM_SAFE
+    # Адаптация CFL остаётся включённой по умолчанию: именно с ней базовый
+    # конфиг дошёл до log10(rms[Rho]) = -2.34 без расходимости, а
+    # выключение было проверено прогоном и в расходимость не спасло.
+    # В официальных кейсах SU2 адаптация выключена везде (8 из 8), но там
+    # другие сетки; менять проверенное на рекомендованное сразу нельзя.
+    cfl_adapt = "YES"
+    lin_iter = LINEAR_SOLVER_ITER
+    lm_lines = low_mach_lines(p['mach'])
+
+    # === ENABLE_CUDA: GPU-ветка произведения матрицы на вектор =========
+    cuda_line = "ENABLE_CUDA= YES" if enable_cuda else "% ENABLE_CUDA= NO   # выключено"
+    # ====================================================================
 
     # === T1: MARKER_SYM — плоскости симметрии ========================
     if symmetry_planes is None and use_symmetry:
@@ -199,8 +365,7 @@ def build_rans_config(p: Mapping, markers=None, restart: bool = False,
     if turb_upper in ("SST", "MENTER", "KW", "K-OMEGA", "K_OMEGA"):
         turb_block = (
             "KIND_TURB_MODEL= SST\n"
-            "SOLVER_KIND_TURB= ROE\n"
-            "CONV_NUM_METHOD_TURB= ROE\n"
+                        "CONV_NUM_METHOD_TURB= ROE\n"
             "MUSCL_TURB= YES\n"
             "SLOPE_LIMITER_TURB= VENKATAKRISHNAN\n"
         )
@@ -233,6 +398,7 @@ REF_ORIGIN_MOMENT_X= {float(p['ox']):.12g}
 REF_ORIGIN_MOMENT_Y= {float(p['oy']):.12g}
 REF_ORIGIN_MOMENT_Z= {float(p['oz']):.12g}
 {ramp_block}
+{cuda_line}
 MARKER_HEATFLUX= {heatflux_markers}
 MARKER_FAR= ( farfield )
 {sym_line}
@@ -244,15 +410,16 @@ SLOPE_LIMITER_FLOW= VENKATAKRISHNAN
 VENKAT_LIMITER_COEFF= 0.05
 ENTROPY_FIX_COEFF= 0.005
 NUM_METHOD_GRAD= WEIGHTED_LEAST_SQUARES
+{lm_lines}
 CFL_NUMBER= 1.0
-CFL_ADAPT= YES
-CFL_ADAPT_PARAM= ( 0.5, 1.2, 0.5, 5.0 )
+CFL_ADAPT= {cfl_adapt}
+CFL_ADAPT_PARAM= {cfl_param}
 TIME_DISCRE_FLOW= EULER_IMPLICIT
 TIME_DISCRE_TURB= EULER_IMPLICIT
 LINEAR_SOLVER= FGMRES
 LINEAR_SOLVER_PREC= ILU
 LINEAR_SOLVER_ERROR= 1e-6
-LINEAR_SOLVER_ITER= 15
+LINEAR_SOLVER_ITER= {lin_iter}
 INNER_ITER= {inner_iter}
 CONV_RESIDUAL_MINVAL= -7
 CONV_STARTITER= 50
@@ -312,7 +479,10 @@ def build_su2_config(aoa: float, physics: Mapping, solver: str,
                      use_symmetry: bool = False,
                      symmetry_planes: list = None,
                      turb_model: str = "SA",
-                     use_ramp_aoa: bool = False) -> str:
+                     use_ramp_aoa: bool = False,
+                     enable_cuda: bool = False,
+                     n_bodies: int = 0, n_points: int = 0,
+                     cfl_aggressive: bool = False) -> str:
     """Строит полный текст ``config.cfg`` для одной расчётной точки.
 
     Параметры T1+T4:
@@ -320,6 +490,18 @@ def build_su2_config(aoa: float, physics: Mapping, solver: str,
         symmetry_planes — список плоскостей ["xy", "xz", "yz"].
         turb_model      — "SA" (по умолчанию) или "SST" (Menter SST).
         use_ramp_aoa    — плавный разгон AoA от 0° до нужного за 100 итераций.
+        enable_cuda     — писать в config.cfg ``ENABLE_CUDA= YES``.
+
+    Про ``ENABLE_CUDA``: это реальная опция SU2 (CConfig.cpp,
+    ``addBoolOption("ENABLE_CUDA", Enable_Cuda, false)``). Она включает
+    GPU-ветку в ``CMatrixVectorProduct.hpp`` — вызов
+    ``matrix.GPUMatrixVectorProduct`` вместо ``matrix.MatrixVectorProduct``.
+    Без неё SU2 не трогает видеокарту, даже если собран с CUDA.
+
+    Если написать ``ENABLE_CUDA= YES``, а SU2_CFD собран без
+    ``-Denable-cuda=true``, SU2 завершится с ошибкой «ENABLE_CUDA is set
+    to YES / Please compile with CUDA options enabled in Meson». Поэтому
+    опция включается только после проверки сборки решателя.
     """
     if physics is None:
         raise ValueError("physics не задан")
@@ -349,13 +531,18 @@ def build_su2_config(aoa: float, physics: Mapping, solver: str,
             use_symmetry=use_symmetry,
             symmetry_planes=symmetry_planes,
             use_ramp_aoa=use_ramp_aoa,
+            enable_cuda=enable_cuda,
+            n_bodies=n_bodies, n_points=n_points,
+            cfl_aggressive=cfl_aggressive,
         )
     if solver_name.startswith("EULER") or "EULER" in solver_name:
         return build_euler_config(
-            p, markers=markers, restart=restart,
+            p, markers=markers, restart=restart, enable_cuda=enable_cuda,
             mesh_quality=mesh_quality,
             use_symmetry=use_symmetry,
             symmetry_planes=symmetry_planes,
+            n_bodies=n_bodies, n_points=n_points,
+            cfl_aggressive=cfl_aggressive,
         )
 
     raise ValueError(f"Неподдерживаемый решатель SU2: {solver!r}")
@@ -366,10 +553,13 @@ def write_su2_config(path: str, aoa: float, physics: Mapping, solver: str,
                      restart: bool = False,
                      mesh_filename: str = "mesh.su2",
                      mesh_quality=None,
+                     n_bodies: int = 0, n_points: int = 0,
+                     cfl_aggressive: bool = False,
                      use_symmetry: bool = False,
                      symmetry_planes: list = None,
                      turb_model: str = "SA",
-                     use_ramp_aoa: bool = False) -> str:
+                     use_ramp_aoa: bool = False,
+                     enable_cuda: bool = False) -> str:
     """Записывает конфигурацию и возвращает полный путь к ``config.cfg``.
 
     Параметры T1+T4 пробрасываются в build_su2_config.
@@ -393,10 +583,13 @@ def write_su2_config(path: str, aoa: float, physics: Mapping, solver: str,
         restart=restart,
         mesh_filename=mesh_filename,
         mesh_quality=mesh_quality,
+        n_bodies=n_bodies, n_points=n_points,
+        cfl_aggressive=cfl_aggressive,
         use_symmetry=use_symmetry,
         symmetry_planes=symmetry_planes,
         turb_model=turb_model,
         use_ramp_aoa=use_ramp_aoa,
+        enable_cuda=enable_cuda,
     )
 
     with open(cfg_path, "w", encoding="utf-8", newline="\n") as stream:
@@ -430,6 +623,11 @@ def write_case_config(case_dir: str, aoa: float, session) -> str:
     mesh_quality = getattr(session, "mesh_quality", None)
     turb_model = str(getattr(session, "turb_model", "SA") or "SA")
     use_ramp_aoa = bool(getattr(session, "use_ramp_aoa", False))
+    # Оценка потолка итераций и агрессивный CFL. getattr с нулями и False —
+    # старые сессии без этих полей работают ровно как раньше.
+    n_bodies = int(getattr(session, "n_bodies", 0) or 0)
+    n_points = int(getattr(session, "n_points", 0) or 0)
+    cfl_aggressive = bool(getattr(session, "cfl_aggressive", False))
 
     # T1: собираем список плоскостей симметрии. Берём из session.symmetry_planes,
     # если нет — обратная совместимость: session.use_symmetry=True → ["xz"].
@@ -479,6 +677,7 @@ def write_case_config(case_dir: str, aoa: float, session) -> str:
         symmetry_planes=enabled_planes,
         turb_model=turb_model,
         use_ramp_aoa=use_ramp_aoa,
+        enable_cuda=bool(getattr(session, "enable_cuda", False)),
     )
 
 

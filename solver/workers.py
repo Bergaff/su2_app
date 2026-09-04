@@ -22,6 +22,43 @@ from datetime import datetime
 from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QWaitCondition
 
 from config.settings import config, MESH_FILE, WORK_DIR_BASE
+
+# Вердикт о последней построенной сетке (заполняет mesh/gmsh_generator.py).
+# Нужен здесь, чтобы не перезапускать точку с другим численным пресетом,
+# когда причина неудачи — сетка.
+try:
+    from config.settings import MESH_DIAGNOSIS
+except ImportError:      # pragma: no cover
+    MESH_DIAGNOSIS = {"body_fitted": True, "unresolved": [],
+                      "flat": [], "reason": ""}
+
+
+def mesh_quality_note():
+    """Замечание о качестве сетки для лога, или None.
+
+    ВАЖНО: это именно замечание, а не запрет повтора. Качество сетки
+    определяет точность результата, но не возможность сходимости.
+    Замер пользователя на plane_wing.step: на той же картезианской сетке
+    (489021 тетраэдр, airfoil=6308) первый прогон встал на
+    log10(rms[Rho])=0.60 при итерации 1100, а повтор с пресетом
+    (CFL 2.0, MUSCL=NO, 1-й порядок) пошёл — 0.410, -1.864, -2.295,
+    -2.728 — и точка завершилась успешно за 3695.8 с. Блокировать такой
+    повтор значило бы оставить пользователя без единственного результата.
+
+    Первое название функции было mesh_limits_solver_settings, и она
+    обрывала цикл повторов. Это было неверно: пресет меняет не сетку, но
+    меняет устойчивость схемы, и именно устойчивости часто не хватает.
+    """
+    if MESH_DIAGNOSIS.get("flat"):
+        return ("у компонента(ов) %s нулевая толщина — тела нет в сетке "
+                "вовсе" % ", ".join(MESH_DIAGNOSIS["flat"]))
+    if MESH_DIAGNOSIS.get("unresolved"):
+        return ("компонент(ы) %s тоньше шага сетки и попадают в неё "
+                "ступенькой" % ", ".join(MESH_DIAGNOSIS["unresolved"]))
+    if not MESH_DIAGNOSIS.get("body_fitted", True):
+        return (MESH_DIAGNOSIS.get("reason")
+                or "сетка не облегает поверхность тела")
+    return None
 from solver.config_builder import write_case_config
 # === ПАТЧ: импорт помощников гибридного GPU-режима =====================
 from solver.gpu_launcher import (
@@ -31,6 +68,7 @@ from solver.gpu_launcher import (
     is_openmp_offload_unavailable,
     detect_mpi_implementation,
     gpu_config_args,
+    su2_gpu_capable,
 )
 # ======================================================================
 
@@ -52,31 +90,22 @@ MPIEXEC_EXE = "mpiexec"
 
 
 # ---------------------------------------------------------------------------
-# T2: SU2_PARTITION — mesh-декомпозиция для многоядерных расчётов
+# Поиск вспомогательных исполняемых файлов SU2
 # ---------------------------------------------------------------------------
-def find_su2_partition_exe() -> str:
-    """Ищет исполняемый файл SU2_PARTITION (или SU2_PARTITION.exe).
+def find_su2_adapt_exe() -> str:
+    """Ищет исполняемый файл SU2_ADAPT (адаптация сетки по решению).
 
-    Источники поиска (по убыванию приоритета):
-      1. config.su2_partition_exe (если задан вручную в Solver Settings)
-      2. Каталог с config.su2_exe (часто SU2 идёт в комплекте с партиционером)
-      3. %SU2_HOME% / $SU2_HOME
-      4. shutil.which("SU2_PARTITION")
+    SU2_ADAPT обычно лежит рядом с SU2_CFD.exe в каталоге bin.
     """
     candidates: list = []
-    explicit = getattr(config, "su2_partition_exe", None)
-    if explicit:
-        candidates.append(explicit)
     su2_dir = os.path.dirname(config.su2_exe) if getattr(config, "su2_exe", None) else ""
     if su2_dir:
-        for name in ("SU2_PARTITION.exe", "SU2_PARTITION",
-                     "su2_partition.exe", "su2_partition"):
+        for name in ("SU2_ADAPT.exe", "SU2_ADAPT", "su2_adapt.exe", "su2_adapt"):
             candidates.append(os.path.join(su2_dir, name))
     su2_home = os.environ.get("SU2_HOME") or os.environ.get("SU2_RUN")
     if su2_home:
         for sub in ("bin", ""):
-            for name in ("SU2_PARTITION.exe", "SU2_PARTITION",
-                         "su2_partition.exe", "su2_partition"):
+            for name in ("SU2_ADAPT.exe", "SU2_ADAPT", "su2_adapt.exe", "su2_adapt"):
                 candidates.append(os.path.join(su2_home, sub, name))
     for path in candidates:
         try:
@@ -84,87 +113,105 @@ def find_su2_partition_exe() -> str:
                 return os.path.abspath(path)
         except Exception:
             continue
-    which = shutil.which("SU2_PARTITION") or shutil.which("SU2_PARTITION.exe")
+    which = shutil.which("SU2_ADAPT") or shutil.which("SU2_ADAPT.exe")
     if which:
         return which
     return ""
 
 
-def partition_mesh(case_dir: str, n_proc: int, log_cb=None) -> bool:
-    """Запускает SU2_PARTITION для декомпозиции mesh.su2 на n_proc частей.
+def run_su2_adapt(case_dir: str, mesh_path: str, restart_path: str,
+                  adapt_markers=("airfoil",), abs_error: float = 1e-6,
+                  log_cb=None) -> str:
+    """Запускает SU2_ADAPT: адаптивная перестройка сетки по решению.
 
-    Возвращает True, если декомпозиция прошла (или не нужна).
-    Возвращает False, если упало — в этом случае SU2 попробует
-    auto-partition на старте (медленнее, но работает).
+    Требования:
+      * SU2_ADAPT найден рядом с SU2_CFD.exe (иначе RuntimeError);
+      * restart.dat — решение из завершённого расчёта той же сетки.
+
+    Работает в каталоге case_dir (туда кладутся mesh.su2, restart.dat,
+    адаптационный config.cfg). Результат — mesh_adapt.su2 в case_dir;
+    возвращается путь к нему.
     """
-    log_cb = log_cb or (lambda m: None)
-    if n_proc <= 1:
-        return True
-    mesh_path = os.path.join(case_dir, "mesh.su2")
-    if not os.path.exists(mesh_path):
-        log_cb(f"  ⚠️ partition: нет mesh.su2 в {case_dir}")
-        return False
-    part_exe = find_su2_partition_exe()
-    if not part_exe:
-        log_cb(
-            "  ⚠️ SU2_PARTITION не найден — SU2 сделает auto-partition "
-            "(медленнее на старте, но работает)."
+    adapt_exe = find_su2_adapt_exe()
+    if not adapt_exe:
+        raise RuntimeError(
+            "SU2_ADAPT не найден рядом с SU2_CFD.exe. "
+            "Установите полный дистрибутив SU2 (с адаптивным модулем).")
+
+    def _log(m):
+        if log_cb:
+            try:
+                log_cb(m)
+            except Exception:
+                pass
+
+    os.makedirs(case_dir, exist_ok=True)
+    shutil.copy2(mesh_path, os.path.join(case_dir, "mesh.su2"))
+    shutil.copy2(restart_path, os.path.join(case_dir, "restart.dat"))
+
+    markers = [str(m).strip() for m in (adapt_markers or []) if str(m).strip()]
+    if not markers:
+        markers = ["airfoil"]
+
+    cfg_path = os.path.join(case_dir, "adapt.cfg")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        f.write(
+            "SOLVER= EULER\n"
+            "MATH_PROBLEM= DIRECT\n"
+            "MESH_FORMAT= SU2\n"
+            "MESH_FILENAME= mesh.su2\n"
+            "RESTART_FILENAME= restart.dat\n"
+            "MESH_OUT_FILENAME= mesh_adapt.su2\n"
+            f"MARKER_ADAPT= ( {' '.join(markers)} )\n"
+            f"ADAPT_ABS_ERROR= {float(abs_error):g}\n"
+            "ADAPT_BOUNDARY= YES\n"
+            "ADAPT_NUM_ADAPT= 1\n"
+            "ADAPT_STATISTICS= YES\n"
         )
-        return False
-    mpiexec_exe = (config.mpiexec
-                   if hasattr(config, "mpiexec") and config.mpiexec
-                   else "mpiexec")
-    if not shutil.which(mpiexec_exe):
-        # На Windows mpiexec может не быть в PATH
-        log_cb(
-            "  ⚠️ mpiexec не найден в PATH — пропускаем partition."
-        )
-        return False
-    cmd = [mpiexec_exe, "-n", str(int(n_proc)), part_exe, mesh_path]
-    log_cb(f"  🔧 Partition: {' '.join(cmd)}")
+
+    _log(f"SU2_ADAPT: {adapt_exe}")
+    _log(f"   Сетка: mesh.su2, решение: restart.dat, маркеры: {markers}")
     try:
         proc = subprocess.run(
-            cmd, cwd=case_dir,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, timeout=120,
+            [adapt_exe, "adapt.cfg"],
+            cwd=case_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8", errors="replace",
+            timeout=3600,
             **hidden_subprocess_kwargs(),
         )
-        if proc.returncode != 0:
-            log_cb(
-                f"  ⚠️ SU2_PARTITION завершился с кодом {proc.returncode}: "
-                f"{(proc.stdout or '')[-300:]}"
-            )
-            return False
-        # SU2_PARTITION создаёт mesh_*.su2 файлы. Проверим, что они есть.
-        n_parts = sum(
-            1 for f in os.listdir(case_dir)
-            if f.startswith("mesh_") and f.endswith(".su2")
-        )
-        if n_parts < n_proc:
-            log_cb(
-                f"  ⚠️ SU2_PARTITION создал только {n_parts}/{n_proc} частей — "
-                f"SU2 попробует auto-partition."
-            )
-            return False
-        log_cb(f"  ✅ Partition: {n_parts} частей")
-        return True
     except subprocess.TimeoutExpired:
-        log_cb("  ⚠️ SU2_PARTITION превысил таймаут 120 с")
-        return False
+        raise RuntimeError("SU2_ADAPT превысил таймаут 60 мин.") from None
     except Exception as e:
-        log_cb(f"  ⚠️ SU2_PARTITION: {e}")
-        return False
+        raise RuntimeError(f"Не удалось запустить SU2_ADAPT: {e}") from e
 
-    def request_cores_change(self, cores: int):
-        """Запрос на смену числа ядер. Применится при следующем mpiexec."""
-        self._pending_cores = cores
-        
-    def _apply_pending_cores(self):
-        """Применяет отложенную смену ядер."""
-        if self._pending_cores is not None:
-            self._cores = self._pending_cores
-            self._pending_cores = None
-            self.log(f"CPU cores changed to {self._cores} (applied for next phase)")
+    out_mesh = os.path.join(case_dir, "mesh_adapt.su2")
+    if proc.returncode != 0 or not os.path.isfile(out_mesh):
+        tail = (proc.stdout or "")[-1500:] + (proc.stderr or "")[-1500:]
+        raise RuntimeError("SU2_ADAPT завершился ошибкой.\n" + tail)
+    _log("Готово: Адаптация завершена: mesh_adapt.su2")
+    return out_mesh
+
+
+def _mesh_npoin(mesh_path: str):
+    """Читает число точек из mesh.su2 (NMARK-формат). Возвращает int|None."""
+    try:
+        with open(mesh_path, "r", encoding="ascii", errors="ignore") as f:
+            for ln in f:
+                s = ln.strip()
+                if s.startswith("NPOIN="):
+                    try:
+                        return int(s.split("=", 1)[1].strip())
+                    except (ValueError, IndexError):
+                        return None
+                if s.startswith(("NELEM=", "NMARK=")):
+                    continue
+    except OSError:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # ТЗ п.8 — скрытие «чёрного окна» консоли SU2 на Windows
 # ---------------------------------------------------------------------------
@@ -187,7 +234,108 @@ def hidden_subprocess_kwargs() -> dict:
 # ---------------------------------------------------------------------------
 # parse helpers
 # ---------------------------------------------------------------------------
+_SU2_ERROR_KEYWORDS = ("error", "exception", "cannot", "fail", "not found",
+                       "invalid option", "appears twice")
+
+
+def su2_log_gate(line, budget=0):
+    """Решает, показывать ли строку вывода SU2 в логе приложения.
+
+    Возвращает ``(показывать, новый_бюджет)``.
+
+    SU2 печатает ошибку в три приёма: ``Error in "func":``, разделитель
+    ``---- Error Exit ----`` и только ПОТОМ настоящую причину, например
+    ``Line 52 TIME_DISCRETE_FLOW: invalid option name``. Раньше в лог
+    попадали лишь строки со словом "error", поэтому причина терялась и
+    приходилось гадать. Теперь после строки-признака следующие ``budget``
+    строк печатаются как есть.
+    """
+    if budget > 0:
+        return True, budget - 1
+    low = (line or "").lower()
+    if any(kw in low for kw in _SU2_ERROR_KEYWORDS):
+        return True, 30
+    return False, 0
+
+
 _HISTORY_LINE = re.compile(r"^\s*(\d+)\s*\|\s*([-\deE.+]+)")
+
+
+# Параметры детектора застоя. Вынесены в константы, чтобы их можно было
+# менять и проверять тестами, не запуская SU2.
+STALL_PATIENCE = 1000   # итераций без нового минимума невязки
+STALL_RISE = 0.15       # насколько log10(res) выше минимума — уже застой
+STALL_START = 50        # не судить раньше: совпадает с CONV_STARTITER
+STALL_FLAT_MARGIN = 1.0  # порядков до цели сходимости — дальше ждать нечего
+DEFAULT_CONV_MINVAL = -7.0  # как в CONV_RESIDUAL_MINVAL у config_builder
+
+
+def stall_patience_for(max_iter):
+    """Терпение детектора, согласованное с лимитом итераций.
+
+    Фиксированные 1000 итераций годятся для лимита 6000, но на коротком
+    прогоне в 500 итераций детектор просто не успевал сработать — расчёт
+    расходился и умирал раньше. Терпение берётся как шестая часть лимита
+    в коридоре 150..1000: на коротких прогонах решение принимается
+    быстрее, на длинных не дёргается на каждом плато адаптивного CFL.
+    """
+    try:
+        mi = int(max_iter)
+    except (TypeError, ValueError):
+        mi = 0
+    if mi <= 0:
+        return STALL_PATIENCE
+    return int(max(150, min(STALL_PATIENCE, mi // 6)))
+
+
+def stall_verdict(it, rms, best_rms, best_iter,
+                  patience=STALL_PATIENCE, rise=STALL_RISE, start=STALL_START,
+                  conv_minval=DEFAULT_CONV_MINVAL,
+                  flat_margin=STALL_FLAT_MARGIN):
+    """Решение детектора застоя по одной строке лога SU2.
+
+    Возвращает ``(best_rms, best_iter, причина)``: причина — строка, если
+    расчёт пора прерывать, иначе ``None``.
+
+    Логика простая и намеренно консервативная. Сходящийся расчёт регулярно
+    ставит новые минимумы невязки, поэтому ``best_iter`` идёт рядом с
+    текущей итерацией. Если нового минимума нет уже ``patience`` итераций
+    И текущая невязка выше лучшего значения больше чем на ``rise`` — это не
+    колебание адаптивного CFL, а расчёт, который никуда не идёт.
+
+    Именно такой была реальная картина на импортированном крыле:
+    log10(res) 0.410 -> 0.615 -> 0.715 -> 0.760 за 4500 итераций,
+    35 минут 26 секунд, и сессия отчиталась «1 успешных».
+
+    Отдельно разбирается второй случай — невязка не растёт, а просто
+    стоит на месте. На том же крыле после починки справочных данных
+    log10(res) встал на -1.889 на итерации 1500 и не сдвинулся до 4500.
+    Условие «выше минимума на rise» здесь не срабатывает: текущее
+    значение равно лучшему. Но и сходимостью это не является — SU2 сам
+    остановился бы, дойдя до CONV_RESIDUAL_MINVAL. Поэтому плоская
+    невязка тоже считается застоем, если до цели сходимости ещё больше
+    ``flat_margin`` порядков.
+
+    NaN сюда не попадает — его считает отдельный счётчик в цикле.
+    """
+    if rms != rms:
+        return best_rms, best_iter, None
+    if best_rms is None or rms < best_rms:
+        return rms, it, None
+    if it >= start and it - best_iter >= patience:
+        if rms > best_rms + rise:
+            return best_rms, best_iter, (
+                "Расчёт не сходится: невязка не улучшалась %d итераций. "
+                "Лучшее значение log10(res)=%.3f на итерации %d, "
+                "сейчас %.3f."
+                % (it - best_iter, best_rms, best_iter, rms))
+        if best_rms > conv_minval + flat_margin:
+            return best_rms, best_iter, (
+                "Расчёт встал: невязка не улучшалась %d итераций и "
+                "осталась на log10(res)=%.3f при цели сходимости %.1f. "
+                "До неё больше порядка — дальше считать бессмысленно."
+                % (it - best_iter, best_rms, conv_minval))
+    return best_rms, best_iter, None
 
 
 def parse_iteration_line(line: str):
@@ -199,6 +347,40 @@ def parse_iteration_line(line: str):
         except ValueError:
             return None
     return None
+
+
+def symmetry_scale(case_dir: str) -> float:
+    """2.0, если расчёт шёл по половине модели, иначе 1.0.
+
+    При включённой плоскости симметрии в сетке только половина самолёта,
+    а REF_AREA берётся по полному крылу (справочные данные считаются до
+    резки). SU2 интегрирует давление по тем маркерам, которые есть в
+    сетке, поэтому подъёмная сила, сопротивление и момент выходят ровно
+    вдвое меньше настоящих. L/D — отношение — от этого не меняется.
+
+    Признак берётся из config.cfg того же каталога: незакомментированная
+    строка MARKER_SYM хотя бы с одним именем. Выключенная плоскость
+    записывается как «% MARKER_SYM= ( ... )  # выключено», поэтому
+    строки с «%» пропускаются — в SU2 это единственный символ
+    комментария.
+    """
+    try:
+        cfg = os.path.join(case_dir, "config.cfg")
+        if not os.path.exists(cfg):
+            return 1.0
+        with open(cfg, "r", encoding="utf-8", errors="ignore") as f:
+            for ln in f:
+                t = ln.strip()
+                if not t or t.startswith("%"):
+                    continue
+                if not t.upper().startswith("MARKER_SYM"):
+                    continue
+                rhs = t.split("=", 1)[1] if "=" in t else ""
+                if [n for n in re.split(r"[(),\s]+", rhs) if n]:
+                    return 2.0
+        return 1.0
+    except Exception:
+        return 1.0
 
 
 def parse_history(case_dir: str):
@@ -232,9 +414,11 @@ def parse_history(case_dir: str):
         icl = col("cl")
         icd = col("cd")
         icm = col("cmz", "cm", "cmy")
+        irms = col("rms[rho]", "res_rms_rho", "rms[res_rho]")
         if icl is None or icd is None:
             return None
-        out = {"cl": None, "cd": None, "cm": 0.0, "iters": len(data)}
+        out = {"cl": None, "cd": None, "cm": 0.0, "iters": len(data),
+               "rms": None}
         for ln in reversed(data):
             parts = [p.strip().strip('"') for p in ln.split(",")]
             if len(parts) <= max(icl, icd):
@@ -244,11 +428,25 @@ def parse_history(case_dir: str):
                 out["cd"] = float(parts[icd])
                 if icm is not None and len(parts) > icm:
                     out["cm"] = float(parts[icm])
+                if irms is not None and len(parts) > irms:
+                    try:
+                        out["rms"] = float(parts[irms])
+                    except ValueError:
+                        out["rms"] = None
                 break
             except ValueError:
                 continue
         if out["cl"] is None or out["cd"] is None:
             return None
+        # Расчёт по половине модели даёт половину сил при полном REF_AREA.
+        _k = symmetry_scale(case_dir)
+        if _k != 1.0:
+            out["cl"] = out["cl"] * _k
+            out["cd"] = out["cd"] * _k
+            out["cm"] = out["cm"] * _k
+            out["half_model"] = True
+        else:
+            out["half_model"] = False
         return out
     except Exception:
         return None
@@ -288,10 +486,21 @@ class SU2Worker:
         self._stop = True
 
     # ------------------------------------------------------------------
-    def _result(self, aoa, ok, error_msg="", stopped=False):
-        return {"aoa": aoa, "cl": 0.0, "cd": 0.0, "cm": 0.0,
+    def _result(self, aoa, ok, error_msg="", stopped=False, rms=None):
+        # Порядок схемы записывается в результат: по нему _better_result
+        # выбирает, какой из прогонов точки оставить.
+        second = None
+        if su2_autoconfig is not None:
+            try:
+                v = su2_autoconfig.read_config_values(
+                    os.path.join(self.case_dir, "config.cfg"), ("MUSCL_FLOW",))
+                if v:
+                    second = str(v.get("MUSCL_FLOW", "")).upper().startswith("Y")
+            except Exception:
+                second = None
+        return {"aoa": aoa, "cl": 0.0, "cd": 0.0, "cm": 0.0, "rms": rms,
                 "error": (not ok) and (not stopped), "error_msg": error_msg,
-                "stopped": stopped}
+                "stopped": stopped, "second_order": second}
 
     def _tail_text(self, n=12):
         return "\n".join(self._tail[-n:])
@@ -371,12 +580,60 @@ class SU2Worker:
             return self._result(aoa, False,
                 "Отсутствует mesh.su2. Постройте расчётную сетку заново.")
 
+        # Проверяем config.cfg ДО запуска SU2. Иначе SU2 падает с
+        # «Error in TokenizeString(): ... no "=" sign», а в логе это
+        # выглядит как загадочный обрыв без указания строки.
+        try:
+            import su2_autoconfig as _ac
+            _ok, _problems = _ac.validate_config(cfg_path)
+        except Exception:
+            _ok, _problems = True, []
+        if not _ok:
+            _lines = "\n".join(f"   стр. {n}: {txt!r}  <- {why}"
+                                for n, txt, why in _problems[:5])
+            return self._result(
+                aoa, False,
+                "config.cfg нечитаем для SU2 — запуск отменён.\n\n"
+                f"{_lines}\n\n"
+                "SU2 понимает как комментарий только '%', а не '#': любая "
+                "строка без '=' роняет решатель. Исправьте файл или "
+                "восстановите config.cfg.orig.")
+
         cmd, env_overlay, launch_mode = self._build_cmd(exe)
 
         # === ПАТЧ: лог GPU-режима =========================================
+        if launch_mode != "cpu" and not su2_gpu_capable(exe):
+            # Стандартные сборки SU2 с su2code.org идут без CUDA/HIP.
+            # OMP_TARGET_OFFLOAD=MANDATORY в них ничего никуда не
+            # выгружает, а прежняя надпись «Гибридный режим: GPU 82%»
+            # обещала то, чего на самом деле не происходило.
+            self.log_cb(
+                "Внимание: рядом с SU2_CFD нет библиотек CUDA/HIP — эта "
+                "сборка SU2 считает только на CPU."
+            )
+            self.log_cb(
+                "Процент GPU в настройках на такой расчёт не влияет. "
+                "Официальные сборки SU2 (win64-omp, win64-mpi, linux64-omp, "
+                "linux64-mpi) видеокарту не используют: в release-конфигурации "
+                "SU2 опция -Denable-cuda не включена ни для одной платформы. "
+                "Для GPU нужен SU2, собранный из исходников с meson "
+                "setup -Denable-cuda=true, и только под NVIDIA. "
+                "Поддержки AMD/ROCm в SU2 нет — опции HIP в meson_options.txt "
+                "не существует."
+            )
+            self.compute_device = "cpu"
+            cmd, env_overlay, launch_mode = self._build_cmd(exe)
+        # ENABLE_CUDA пишется в config.cfg только когда GPU-режим реально
+        # состоялся: сборка умеет CUDA и команда построена под GPU.
+        try:
+            _sess = getattr(self, "session", None)
+            if _sess is not None:
+                _sess.enable_cuda = (launch_mode != "cpu")
+        except Exception:
+            pass
         if launch_mode != "cpu":
             self.log_cb(
-                f"🎮 Гибридный режим ({launch_mode}): GPU {self.gpu_percent}%, "
+                f"Гибридный режим ({launch_mode}): GPU {self.gpu_percent}%, "
                 f"ядер CPU {self.cpu_cores}"
             )
             # Пишем в лог подсказку, какие строки можно добавить в config.cfg
@@ -391,6 +648,14 @@ class SU2Worker:
 
         self.log_cb(f"[{datetime.now().strftime('%H:%M:%S')}] Запуск: {' '.join(cmd)} "
                     f"(cwd={self.case_dir})")
+        # Какой именно конфиг сейчас пойдёт в расчёт: порядок схемы, CFL и
+        # применённый пресет. Без этой строки в логе видно только имя файла.
+        if su2_autoconfig is not None:
+            try:
+                self.log_cb("  " + su2_autoconfig.describe_config_scheme(
+                    os.path.join(self.case_dir, "config.cfg")))
+            except Exception:
+                pass
 
         try:
             proc = subprocess.Popen(
@@ -403,22 +668,45 @@ class SU2Worker:
             return self._result(aoa, False, f"Не удалось запустить SU2: {e}")
 
         max_iter = 300
+        conv_minval = DEFAULT_CONV_MINVAL
         try:
             with open(cfg_path, "r", encoding="utf-8", errors="ignore") as f:
+                _cfg_text = f.read()
                 m = re.search(
                     r"^\s*(?:INNER_ITER|ITER)\s*=\s*(\d+)",
-                    f.read(),
+                    _cfg_text,
                     re.M,
                 )
                 if m:
                     max_iter = int(m.group(1)) or 300
+                # Цель сходимости нужна детектору застоя: плоская невязка
+                # вдали от неё — это застой, а рядом с ней — сходимость.
+                mc = re.search(
+                    r"^\s*CONV_RESIDUAL_MINVAL\s*=\s*(-?[\d.]+)",
+                    _cfg_text,
+                    re.M,
+                )
+                if mc:
+                    conv_minval = float(mc.group(1))
         except Exception:
             pass
 
         nan_count = 0
         last_rms = None
+        # === Детектор застоя и расходимости ============================
+        # Раньше единственной защитой был NaN: расчёт с монотонно растущей
+        # невязкой крутил все INNER_ITER до конца. На импортированном крыле
+        # это были 35 минут 26 секунд, невязка за это время выросла
+        # 0.410 -> 0.760, а сессия всё равно отчиталась «1 успешных».
+        # Теперь: если новый минимум невязки не появлялся STALL_PATIENCE
+        # итераций и текущая невязка выше минимума более чем на STALL_RISE
+        # — расчёт прерывается с понятным сообщением.
+        best_rms = None
+        best_iter = 0
+        # =================================================================
         # === ПАТЧ: для авто-фоллбэка собираем весь вывод ==================
         all_output_lines: list = []
+        err_mode = 0
         # =================================================================
 
         while True:
@@ -442,16 +730,42 @@ class SU2Worker:
                     all_output_lines = all_output_lines[-1000:]
                 # =========================================================
 
-            low = line.lower()
-            for kw in ("error", "exception", "cannot", "fail", "not found"):
-                if kw in low:
-                    self.log_cb(f"  SU2: {line}")
-                    break
+            show, err_mode = su2_log_gate(line, err_mode)
+            if show:
+                self.log_cb(f"  SU2: {line}")
 
             parsed = parse_iteration_line(line)
             if parsed:
                 it, rms = parsed
                 last_rms = rms
+                best_rms, best_iter, stall_why = stall_verdict(
+                    it, rms, best_rms, best_iter,
+                    patience=stall_patience_for(max_iter),
+                    conv_minval=conv_minval)
+                if stall_why:
+                    proc.terminate()
+                    _r = self._result(
+                        aoa, False,
+                        stall_why + "\n"
+                        "Норма должна падать до -4…-6, здесь она стоит или "
+                        "растёт — дальше считать бессмысленно, поэтому "
+                        "расчёт прерван.\n\n"
+                        "Что попробовать:\n"
+                        "  1. Пересобрать сетку после изменения геометрии.\n"
+                        "  2. Снять галочку «Быстрый CFL» или снизить "
+                        "CFL_ADAPT_PARAM.\n"
+                        "  3. Уменьшить угол атаки.\n\n"
+                        f"Хвост лога:\n{self._tail_text()}",
+                        rms=best_rms)
+                    # Коэффициенты к этому моменту уже посчитаны и лежат в
+                    # history.csv. Без них прерванный прогон возвращал нули,
+                    # и повтор с другим пресетом перезаписывал каталог —
+                    # сравнить два прогона было не с чем.
+                    _h = parse_history(self.case_dir)
+                    if _h:
+                        _r.update({"cl": _h["cl"], "cd": _h["cd"],
+                                   "cm": _h["cm"]})
+                    return _r
                 if rms != rms:
                     nan_count += 1
                     if nan_count >= 3:
@@ -475,7 +789,7 @@ class SU2Worker:
             full_output = "\n".join(all_output_lines)
             if is_unknown_gpu_option(full_output):
                 self.log_cb(
-                    "⚠️ mpiexec не поддерживает опцию -gpu → фоллбэк "
+                    "Внимание: mpiexec не поддерживает опцию -gpu → фоллбэк "
                     "на OpenMP target offload."
                 )
                 self._gpu_attempts = 1
@@ -484,7 +798,7 @@ class SU2Worker:
             full_output = "\n".join(all_output_lines)
             if is_openmp_offload_unavailable(full_output):
                 self.log_cb(
-                    "⚠️ SU2 собрана без GPU-поддержки (CUDA/HIP) → фоллбэк "
+                    "Внимание: SU2 собрана без GPU-поддержки (CUDA/HIP) → фоллбэк "
                     "на чистый CPU. Гибридный режим не активен."
                 )
                 self._gpu_attempts = 2
@@ -510,8 +824,13 @@ class SU2Worker:
                 "Проверьте, что тело самолёта нанесено на границу 'airfoil' "
                 "и геометрия замкнута.")
 
-        res = self._result(aoa, True)
+        res = self._result(aoa, True, rms=hist.get("rms"))
         res.update({"cl": hist["cl"], "cd": hist["cd"], "cm": hist["cm"]})
+        if hist.get("half_model"):
+            res["half_model"] = True
+            self.log_cb(
+                "  расчёт по половине модели: Cl, Cd и Cm удвоены — в сетке "
+                "только половина самолёта, а REF_AREA взята по полному крылу.")
         return res
 
 
@@ -525,7 +844,6 @@ class SessionRunner(QThread):
     paused_signal = pyqtSignal()
     finished_all = pyqtSignal()
     # Автоконфиг: поток расчёта шлёт запрос, диалог показывается в GUI-потоке
-    recovery_signal = pyqtSignal(object)
 
     def __init__(self, session, parent=None):
         super().__init__(parent)
@@ -536,12 +854,15 @@ class SessionRunner(QThread):
         # Автоконфиг
         self._recovery_declined = False   # пользователь отказался — больше не спрашивать
         self._auto_preset = None          # 'safe'|'ultra' — применять ко всем точкам серии
-        self._recovery_mutex = QMutex()
-        self._recovery_cond = QWaitCondition()
-        self._recovery_answer = None
+        # Замечание о качестве сетки показывается один раз за сессию.
+        # Атрибут обязан жить именно здесь: читает его SessionRunner.run,
+        # а не SU2Worker. Когда он по ошибке был объявлен в SU2Worker,
+        # первый же повтор прогона падал с
+        # AttributeError: 'SessionRunner' object has no attribute
+        # '_mesh_note_shown' — уже после успешно посчитанной сетки.
+        self._mesh_note_shown = False
         # Слот-приёмник живёт в главном потоке (объект QThread создан там),
         # поэтому модальный диалог внутри него безопасен.
-        self.recovery_signal.connect(self._handle_recovery_in_gui)
 
     # ------------------------------------------------------------------
     def request_pause(self):
@@ -557,57 +878,129 @@ class SessionRunner(QThread):
     # ------------------------------------------------------------------
     # Автоконфиг: предложение устойчивого пресета после расхождения
     # ------------------------------------------------------------------
+    @staticmethod
+    def _usable(r):
+        """Прогон действительно дал аэродинамику, а не нули.
+
+        Признак — наличие коэффициентов, а НЕ флаги error/stopped. Это
+        важно: прогон, вставший на плато (log10(rms) = -2.3 при норме -7),
+        тоже помечен error=True, но коэффициенты у него настоящие, и его
+        как раз надо сохранять — это и есть случай, ради которого вводилось
+        предпочтение второго порядка.
+
+        А разошедшийся прогон history.csv не оставляет вовсе и так и
+        остаётся с cl=cd=cm=0.0 из _result(): коэффициенты проставляются
+        только из разбора history.csv (res.update({"cl": hist["cl"], ...}),
+        строка ~828). Такие нули нельзя выдавать за результат.
+
+        Проверка «все три нуля», а не «cl != 0»: на симметричном профиле
+        при нулевом угле атаки Cl законно равен нулю, но Cd ненулевой.
+        """
+        if not r:
+            return False
+        for k in ("cl", "cd", "cm"):
+            v = r.get(k)
+            if isinstance(v, (int, float)) and abs(float(v)) > 1e-12:
+                return True
+        return False
+
+    @staticmethod
+    def _better_result(prev, new, log_cb):
+        """Лучший из двух прогонов одной точки.
+
+        Повтор пишется в тот же каталог и перезаписывает history.csv,
+        поэтому без явного сравнения результат первого прогона теряется.
+        На plane_wing.step при телооблекающей сетке первый прогон дошёл до
+        log10(rms[Rho])=-3.33, а повтор с пресетом выдал Cd=0.851 при
+        L/D=0.40 — и в отчёт ушёл именно повтор, потому что он был
+        последним, а не потому что лучшим.
+
+        Сравнение по логарифму невязки: чем меньше, тем лучше. Если
+        невязки нет хотя бы у одного из прогонов, сравнивать нечего и
+        остаётся новый результат — прежнее поведение.
+        """
+        # Порядок схемы важнее глубины невязки, и проверять его надо раньше.
+        # Первый порядок ВСЕГДА доводит невязку глубже: схемная вязкость гасит
+        # всё подряд. Поэтому сравнение по невязке систематически выбирает
+        # менее точный прогон — так в отчёт и уходил Cd = 0.36 из расчёта
+        # первым порядком, хотя рядом лежал результат вторым порядком.
+        # ...но только если прогон вторым порядком вообще что-то посчитал.
+        # Без этой проверки разошедшийся второй порядок (cl=cd=cm=0.0)
+        # выигрывал у сошедшегося первого, флаг ошибки снимался, и в отчёт
+        # уходила строка «3.0, 0.0, 0.0, 0.0, 0» при «1 успешных».
+        if (prev.get("second_order") is True
+                and new.get("second_order") is False
+                and SessionRunner._usable(prev)):
+            kept = dict(prev)
+            kept["error"] = False
+            kept["error_msg"] = (
+                "Оставлен прогон вторым порядком (log10(rms[Rho])=%s), хотя "
+                "повтор первым порядом сошёлся глубже (%s): у первого порядка "
+                "глубокая невязка не означает точности, а Cd в нём завышен "
+                "схемной вязкостью. Коэффициенты приблизительные."
+                % (prev.get("rms"), new.get("rms")))
+            log_cb("Внимание: повтор шёл первым порядком и сошёлся глубже "
+                   "(log10(rms[Rho])=%s против %s), но оставлен результат "
+                   "второго порядка — он точнее по схеме, а глубокая невязка "
+                   "первого порядка достигается схемной вязкостью."
+                   % (new.get("rms"), prev.get("rms")))
+            return kept
+
+        # Прогон без результата не может выиграть ни по какому признаку.
+        if not SessionRunner._usable(prev):
+            if SessionRunner._usable(new):
+                log_cb("Внимание: прогон вторым порядком разошёлся и не дал "
+                       "коэффициентов; оставлен повтор (%s). Коэффициенты "
+                       "приблизительные: порядок схемы снижен."
+                       % ("2-й порядок" if new.get("second_order")
+                          else "1-й порядок"))
+            return new
+
+        rp, rn = prev.get("rms"), new.get("rms")
+        if not isinstance(rp, (int, float)) or not isinstance(rn, (int, float)):
+            return new
+        if rn <= rp:
+            return new
+        kept = dict(prev)
+        kept["error"] = False
+        kept["error_msg"] = (
+            "Результат не сошёлся до порога (log10(rms[Rho])=%.3f при "
+            "норме -4…-6), но это лучше, чем дал повтор с другим "
+            "пресетом (%.3f). Коэффициенты приблизительные." % (rp, rn))
+        log_cb("Внимание: повтор дал худшую сходимость "
+               "(log10(rms[Rho])=%.3f против %.3f) — оставлен результат "
+               "первого прогона." % (rn, rp))
+        return kept
+
     def _recover(self, case_dir, res, log_cb):
         """Вызывается из потока расчёта. Определяет причину провала по
-        history.csv и ждёт ответ из GUI-диалога.
-        Возвращает 'rerun_safe'|'rerun_ultra'|'settings'|'abort'."""
+        history.csv, сам выбирает пресет и пишет всё в лог.
+
+        Модального окна больше нет: выбор детерминированный и идёт по
+        PRESET_ORDER — сначала 'ultra' (второй порядок, CFL с рампой),
+        и только потом 'safe' (первый порядок). Возвращает
+        'rerun_safe'|'rerun_ultra'|'abort'."""
         text = res.get("error_msg", "") or ""
         if su2_autoconfig is None:
             return "abort"
         det = su2_autoconfig.detect_result(case_dir, screen_text=text)
         if det["status"] == "converged":
             return "abort"
-        log_cb(f"⚠️ {det.get('detail', 'Расчёт не сошёлся.')}")
+        log_cb(f"Внимание: {det.get('detail', 'Расчёт не сошёлся.')}")
 
-        # Если диалоговый модуль недоступен — безопасный авто-пресет без вопросов
-        if su2_config_dialog is None:
-            try:
-                su2_autoconfig.apply_preset(
-                    os.path.join(case_dir, "config.cfg"), "safe")
-                log_cb("🔧 Автоматически применён устойчивый пресет 'safe'.")
-                return "rerun_safe"
-            except Exception as e:
-                log_cb(f"⚠️ Автоконфиг недоступен: {e}")
-                return "abort"
-
-        self._recovery_answer = None
-        self.recovery_signal.emit(
-            {"case_dir": case_dir, "text": text})
-        self._recovery_mutex.lock()
-        if self._recovery_answer is None:
-            self._recovery_cond.wait(self._recovery_mutex, 600000)  # 10 мин на ответ
-        ans = self._recovery_answer
-        self._recovery_mutex.unlock()
-        return ans or "abort"
-
-    def provide_recovery_answer(self, answer):
-        """Вызывается из GUI-потока после выбора пользователя."""
-        self._recovery_mutex.lock()
-        self._recovery_answer = answer
-        self._recovery_cond.wakeAll()
-        self._recovery_mutex.unlock()
-
-    def _handle_recovery_in_gui(self, payload):
-        """Слот в ГЛАВНОМ потоке: здесь можно показывать модальный диалог."""
+        action, preset, note = su2_autoconfig.suggest(
+            case_dir, screen_text=text, current_preset=self._auto_preset)
+        if action != "apply_preset" or preset is None:
+            log_cb(f"Внимание: {note}")
+            return "abort"
         try:
-            if su2_config_dialog is not None:
-                verdict = su2_config_dialog.offer_recovery_after_failure(
-                    None, payload["case_dir"], payload.get("text", ""))
-            else:
-                verdict = "abort"
-        except Exception:
-            verdict = "abort"
-        self.provide_recovery_answer(verdict)
+            su2_autoconfig.apply_preset(
+                os.path.join(case_dir, "config.cfg"), preset)
+        except Exception as e:
+            log_cb(f"Внимание: не удалось применить пресет '{preset}': {e}")
+            return "abort"
+        log_cb(f"Готово: применён пресет '{preset}', перезапускаю точку. {note}")
+        return "rerun_ultra" if preset == "ultra" else "rerun_safe"
 
     # ------------------------------------------------------------------
     def run(self):
@@ -619,7 +1012,7 @@ class SessionRunner(QThread):
         gpu_percent = int(getattr(sess, "gpu_percent", 0) or 0)
         if compute_device == "cpu_gpu":
             self.log_signal.emit(
-                f"🎮 Сессия в гибридном режиме: GPU {gpu_percent}%, "
+                f"Сессия в гибридном режиме: GPU {gpu_percent}%, "
                 f"ядер CPU {sess.cpu_cores}"
             )
         # =================================================================
@@ -653,10 +1046,10 @@ class SessionRunner(QThread):
                         su2_autoconfig.apply_preset(
                             os.path.join(case_dir, "config.cfg"),
                             self._auto_preset)
-                        log_cb(f"🔧 К точке применён устойчивый пресет "
+                        log_cb(f"К точке применён устойчивый пресет "
                                f"'{self._auto_preset}'.")
                     except Exception as e:
-                        log_cb(f"⚠️ Не удалось применить пресет: {e}")
+                        log_cb(f"Внимание: Не удалось применить пресет: {e}")
 
                 def _make_worker():
                     return SU2Worker(
@@ -674,18 +1067,33 @@ class SessionRunner(QThread):
                         break
                     if self._recovery_declined or su2_autoconfig is None:
                         break
+                    _mesh_note = mesh_quality_note()
+                    if _mesh_note and not self._mesh_note_shown:
+                        # Не обрываем повтор: пресет меняет устойчивость
+                        # схемы, и на картезианской сетке это регулярно
+                        # единственный способ получить результат. Говорим
+                        # лишь, что число будет неточным.
+                        self._mesh_note_shown = True
+                        log_cb("Внимание: %s. Расчёт может сойтись, но "
+                               "аэродинамические коэффициенты будут "
+                               "неточными: пресеты автоконфига меняют CFL и "
+                               "порядок схемы, а не сетку. Для точности "
+                               "нужна сетка, облегающая поверхность."
+                               % _mesh_note)
                     verdict = self._recover(case_dir, res, log_cb)
                     if verdict in ("rerun_safe", "rerun_ultra", "settings"):
                         if verdict == "rerun_ultra":
                             self._auto_preset = "ultra"
                         elif verdict == "rerun_safe":
                             self._auto_preset = "safe"
-                        log_cb("🔁 Повторный расчёт точки с новыми настройками...")
+                        log_cb("Повторный расчёт точки с новыми настройками...")
+                        _prev = res
                         self._worker = _make_worker()
                         res = self._worker.run(aoa)
+                        res = self._better_result(_prev, res, log_cb)
                     else:
                         self._recovery_declined = True
-                        log_cb("ℹ️ Автоконфиг отклонён — продолжаю серию "
+                        log_cb("Автоконфиг отклонён — продолжаю серию "
                                "без повторных вопросов.")
                         break
             else:
@@ -707,7 +1115,7 @@ class SessionRunner(QThread):
             sess.save()
             if res.get("error") and "Не найден SU2_CFD" in res.get("error_msg", ""):
                 self.result_ready.emit(res)
-                self.log_signal.emit("⛔ Серия прервана: нет исполняемого SU2.")
+                self.log_signal.emit("Серия прервана: нет исполняемого SU2.")
                 self.finished_all.emit()
                 return
             self.result_ready.emit(res)
@@ -724,22 +1132,9 @@ class SessionRunner(QThread):
             if os.path.exists(MESH_FILE):
                 shutil.copy2(MESH_FILE, os.path.join(case_dir, "mesh.su2"))
             write_case_config(case_dir, aoa, sess)
-            # === T2: mesh-декомпозиция для многоядерных расчётов ==========
-            # Проверяем флаг use_partition — пользователь мог отключить его
-            # в Solver Settings (для маленьких сеток partition не нужен).
-            use_partition = bool(getattr(sess, "use_partition", True))
-            n_proc = int(getattr(sess, "cpu_cores", 1) or 1)
-            if n_proc > 1 and use_partition:
-                partition_mesh(case_dir, n_proc, log_cb)
-            elif n_proc > 1 and not use_partition:
-                log_cb(
-                    "  ℹ️ Mesh partition отключён пользователем — "
-                    "SU2 сделает auto-partition на старте."
-                )
-            # ==============================================================
             return True
         except Exception as e:
-            log_cb(f"❌ Подготовка каталога {case_dir}: {e}")
+            log_cb(f"Ошибка: Подготовка каталога {case_dir}: {e}")
             return False
 
 
@@ -756,9 +1151,12 @@ class OptimizationWorker(QThread):
     progress_signal = pyqtSignal(int)
     opt_finished = pyqtSignal(object)             # dict лучшего кандидата
     update_geometry_signal = pyqtSignal(object)   # dict параметров → GUI перестраивает крыло
+    variant_ready = pyqtSignal(object)            # dict результата одного варианта (DOE)
 
     def __init__(self, target_cl, target_k, physics, solver, initial_params,
-                 rule_set, flight_points, ref_data, body_markers, parent=None):
+                 rule_set, flight_points, ref_data, body_markers, parent=None,
+                 candidates=None, cpu_cores=1, use_symmetry=False,
+                 symmetry_planes=None):
         super().__init__(parent)
         self.target_cl = target_cl
         self.target_k = target_k
@@ -769,11 +1167,21 @@ class OptimizationWorker(QThread):
         self.flight_points = flight_points
         self.ref_data = ref_data
         self.body_markers = body_markers
+        # ТЗ №1 (многоядерность) и №2 (плоскость симметрии): оптимизация
+        # раньше всегда считала в одно ядро и без симметрии — теперь
+        # настройки обычного расчёта пробрасываются и сюда.
+        self.cpu_cores = max(1, int(cpu_cores or 1))
+        self.use_symmetry = bool(use_symmetry)
+        self.symmetry_planes = (list(symmetry_planes) if symmetry_planes
+                                else (["xz"] if self.use_symmetry else None))
         self._stop = False
         self._mutex = QMutex()
         self._cond = QWaitCondition()
         self._geom_ready = False
         self.n_iterations = 6
+        # Табличная оптимизация (DOE): если передан список кандидатов,
+        # перебираем его вместо случайного поиска.
+        self.candidates = list(candidates) if candidates else None
 
     # ------------------------------------------------------------------
     def stop(self):
@@ -822,6 +1230,30 @@ class OptimizationWorker(QThread):
         return cand
 
     # ------------------------------------------------------------------
+    def _enabled_symmetry_planes(self, mesh_path: str) -> list:
+        """Плоскости симметрии, которые действительно есть в сетке.
+
+        MARKER_SYM с несуществующим маркером роняет SU2, поэтому каждая
+        заявленная плоскость проверяется по ``mesh.su2`` (как это делает
+        :func:`solver.config_builder.write_case_config` для обычного
+        расчёта).
+        """
+        if not self.symmetry_planes:
+            return []
+        try:
+            from solver.config_builder import _mesh_has_marker
+        except Exception:
+            return []
+        tags = {"xz": ("symmetry_plane", "symmetry_xz"),
+                "xy": ("symmetry_xy",), "yz": ("symmetry_yz",)}
+        out = []
+        for p in self.symmetry_planes:
+            p = str(p).lower()
+            if any(_mesh_has_marker(mesh_path, t) for t in tags.get(p, ())):
+                out.append(p)
+        return out
+
+    # ------------------------------------------------------------------
     def _evaluate(self, cand: dict) -> dict:
         cl_w = cd_w = w_sum = 0.0
         results = []
@@ -832,20 +1264,27 @@ class OptimizationWorker(QThread):
                 WORK_DIR_BASE, f"OPT_P{id(cand) % 1000}_{p_i}")
             os.makedirs(case_dir, exist_ok=True)
             try:
+                mesh_dst = os.path.join(case_dir, "mesh.su2")
                 if os.path.exists(MESH_FILE):
-                    shutil.copy2(MESH_FILE, os.path.join(case_dir, "mesh.su2"))
+                    shutil.copy2(MESH_FILE, mesh_dst)
                 from solver.config_builder import build_su2_config
-                text = build_su2_config(fp.aoa, self.physics, self.solver, self.ref_data)
+                planes = self._enabled_symmetry_planes(mesh_dst)
+                text = build_su2_config(
+                    fp.aoa, self.physics, self.solver, self.ref_data,
+                    mesh_quality=getattr(self, "mesh_quality", None),
+                    use_symmetry=bool(planes),
+                    symmetry_planes=planes,
+                )
                 with open(os.path.join(case_dir, "config.cfg"), "w",
                           encoding="utf-8") as f:
                     f.write(text)
             except Exception as e:
-                self.log_signal.emit(f"⚠️ Кейс оптимизации: {e}")
+                self.log_signal.emit(f"Внимание: Кейс оптимизации: {e}")
                 continue
             # === ПАТЧ: пробрасываем compute_device/gpu_percent в оценку ===
             compute_device = getattr(self, "compute_device", "cpu")
             gpu_percent = int(getattr(self, "gpu_percent", 0) or 0)
-            worker = SU2Worker(case_dir, 1, None, None,
+            worker = SU2Worker(case_dir, self.cpu_cores, None, None,
                                compute_device=compute_device,
                                gpu_percent=gpu_percent)
             # =============================================================
@@ -869,18 +1308,24 @@ class OptimizationWorker(QThread):
         best = {"cl_weighted": 0.0, "k_weighted": 0.0}
         best_score = -1e18
         t0 = _time.time()
-        self.log_signal.emit(f"🧬 Старт оптимизации: {self.n_iterations} кандидатов, "
+        if self.candidates is not None:
+            cands = self.candidates
+            mode = "табличный перебор"
+        else:
+            cands = [self._candidate(it) for it in range(self.n_iterations)]
+            mode = "случайный поиск"
+        n_total = max(1, len(cands))
+        self.log_signal.emit(f"Старт оптимизации ({mode}): {n_total} кандидатов, "
                              f"точек на кандидата: {len(self.flight_points)}")
-        for it in range(self.n_iterations):
+        for it, cand in enumerate(cands):
             if self._stop:
                 break
-            cand = self._candidate(it)
             self.log_signal.emit(f"→ Кандидат #{it + 1}: span={cand.get('span')}, "
                                  f"cr={cand.get('chord_root')}, ct={cand.get('chord_tip')}, "
                                  f"sweep={cand.get('sweep')}")
             self.update_geometry_signal.emit(dict(cand))
             if not self._wait_geometry():
-                self.log_signal.emit("⚠️ Перестройка геометрии прервана.")
+                self.log_signal.emit("Внимание: Перестройка геометрии прервана.")
                 break
             ev = self._evaluate(cand)
             params_for_rules = dict(cand)
@@ -919,13 +1364,26 @@ class OptimizationWorker(QThread):
                 reason = "жёсткое правило" if hard_block else "нет расчёта"
                 self.log_signal.emit(f"  кандидат #{it + 1} отклонён: {reason}.")
 
-            pct = int(100.0 * (it + 1) / self.n_iterations)
+            # Результат варианта — для таблицы DOE в GUI
+            try:
+                self.variant_ready.emit({
+                    "index": it,
+                    "params": dict(cand),
+                    "ok": bool(ev.get("ok")) and not hard_block,
+                    "cl_weighted": ev.get("cl_weighted", 0.0),
+                    "k_weighted": ev.get("k_weighted", 0.0),
+                    "rejected_reason": reason if (not ev.get("ok") or hard_block) else "",
+                })
+            except Exception:
+                pass
+
+            pct = int(100.0 * (it + 1) / n_total)
             self.progress_signal.emit(pct)
 
         if self._stop:
-            self.log_signal.emit("⛔ Оптимизация остановлена пользователем.")
+            self.log_signal.emit("Оптимизация остановлена пользователем.")
         else:
             dt = _time.time() - t0
-            self.log_signal.emit(f"🏁 Оптимизация завершена за {dt:.0f} сек. "
+            self.log_signal.emit(f"Оптимизация завершена за {dt:.0f} сек. "
                                  f"Лучший K={best.get('k_weighted', 0):.2f}")
         self.opt_finished.emit(best if best_score > -1e17 else None)
