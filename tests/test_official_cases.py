@@ -37,6 +37,7 @@ from official_cases import (
     parse_su2_text,
     read_su2_boundary,
 )
+from official_cases.downloader import fetch_remote, download_mesh, meshes_dir
 
 # Ожидаемые id в реестре
 EXPECTED_IDS = {
@@ -230,6 +231,104 @@ def test_read_su2_boundary_synthetic():
     _ok("parse_su2_text / read_su2_boundary работают (в т.ч. compact)")
 
 
+def test_downloader_avoids_rate_limit_via_raw():
+    """Скачивание отдаёт приоритет raw-зеркалу и не бьётся в лимит API.
+
+    GitHub Contents API без токена ограничен 60 запросами в час и отдаёт
+    ``HTTP 403 rate limit exceeded``. ``fetch_remote`` первым делом пробует
+    ``raw.githubusercontent.com`` (лимита нет), поэтому при доступном raw
+    API вообще не вызывается.
+    """
+    import urllib.error
+    from unittest import mock
+
+    calls = []
+
+    class _Resp:
+        def __init__(self, data):
+            self._data = data
+        def read(self):
+            return self._data
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        if "api.github.com" in req.full_url:
+            # Если бы дошли до API — упёрлись бы в лимит.
+            raise urllib.error.HTTPError(
+                req.full_url, 403, "rate limit exceeded", {}, None)
+        return _Resp(b"MESH-BYTES")
+
+    with mock.patch("official_cases.downloader.urllib.request.urlopen",
+                    _fake_urlopen):
+        data = fetch_remote("su2code/Tutorials", "design/some/mesh.su2")
+    assert data == b"MESH-BYTES", data
+    # raw-зеркало сработало первым — к ограниченному API не обращались.
+    assert any("raw.githubusercontent.com" in u for u in calls), calls
+    assert not any("api.github.com" in u for u in calls), \
+        "не должны стучаться в API, когда raw доступен"
+    _ok("fetch_remote(): raw-зеркало в приоритете, API-лимит обойдён")
+
+
+def test_downloader_fallback_to_api():
+    """Если raw-зеркало недоступно, fetch_remote докачивает через GitHub API."""
+    import urllib.error
+    from unittest import mock
+
+    calls = []
+
+    class _Resp:
+        def __init__(self, data):
+            self._data = data
+        def read(self):
+            return self._data
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        if "raw.githubusercontent.com" in req.full_url:
+            # CDN недоступен (TLS/прокси) на этой машине.
+            raise urllib.error.URLError("raw cdN недоступен")
+        return _Resp(b"MESH-API")
+
+    with mock.patch("official_cases.downloader.urllib.request.urlopen",
+                    _fake_urlopen):
+        data = fetch_remote("su2code/Tutorials", "design/some/mesh.su2")
+    assert data == b"MESH-API", data
+    assert any("api.github.com" in u for u in calls), calls
+    _ok("fetch_remote(): при недоступном raw качает через GitHub API")
+
+
+def test_download_mesh_caches():
+    """download_mesh сохраняет сетку в кэш meshes/ и не перекачивает её."""
+    import os
+    import tempfile
+    from unittest import mock
+    # Пустой кейс-заглушка, не требующий сети: временный каталог кэша.
+    import official_cases.downloader as _DL
+    tmp = tempfile.mkdtemp(prefix="oc_mesh_")
+    with mock.patch.object(_DL, "_MESHES_DIR", tmp):
+        case = get_case("inv_naca0012")
+        with mock.patch.object(_DL, "fetch_remote",
+                               return_value=b"X" * 64) as fr:
+            p = download_mesh("inv_naca0012")
+        assert os.path.exists(p)
+        assert fr.call_count == 1
+        # Повторный вызов — без повторного скачивания.
+        with mock.patch.object(_DL, "fetch_remote",
+                               return_value=b"") as fr2:
+            p2 = download_mesh("inv_naca0012")
+        assert p2 == p
+        assert fr2.call_count == 0
+    _ok("download_mesh(): кэширует сетку в meshes/")
+
+
 if __name__ == "__main__":
     print("== test_official_cases ==")
     test_catalogue()
@@ -243,4 +342,7 @@ if __name__ == "__main__":
     test_compare_file()
     test_prepare_case_dir_offline()
     test_meshes_report()
+    test_downloader_avoids_rate_limit_via_raw()
+    test_downloader_fallback_to_api()
+    test_download_mesh_caches()
     print("== OK ==")

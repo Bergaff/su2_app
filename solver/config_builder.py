@@ -871,8 +871,21 @@ def write_case_config(case_dir: str, aoa: float, session) -> str:
     # INC_*, а если выбрал сжимаемый и режим малый — уходит в INC_*.
     solver_final = session.solver
     if getattr(session, "use_incompressible_at_low_mach", True):
+        # Mach предпочтительно берём из physics; если его там нет (старые
+        # сессии), восстанавливаем из скорости потока и скорости звука,
+        # чтобы низкомаховые прогоны всегда уходили в INC_*, а не падали
+        # в расходимость сжимаемого EULER/RANS.
+        _physics = getattr(session, "physics", {}) or {}
+        _mach = _physics.get("mach")
+        if _mach is None:
+            _sp = _physics.get("speed")
+            _a = _physics.get("a")
+            try:
+                _mach = float(_sp) / max(float(_a), 1e-9)
+            except (TypeError, ValueError):
+                _mach = None
         solver_final = low_mach_incompressible_solver(
-            session.solver, session.physics.get("mach"))
+            session.solver, _mach)
 
     return write_su2_config(
         path=os.path.join(case_dir, "config.cfg"),

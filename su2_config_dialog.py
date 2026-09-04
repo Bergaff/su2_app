@@ -31,6 +31,7 @@ import glob
 import json
 import os
 import re
+import sys
 
 try:
     from PyQt5.QtWidgets import (
@@ -299,6 +300,28 @@ def _map_official_cfg_to_preset(text: str) -> dict:
     return {k: v for k, v in cfg.items() if k in _DIALOG_PARAM_KEYS}
 
 
+def _official_metadata_params(case) -> dict:
+    """Запасные параметры пресета из метаданных кейса.
+
+    Используется, когда встроенный ``config.cfg`` кейса не удалось прочитать
+    (например, в собранном приложении не развёрнута папка ``configs/`` или
+    файл повреждён). Так пресет всё равно появится в списке и задаст хотя бы
+    решатель и режим обтекания — этого достаточно, чтобы не считать
+    сжимаемым решателем на малых скоростях.
+    """
+    params = {}
+    solver = getattr(case, "solver", None)
+    if solver:
+        params["SOLVER"] = solver
+    mach = getattr(case, "mach", None)
+    if mach is not None and float(mach) > 0:
+        params["MACH_NUMBER"] = "%.6f" % float(mach)
+    aoa = getattr(case, "aoa", None)
+    if aoa is not None:
+        params["AOA"] = "%.2f" % float(aoa)
+    return params
+
+
 def _build_official_presets():
     """Наполняет ``OFFICIAL_PRESETS`` из встроенных официальных кейсов SU2.
 
@@ -306,25 +329,40 @@ def _build_official_presets():
     config.cfg, но только те, которые диалог умеет применить. Значения
     «заморожены» на момент импорта: правки официальных файлов в
     ``official_cases/configs/`` подхватятся при следующем запуске.
+
+    Один неудачный кейс не рушит всё: ошибка чтения конкретного
+    ``config.cfg`` логируется в stderr, а пресет строится из метаданных,
+    чтобы он остался доступен в выпадающем списке.
     """
     if official_cases is None:
         return
-    try:
-        for cid in official_cases.list_cases():
+    OFFICIAL_PRESETS.clear()
+    for cid in official_cases.list_cases():
+        try:
             case = official_cases.get_case(cid)
+        except Exception as e:                               # pragma: no cover
+            print(f"su2_config_dialog: не удалось получить кейс {cid}: {e}",
+                  file=sys.stderr)
+            continue
+        params = {}
+        try:
             text = official_cases.bundled_config_text(case.config_file)
             params = _map_official_cfg_to_preset(text)
-            if not params:
-                continue
-            name = "Официальный: %s" % case.name
-            OFFICIAL_PRESETS[name] = {
-                "case_id": cid,
-                "description": case.description,
-                "solver": case.solver,
-                "params": params,
-            }
-    except Exception:                                        # pragma: no cover
-        OFFICIAL_PRESETS.clear()
+        except Exception as e:                               # pragma: no cover
+            print(f"su2_config_dialog: не прочитан config.cfg кейса "
+                  f"{cid}: {e}", file=sys.stderr)
+        if not params:
+            # Запасной вариант из метаданных — чтобы пресет был в списке.
+            params = _official_metadata_params(case)
+        if not params:
+            continue
+        name = "Официальный: %s" % case.name
+        OFFICIAL_PRESETS[name] = {
+            "case_id": cid,
+            "description": case.description,
+            "solver": case.solver,
+            "params": params,
+        }
 
 
 # Заполняем после того, как PARAMS определён.

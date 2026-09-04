@@ -30,6 +30,7 @@ from .loader import (
 _MESHES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshes")
 
 _API = "https://api.github.com/repos/{repo}/contents/{path}"
+_RAW = "https://raw.githubusercontent.com/{repo}/{branch}/{path}"
 _RAW_ACCEPT = "application/vnd.github.raw"
 
 
@@ -51,14 +52,34 @@ def is_downloaded(case_id: str) -> bool:
     return bool(case.mesh_filename) and os.path.exists(mesh_local_path(case_id))
 
 
-def fetch_remote(url: str) -> bytes:
-    """Скачивает бинарный файл по URL через GitHub API (raw)."""
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "AeroOpt-official-cases",
-        "Accept": _RAW_ACCEPT,
-    })
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        return resp.read()
+def fetch_remote(repo: str, path: str, branch: str = "master") -> bytes:
+    """Скачивает бинарный файл по URL.
+
+    GitHub Contents API без токена ограничен **60 запросами в час** — на
+    повторном скачивании (например, второй сетки подряд) сервер отдаёт
+    ``HTTP 403: rate limit exceeded``. Поэтому сначала пробуем CDN
+    ``raw.githubusercontent.com`` (лимита на публичные репозитории нет), а
+    при неудаче (TLS/прокси/CDN не отдаёт файл) — GitHub Contents API с
+    ``Accept: application/vnd.github.raw``.
+    """
+    errors = []
+    candidates = [
+        _RAW.format(repo=repo, branch=branch, path=path),
+        _API.format(repo=repo, path=path),
+    ]
+    for url in candidates:
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "AeroOpt-official-cases",
+                "Accept": _RAW_ACCEPT,
+            })
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                return resp.read()
+        except Exception as e:                                 # pragma: no cover
+            errors.append(f"{url} → {type(e).__name__}: {e}")
+    raise RuntimeError(
+        "Не удалось скачать файл ни по одному из адресов:\n"
+        + "\n".join(errors))
 
 
 def _contents_url(repo: str, path: str) -> str:
@@ -80,8 +101,7 @@ def download_mesh(case_id: str, overwrite: bool = False) -> str:
     if os.path.exists(dest) and not overwrite:
         return dest
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    url = _contents_url(case.mesh_repo, case.mesh_path)
-    data = fetch_remote(url)
+    data = fetch_remote(case.mesh_repo, case.mesh_path)
     with open(dest, "wb") as f:
         f.write(data)
     return dest
