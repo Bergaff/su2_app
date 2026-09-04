@@ -33,6 +33,9 @@ from official_cases import (
     mesh_local_path,
     prepare_case_dir,
     meshes_report,
+    body_markers_from_config,
+    parse_su2_text,
+    read_su2_boundary,
 )
 
 # Ожидаемые id в реестре
@@ -171,6 +174,62 @@ def test_meshes_report():
     _ok("meshes_report() перечисляет официальные 3D-сетки")
 
 
+def _synthetic_su2_text():
+    """Минимальный 3D-меш SU2 для проверки извлечения поверхности."""
+    return (
+        "NDIME= 3\n"
+        "NPOIN= 5\n"
+        "0.0 0.0 0.0\n"
+        "1.0 0.0 0.0\n"
+        "1.0 1.0 0.0\n"
+        "0.0 1.0 0.0\n"
+        "0.5 0.5 0.5\n"
+        "NMARK= 1\n"
+        "MARKER_TAG= WING\n"
+        "MARKER_ELEMS= 2\n"
+        "5 0 1 2\n"
+        "5 0 2 3\n"
+    )
+
+
+def test_body_markers_from_config():
+    text = (
+        "SOLVER= RANS\n"
+        "MARKER_HEATFLUX= ( WING, 0.0 )\n"
+        "MARKER_FAR= ( FARFIELD )\n"
+    )
+    assert body_markers_from_config(text) == ["WING"]
+    # MARKER_EULER в приоритете, если задан
+    text2 = "MARKER_EULER= ( UPPER_SIDE, LOWER_SIDE, TIP )\n"
+    assert body_markers_from_config(text2) == [
+        "UPPER_SIDE", "LOWER_SIDE", "TIP"]
+    _ok("body_markers_from_config читает MARKER_EULER / MARKER_HEATFLUX")
+
+
+def test_read_su2_boundary_synthetic():
+    import tempfile
+    import os as _os
+    d = tempfile.mkdtemp(prefix="oc_surf_")
+    p = _os.path.join(d, "mesh.su2")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(_synthetic_su2_text())
+
+    parsed = parse_su2_text(_synthetic_su2_text())
+    assert parsed["ndime"] == 3
+    assert len(parsed["points"]) == 5
+    assert "WING" in parsed["markers"]
+
+    surf = read_su2_boundary(p, markers=["WING"])
+    assert len(surf["triangles"]) == 2, surf["triangles"]
+    assert len(surf["points"]) == 4, surf["points"]  # compact: 0,1,2,3
+    assert surf["markers"] == {"WING": 2}
+
+    # Без markers — берутся все «тела» (не дальнее поле/симметрия)
+    surf_all = read_su2_boundary(p, markers=None)
+    assert len(surf_all["triangles"]) == 2
+    _ok("parse_su2_text / read_su2_boundary работают (в т.ч. compact)")
+
+
 if __name__ == "__main__":
     print("== test_official_cases ==")
     test_catalogue()
@@ -178,6 +237,8 @@ if __name__ == "__main__":
     test_find_by()
     test_nearest_for()
     test_loader_helpers()
+    test_body_markers_from_config()
+    test_read_su2_boundary_synthetic()
     test_diagnose_low_mach_euler()
     test_compare_file()
     test_prepare_case_dir_offline()

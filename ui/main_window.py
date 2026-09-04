@@ -86,6 +86,15 @@ from solver.workers import (
     hidden_subprocess_kwargs, _mesh_npoin,
 )
 from solver.session import CalculationSession
+
+# Официальные кейсы SU2 (встроенные конфиги + 3D-сетки). Вспомогательный
+# stdlib-пакет; если его нет (частичная сборка), кнопка загрузки официальной
+# геометрии просто не появится.
+try:
+    import official_cases
+except Exception:                                        # pragma: no cover
+    official_cases = None
+
 # === T6: лицензирование (опционально — не падает, если модуль недоступен)
 _LICENSE_ERROR = ""
 
@@ -947,6 +956,35 @@ class MainWindow(QMainWindow):
         self.btn_add_primitive.setMenu(menu)
         btn_load_lay.addWidget(self.btn_add_import)
         btn_load_lay.addWidget(self.btn_add_primitive)
+        # Кнопка загрузки официальной геометрии SU2 (ONERA M6 и др.).
+        # Список случаев собирается из official_cases; если пакет недоступен,
+        # кнопка всё равно создаётся, но остаётся выключенной.
+        self.btn_add_official = QPushButton("Официальная геометрия")
+        self.btn_add_official.setToolTip(
+            "Добавить геометрию из официального тест-кейса SU2 (ONERA M6 "
+            "и др.) как компонент. 3D-сетка при необходимости скачивается "
+            "из официального репозитория SU2 в official_cases/meshes/.")
+        if official_cases is None:
+            self.btn_add_official.setEnabled(False)
+        else:
+            official_menu = QMenu()
+            self._official_menu_actions = []
+            for cid in self._downloadable_official_ids():
+                try:
+                    case = official_cases.get_case(cid)
+                except Exception:
+                    continue
+                act = official_menu.addAction(
+                    "%s — %s" % (cid, case.name),
+                    lambda checked=False, c=cid: self.load_official_geometry(c))
+                self._official_menu_actions.append(act)
+            if official_menu.actions():
+                self.btn_add_official.setMenu(official_menu)
+            else:
+                self.btn_add_official.setEnabled(False)
+                self.btn_add_official.setToolTip(
+                    "Нет официальных 3D-кейсов с доступной сеткой.")
+        btn_load_lay.addWidget(self.btn_add_official)
         lay3.addLayout(btn_load_lay)
         simplify_layout = QHBoxLayout()
         self.btn_simplify_simple = QPushButton("Упростить (грубо)")
@@ -3593,6 +3631,128 @@ class MainWindow(QMainWindow):
                                      f"Не удалось импортировать {ext}-файл напрямую. "
                                      "Экспортируйте его в STL из CAD-системы.")
         QApplication.restoreOverrideCursor()
+
+    # =============================================================
+    # ОФИЦИАЛЬНАЯ ГЕОМЕТРИЯ SU2 (кнопка «Официальная геометрия»)
+    # =============================================================
+    def _downloadable_official_ids(self) -> list:
+        """Идентификаторы официальных кейсов, для которых есть 3D-сетка.
+
+        Берёт из official_cases каталог и оставляет только те кейсы, у
+        которых заполнены ``mesh_path``/``mesh_filename`` (сетку можно
+        скачать). Если пакет недоступен — пустой список.
+        """
+        if official_cases is None:
+            return []
+        ids = []
+        try:
+            for cid in official_cases.list_cases():
+                case = official_cases.get_case(cid)
+                if case.mesh_path and case.mesh_filename:
+                    ids.append(cid)
+        except Exception:
+            return []
+        return ids
+
+    def load_official_geometry(self, case_id: str):
+        """Скачивает официальную сетку SU2 и добавляет тело как компонент.
+
+        Сетка при необходимости скачивается в ``official_cases/meshes/``,
+        поверхность тела вытаскивается по маркерам из официального
+        ``config.cfg`` (MARKER_EULER / MARKER_HEATFLUX) и добавляется через
+        ``_add_body`` — тот же пайплайн, что и у обычного STL.
+        """
+        if official_cases is None:
+            QMessageBox.warning(self, "Официальная геометрия",
+                                "Библиотека official_cases недоступна.")
+            return
+        try:
+            case = official_cases.get_case(case_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка",
+                                 f"Неизвестный официальный кейс: {case_id}: {e}")
+            return
+        # Загрузка и разбор сетки — тяжёлые операции, показываем wait-курсор.
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            try:
+                mesh_path = official_cases.download_mesh(case_id)
+            except Exception as e:
+                QApplication.restoreOverrideCursor()
+                self.log_text.append(
+                    f"Ошибка: не удалось скачать сетку «{case.name}»: {e}")
+                QMessageBox.critical(
+                    self, "Загрузка официальной геометрии",
+                    f"Не удалось скачать сетку кейса «{case.name}».\n\n"
+                    f"{type(e).__name__}: {e}\n\n"
+                    "Проверьте подключение к интернету и официальному "
+                    "репозиторию SU2, либо загрузите сетку вручную в "
+                    "official_cases/meshes/.")
+                return
+            markers = []
+            try:
+                cfg_text = official_cases.bundled_config_text(case.config_file)
+                markers = official_cases.body_markers_from_config(cfg_text)
+            except Exception:
+                markers = []
+            surf = official_cases.read_su2_boundary(mesh_path, markers=markers or None)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            self.log_text.append(f"Ошибка разбора официальной сетки: {e}")
+            QMessageBox.critical(self, "Официальная геометрия",
+                                 f"Не удалось разобрать сетку: {e}")
+            return
+        QApplication.restoreOverrideCursor()
+
+        tris = surf.get("triangles") or []
+        pts = surf.get("points") or []
+        if not tris or not pts:
+            self.log_text.append(
+                f"Внимание: в сетке «{case.name}» не найдена поверхность тела "
+                f"(маркеры: {markers or '—'}); соседние мне не добавились.")
+            QMessageBox.information(
+                self, "Официальная геометрия",
+                f"В сетке кейса «{case.name}» не найдена поверхность тела.\n\n"
+                f"Маркеры из config.cfg: {markers or '—'}")
+            return
+
+        # Собираем pyvista.PolyData из точек и треугольников.
+        try:
+            vertices = np.array([[float(p[0]), float(p[1]), float(p[2])]
+                                 for p in pts], dtype=np.float64)
+            faces = np.array([[3] + list(t) for t in tris],
+                             dtype=np.int64).ravel()
+            poly = pv.PolyData(vertices, faces)
+            poly = poly.triangulate().clean(tolerance=1e-6)
+        except Exception as e:
+            self.log_text.append(f"Ошибка сборки поверхности: {e}")
+            QMessageBox.critical(self, "Официальная геометрия",
+                                 f"Не удалось собрать поверхность: {e}")
+            return
+
+        # Пишем во временный STL и проходим через _add_body — один и тот же
+        # пайплайн (таблица, цвет, роль, invalidate_mesh), что и у импорта.
+        os.makedirs(WORK_DIR_BASE, exist_ok=True)
+        stl_path = os.path.join(
+            WORK_DIR_BASE, f"_official_{case_id}_{self.next_body_id}.stl")
+        try:
+            poly.save(stl_path)
+        except Exception as e:
+            self.log_text.append(f"Ошибка сохранения STL: {e}")
+            QMessageBox.critical(self, "Официальная геометрия",
+                                 f"Не удалось сохранить STL: {e}")
+            return
+
+        self._add_body(stl_path, "other")
+        if self.bodies:
+            self.bodies[-1]["name"] = (
+                f"Официальный: {case.name} ({len(tris)} тр.)")
+            self.update_bodies_table()
+            self.log_text.append(
+                f"Готово: Официальная геометрия «{case.name}»: "
+                f"{len(pts)} точек, {len(tris)} треугольников, "
+                f"маркеры: {list(surf.get('markers') or {})}")
+        self.update_flow_arrow()
 
     # =============================================================
     # ТАБЛИЦА ТЕЛ

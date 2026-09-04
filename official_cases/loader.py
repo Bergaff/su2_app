@@ -100,3 +100,38 @@ def bundled_config_path(config_file: str) -> str:
 def bundled_config_text(config_file: str) -> str:
     """Читает встроенный официальный конфиг."""
     return load_text(bundled_config_path(config_file))
+
+
+def _extract_marker_names(value: Optional[str]) -> list:
+    """Вытаскивает имена маркеров из ``MARKER_EULER= ( a, b )`` / ``...HEATFLUX``."""
+    if not value:
+        return []
+    raw = str(value).replace("(", " ").replace(")", " ").replace(",", " ")
+    out = []
+    for tok in raw.split():
+        tok = tok.strip()
+        if not tok:
+            continue
+        # Отбрасываем числовые значения (у MARKER_HEATFLUX пары "имя, 0.0").
+        try:
+            float(tok)
+            continue
+        except ValueError:
+            pass
+        if tok not in out:
+            out.append(tok)
+    return out
+
+
+def body_markers_from_config(text: str) -> list:
+    """Имена маркеров тела из официального config.cfg.
+
+    Официальные кейсы помечают тело либо ``MARKER_EULER`` (невязкий),
+    либо ``MARKER_HEATFLUX`` (вязкий). Возвращает список имён без типов
+    и числовых значений.
+    """
+    cfg = parse_keys(text)
+    names = _extract_marker_names(cfg.get("MARKER_EULER"))
+    if not names:
+        names = _extract_marker_names(cfg.get("MARKER_HEATFLUX"))
+    return names

@@ -69,6 +69,11 @@ from .loader import (
     parse_keys,
     bundled_config_path,
     bundled_config_text,
+    body_markers_from_config,
+)
+from .surface import (
+    parse_su2_text,
+    read_su2_boundary,
 )
 
 __all__ = [
@@ -94,4 +99,7 @@ __all__ = [
     "parse_keys",
     "bundled_config_path",
     "bundled_config_text",
+    "body_markers_from_config",
+    "parse_su2_text",
+    "read_su2_boundary",
 ]

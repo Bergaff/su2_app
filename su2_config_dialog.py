@@ -90,6 +90,11 @@ try:
 except Exception:                                        # pragma: no cover
     su2_preset_format = None
 
+# Пресеты с официальных кейсов SU2 (заполняются после определения PARAMS).
+# Каждый пресет — это настройки, которые реально стоят в официальном
+# config.cfg, сверенные с полями диалога. Нельзя удалить/переименовать.
+OFFICIAL_PRESETS = {}     # имя -> {ключ: значение}
+
 
 # ---------------------------------------------------------------------------
 # Каталог параметров: группа, ключ, подпись, тип, опции, подсказка.
@@ -261,6 +266,72 @@ PARAMS = [
 
 
 # ---------------------------------------------------------------------------
+# Официальные пресеты SU2 (из встроенных официальных config.cfg)
+# ---------------------------------------------------------------------------
+# Ключи, которые диалог умеет показывать/применять. Для официального пресета
+# берём только их — в официальном config.cfg сотни строк (в т.ч. DV_*,
+# FFD_* для оптимизации), которые диалог не умеет показать и применять
+# не должен (они меняют постановку, а не численную схему).
+_DIALOG_PARAM_KEYS = {row[1] for row in PARAMS}
+
+
+def read_config_text_keys(text: str) -> dict:
+    """Разбирает текст config.cfg в словарь активных ``KEY= value``.
+
+    Отличается от ``read_config`` тем, что принимает строку, а не файл, и
+    работает с '%' как единственным комментарием SU2 (как и сам SU2).
+    """
+    out = {}
+    for raw in (text or "").splitlines():
+        s = raw.split("%", 1)[0].strip()
+        if not s or "=" not in s:
+            continue
+        key, _, val = s.partition("=")
+        k = key.strip()
+        if k:
+            out[k] = val.strip()
+    return out
+
+
+def _map_official_cfg_to_preset(text: str) -> dict:
+    """Собирает из официального config.cfg пресет только из диалоговых ключей."""
+    cfg = read_config_text_keys(text)
+    return {k: v for k, v in cfg.items() if k in _DIALOG_PARAM_KEYS}
+
+
+def _build_official_presets():
+    """Наполняет ``OFFICIAL_PRESETS`` из встроенных официальных кейсов SU2.
+
+    Каждый пресет — это настройки, которые реально стоят в официальном
+    config.cfg, но только те, которые диалог умеет применить. Значения
+    «заморожены» на момент импорта: правки официальных файлов в
+    ``official_cases/configs/`` подхватятся при следующем запуске.
+    """
+    if official_cases is None:
+        return
+    try:
+        for cid in official_cases.list_cases():
+            case = official_cases.get_case(cid)
+            text = official_cases.bundled_config_text(case.config_file)
+            params = _map_official_cfg_to_preset(text)
+            if not params:
+                continue
+            name = "Официальный: %s" % case.name
+            OFFICIAL_PRESETS[name] = {
+                "case_id": cid,
+                "description": case.description,
+                "solver": case.solver,
+                "params": params,
+            }
+    except Exception:                                        # pragma: no cover
+        OFFICIAL_PRESETS.clear()
+
+
+# Заполняем после того, как PARAMS определён.
+_build_official_presets()
+
+
+# ---------------------------------------------------------------------------
 # Чтение/запись config.cfg (активные строки KEY= value; '%' - комментарий SU2)
 # ---------------------------------------------------------------------------
 
@@ -351,9 +422,29 @@ def save_user_presets(presets):
 
 
 def all_presets():
+    """Все пресеты: встроенные + официальные + пользовательские.
+
+    Официальные пресеты раскрываются до плоского ``{ключ: значение}``,
+    чтобы вызывающий код (`_apply_preset_to_fields`) работал одинаково.
+    Метаданные (описание, SOLVER, id кейса) лежат в ``OFFICIAL_PRESETS`` и
+    доступны через ``official_preset_meta``.
+    """
     p = dict(BUILTIN_PRESETS)
+    for name, meta in OFFICIAL_PRESETS.items():
+        p[name] = dict(meta["params"])
     p.update(load_user_presets())
     return p
+
+
+def official_preset_meta(name):
+    """Метаданные официального пресета или None."""
+    return OFFICIAL_PRESETS.get(name)
+
+
+def _is_reserved_preset(name):
+    """Встроенные (ultra/safe) и официальные пресеты нельзя переименовывать
+    или удалять — но задать поля по ним можно."""
+    return name in BUILTIN_PRESETS or name in OFFICIAL_PRESETS
 
 
 # ---------------------------------------------------------------------------
@@ -597,6 +688,11 @@ class Su2ConfigDialog(QDialog):
                                 "Это имя зарезервировано за встроенным "
                                 "пресетом. Выбери другое.")
             return
+        if name in OFFICIAL_PRESETS:
+            QMessageBox.warning(self, "Мой пресет",
+                                "Это имя занято официальным пресетом SU2. "
+                                "Выбери другое.")
+            return
         presets = load_user_presets()
         presets[name] = self._collect_values()
         save_user_presets(presets)
@@ -623,6 +719,14 @@ class Su2ConfigDialog(QDialog):
                 name, info[0] or "пресет")
             if info[1]:
                 head += "\n" + info[1]
+        elif official_preset_meta(name) is not None:
+            meta = official_preset_meta(name)
+            head = "Официальный пресет «%s» — %s. Настройки взяты из " \
+                   "официального config.cfg кейса '%s'. Изменить нельзя: " \
+                   "сохраните под своим именем." % (
+                name, meta["solver"], meta["case_id"])
+            if meta["description"]:
+                head += "\n" + meta["description"]
         else:
             head = "Мой пресет «%s»." % name
         self.lbl_preset_params.setText("%s\nКлючей: %d\n%s" % (head, len(p), lines))
@@ -635,6 +739,12 @@ class Su2ConfigDialog(QDialog):
                                     "Встроенные пресеты ultra и safe "
                                     "переименовывать нельзя.")
             return
+        if name in OFFICIAL_PRESETS:
+            QMessageBox.information(self, "Переименование",
+                                    "Официальные пресеты SU2 переименовывать "
+                                    "нельзя — они соответствуют эталонным "
+                                    "config.cfg.")
+            return
         presets = load_user_presets()
         if name not in presets:
             return
@@ -645,7 +755,7 @@ class Su2ConfigDialog(QDialog):
         new = new.strip()
         if not new or new == name:
             return
-        if new in BUILTIN_PRESETS or new in presets:
+        if new in BUILTIN_PRESETS or new in OFFICIAL_PRESETS or new in presets:
             QMessageBox.warning(self, "Переименование",
                                 "Имя «%s» уже занято." % new)
             return
@@ -687,6 +797,11 @@ class Su2ConfigDialog(QDialog):
             QMessageBox.information(
                 self, "Мой пресет",
                 "Встроенные пресеты удалять нельзя.")
+            return
+        if name in OFFICIAL_PRESETS:
+            QMessageBox.information(
+                self, "Мой пресет",
+                "Официальные пресеты SU2 удалять нельзя.")
             return
         presets = load_user_presets()
         if name in presets:
