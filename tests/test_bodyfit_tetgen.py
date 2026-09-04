@@ -214,6 +214,50 @@ def test_bg_grid_ordering():
     check("вдали размер больше, чем у тела", sizes[-1] > sizes[0])
 
 
+def test_jitter_breaks_plane_coincidence():
+    """Сдвиг узлов фона убирает совпадение входной точки с фоновой плоскостью.
+
+    Без него симметричная модель (короб/фюзеляж) имеет точки ровно на z=0, а
+    фон регулярный, его плоскость z=0 совпадает — TetGen падает в
+    'Interpolating mesh size'. Сдвиг должен увести узлы с плоскостей и не
+    вывернуть теты.
+    """
+    m = _load_bodyfit()
+    bounds = (-28.08, 42.62, -34.45, 34.45, -30.35, 30.35)
+    body_min = np.array([-5.0, -5.6, -1.5])
+    body_max = np.array([8.0, 5.6, 1.5])
+    h_far = (bounds[1] - bounds[0]) / 12.0
+    axes, h_near, _, _ = m._bg_axes(bounds, body_min, body_max, 0.3462, h_far)
+    pts = m._structured_grid_pts(axes)
+    pts_j = m._jitter_bg_points(pts, h_near)
+    check("сдвиг меняет координаты узлов", not np.allclose(pts, pts_j))
+
+    # Теты не вывернуты после сдвига.
+    tets = m._structured_tet_cells(axes)
+    p0 = pts_j[tets[:, 0]]; p1 = pts_j[tets[:, 1]]
+    p2 = pts_j[tets[:, 2]]; p3 = pts_j[tets[:, 3]]
+    v = np.einsum('ij,ij->i', p1 - p0, np.cross(p2 - p0, p3 - p0)) / 6.0
+    check("после сдвига нет вывернутых/нулевых тетов",
+          (v > 0).all() and (np.abs(v) > 1e-12).all())
+
+    # Входная точка на z=0 (симметрия) больше не лежит на фоновой плоскости z.
+    box_pts, _ = m.box_surface(bounds, h_far)
+    planes = np.sort(np.unique(np.round(pts_j[:, 2], 6)))
+    z_center = 0.0
+    near = np.min(np.abs(planes - z_center))
+    check("ни одна фоновая z-плоскость не совпадает с z=0", near > 1e-6,
+          f"min|plane-0|={near:.2e}")
+    # Считаем совпадения точек короба с фоновыми плоскостями (все оси).
+    coinc = 0
+    for i in (0, 1, 2):
+        planes_i = np.sort(np.unique(np.round(pts_j[:, i], 6)))
+        for c in box_pts[:, i]:
+            if np.min(np.abs(planes_i - c)) < 1e-9:
+                coinc += 1
+    check("ни одна точка короба не лежит на фоновой плоскости", coinc == 0,
+          f"coinc={coinc}")
+
+
 def test_bg_axes_strictly_contain_bounds():
     """Фоновая область СТРОГО шире bounds (иначе TetGen падает в
     'Interpolating mesh size' на совпадении с границей короба)."""
@@ -251,5 +295,6 @@ if __name__ == "__main__":
     test_size_field_h_far_no_less_than_near()
     test_bg_grid_ordering()
     test_bg_axes_strictly_contain_bounds()
+    test_jitter_breaks_plane_coincidence()
     print("== " + ("OK" if not FAIL else f"FAIL {len(FAIL)}") + " ==")
     sys.exit(1 if FAIL else 0)

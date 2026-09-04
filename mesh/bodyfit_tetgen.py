@@ -326,6 +326,15 @@ def box_surface(bounds, h_box):
 # ячеек и вызывал расходимость 2-го порядка. Умеренный фон ускоряет сборку
 # и не съедает память.
 MAX_BG_NODES = 60_000
+# Доля шага у тела, на которую случайно сдвигаются узлы фоновой сетки.
+# Регулярная решётка фона имеет плоскости узлов (напр. z=0 у симметричной
+# модели); входные точки короба/тела, лежащие ровно на такой плоскости,
+# оказываются на грани фонового тета, и TetGen в «Interpolating mesh size»
+# получает вырожденную барицентрику -> сегфолт. Малый случайный сдвиг убирает
+# это совпадение, не искажая поле (поле лог-линейное и гладкое).
+# Фиксированный seed даёт воспроизводимую сетку.
+BG_JITTER_FRAC = 0.15
+BG_JITTER_SEED = 712367
 
 
 def make_graded_axis(lo, hi, inner_lo, inner_hi, h_near, h_far):
@@ -431,6 +440,10 @@ def build_size_field_background(bounds, body_min, body_max, body_pts,
         return None
 
     pts = _structured_grid_pts(axes)
+    # Сбрасываем узлы на малый случайный сдвиг — иначе входные точки
+    # симметричной модели (z=0 и т. п.) ложатся точно на фоновую плоскость
+    # и TetGen падает в "Interpolating mesh size" (см. _jitter_bg_points).
+    pts = _jitter_bg_points(pts, h_near)
 
     span = float(np.max(bmax - bmin))
     # Расстояние, на котором размер достигает h_far: ~2 габарита тела, но не
@@ -442,10 +455,28 @@ def build_size_field_background(bounds, body_min, body_max, body_pts,
     sizes = size_field_for_points(pts, body_pts, h_near, h_far, L)
     grid = _hex_to_tets(axes, pts, sizes)
 
-    log("   Фоновая сетка поля размера: %d узлов, шаг у тела %.4f м, "
-        "вдали %.4f м (переход ~%.1f м)"
+    log("   Фоновая сетка поля размера: %d узлов (со сдвигом против "
+        "совпадений), шаг у тела %.4f м, вдали %.4f м (переход ~%.1f м)"
         % (int(grid.n_points), h_near, h_far, L))
     return grid
+
+
+def _jitter_bg_points(pts, h_near):
+    """Случайный сдвиг узлов фоновой сетки, чтобы входные точки не лежали
+    на её плоскостях/гранях (иначе TetGen падает в 'Interpolating mesh size').
+
+    Регулярный фон (meshgrid) имеет узлы строго на осях, а входной PLC
+    симметричной модели (короб, фюзеляж) содержит точки ровно на этих осях
+    (напр. z=0). Точка на грани фонового тета даёт вырожденную барицентрику
+    в интерполяции размера -> сегфолт. Сдвиг на долю локального шага уводит
+    узлы фона с этих плоскостей; величина мала, поэтому теты не выворачиваются
+    и поле остаётся гладким. RNG с фиксированным seed для воспроизводимости.
+    """
+    pts = np.asarray(pts, dtype=float).copy()
+    rng = np.random.default_rng(BG_JITTER_SEED)
+    amp = max(float(h_near), 1e-9) * BG_JITTER_FRAC
+    pts += rng.uniform(-amp, amp, size=pts.shape)
+    return pts
 
 
 def _bg_axes(bounds, body_min, body_max, h_near, h_far, max_nodes=MAX_BG_NODES):
