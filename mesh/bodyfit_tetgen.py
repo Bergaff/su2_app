@@ -51,34 +51,39 @@ vmap) почти 100%. Если же поверхность дырявая, за
 на границу: меньше `min_recovery` — возвращается None и честное сообщение
 о дырявой поверхности.
 
-Поле размера (mesh sizing function) — ОТКЛЮЧЕНО по умолчанию
-----------------------------------------------------------
+Поле размера — через gmsh (гладкое), TetGen без `-m`
+----------------------------------------------------
 Поле размера делало сетку конформной: у тела ячейки мелкие (~`target_edge`),
-к коробу — плавный рост до `extent/12`. Изотропное поле задавалось через
-TetGen `-m` и фоновую сетку с `target_size` в узлах
-(`build_size_field_background`). Однако проверено (tetgen 0.8.4, авиационная
-геометрия короба + тела): `-m` с фоновой сеткой на **плоскостном PLC**
-(расчётный короб из плоских граней) приводит к детерминированному
-**SIGSEGV** (exit 139) в «Interpolating mesh size» — независимо от того, как
-построена фоновая сетка (структурированная, со сдвигом узлов, случайная
-Делоне), независимо от ключей (`pq2Y`, `pq2`, `pqY`, `p`) и даже на одном
-выпуклом коробе без тела. Сегфолт — это сбой C++ в самом TetGen, его
-**невозможно перехватить** из Python (`try/except` бесполезен). Поэтому
-`build_body_fitted_grid` по умолчанию строит сетку **без поля** (`size_field
-= False`), а любой явный `size_field=True` также игнорируется с предупреждением
-— чтобы собранное приложение не падало. Помощники поля размера
-(`size_field_for_points`, `build_size_field_background`, `_bg_axes`,
-`_jitter_bg_points`, `_structured_tet_cells`) оставлены для тестов и на случай
-будущего исправления TetGen, в рабочий путь они больше не попадают.
+к коробу — плавный рост до `extent/12`. Резкий скачок размера «мелко у тела ->
+крупно у короба» даёт растянутые тетраэдры, и 2-й порядок SU2 (MUSCL)
+расходится (Residual > 10^20). Мириться с этим нельзя.
 
-Без поля у тела (~0.1 м) и у короба (~6 м) остаётся резкий скачок размера;
-это минус (может ухудшить сходимость 2-го порядка), но сетка строится
-стабильно. Запасной путь к более мелкому разрешению у тела — уплотнение
-самой поверхности (`surface_needs_refinement` / `_sr.refine_to_edge_length`),
-которое нигде не роняет TetGen.
+Изотропное поле через TetGen `-m` (фоновую сетку с `target_size`) —
+**нельзя использовать**: проверено (tetgen 0.8.4), `-m` с фоновой сеткой
+сегфолтит (exit 139) в «Interpolating mesh size» — и на плоскостном PLC
+короба, и на сфере с телом при реалистичном масштабе, независимо от того,
+как построена фоновая сетка и от ключей. Сегфолт — это сбой C++ в самом
+TetGen, из Python **не перехватывается**. Поэтому:
 
-Если TetGen или движок булевых операций недоступны, функция возвращает
-None, и вызывающий код остаётся на прежнем картезианском пути.
+- **Основной путь — `mesh/bodyfit_gmsh.py`** (`build_body_fitted_grid_gmsh`):
+  gmsh строит **гладкое поле размера** штатно (Distance к телу + Threshold),
+  конформит тетраэдральную сетку поверхности тела и не падает. 2-й порядок
+  на такой сетке сходится. Пробуем gmsh первым в
+  `build_body_fitted_grid`.
+- **Фолбэк — TetGen без поля** (проверенный путь, 99.97% граней тела на
+  границе): если gmsh недоступен (нет gmsh/libGLU) или не справился (или
+  сетка не облегает тело) — `build_body_fitted_grid` падает на
+  `tetrahedralize_plc`. Сетка получается грубее (резкий скачок), но
+  стабильно, приложение не роняется.
+- Явный `size_field=True` для TetGen игнорируется с предупреждением —
+  чтобы случайно не вызвать сегфолт. Помощники поля (`size_field_for_points`,
+  `build_size_field_background`, `_bg_axes`, `_jitter_bg_points`,
+  `_structured_tet_cells`) оставлены для тестов и на случай будущего
+  исправления TetGen, в рабочий путь не попадают.
+
+Если ни gmsh, ни TetGen, ни движок булевых операций не доступны либо сетка
+не облегает поверхность, функция возвращает None, и вызывающий код остаётся
+на прежнем картезианском пути.
 """
 from __future__ import annotations
 
@@ -136,6 +141,26 @@ def tetgen_missing():
     if not HAS_PYVISTA:
         miss.append("pyvista")
     return miss
+
+
+def _load_bodyfit_gmsh():
+    """Загрузить mesh/bodyfit_gmsh.py по пути файла (без mesh/__init__).
+
+    Обычный `from mesh.bodyfit_gmsh import ...` исполняет mesh/__init__.py,
+    а тот тянет PyQt5 через mesh_worker. В тестах и в фоновом процессе
+    генерации сетки это лишняя зависимость.
+    """
+    try:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "bodyfit_gmsh.py")
+        spec = importlib.util.spec_from_file_location(
+            "bodyfit_gmsh_standalone", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
 
 
 def _load_surface_refine():
@@ -918,11 +943,19 @@ def build_body_fitted_grid(body_meshes, body_min, body_max, margin,
         bounds       — габариты расчётной области
     или None, если путь недоступен либо сетка не облегает поверхность.
     """
-    if not tetgen_available():
-        _miss = tetgen_missing()
+    # Общие зависимости для объединения поверхности и постобработки: trimesh,
+    # scipy, pyvista. Сама триангуляция делается либо gmsh, либо tetgen —
+    # проверяем их доступность ниже.
+    _shared_miss = []
+    if not HAS_TRIMESH:
+        _shared_miss.append("trimesh")
+    if not HAS_SCIPY:
+        _shared_miss.append("scipy")
+    if not HAS_PYVISTA:
+        _shared_miss.append("pyvista")
+    if _shared_miss:
         log("   Внимание: телооблекающая сетка недоступна — не хватает %s. "
-            "Строится картезианская сетка фона."
-            % (", ".join(_miss) if _miss else "зависимостей"))
+            "Строится картезианская сетка фона." % ", ".join(_shared_miss))
         return None
 
     body_pts, body_faces = union_surfaces(body_meshes, log=log)
@@ -955,6 +988,26 @@ def build_body_fitted_grid(body_meshes, body_min, body_max, margin,
                     "сетка строится по исходной триангуляции" % e)
 
     bounds = farfield_bounds(body_min, body_max, margin)
+
+    # --- gmsh-путь с гладким полем размера (2-й порядок сходится) ---------
+    # Пробуем первым: gmsh строит плавный переход «мелко у тела -> крупно у
+    # короба» штатно (без сломанного -m TetGen), и 2-й порядок SU2 на такой
+    # сетке сходится. Если gmsh недоступен или не справился (или сетка не
+    # облегает тело) — падаем на проверенный TetGen-путь ниже.
+    _gmsh_mod = _load_bodyfit_gmsh()
+    if _gmsh_mod is not None:
+        try:
+            _gmsh = _gmsh_mod.build_body_fitted_grid_gmsh(
+                body_meshes, body_min, body_max, margin, log=log,
+                target_edge=target_edge, max_surface_faces=max_surface_faces,
+                min_recovery=min_recovery, body_pts=body_pts,
+                body_faces=body_faces)
+            if _gmsh is not None:
+                log("   Готово: телооблекающая сетка построена gmsh "
+                    "(%d тетраэдров)" % _gmsh["n_tets"])
+                return _gmsh
+        except Exception as e:                                  # pragma: no cover
+            log("   Внимание: gmsh-путь не сработал (%s) — пробую TetGen." % e)
 
     # Поле размера (изотропное) через TetGen -m ОТКЛЮЧЕНО. Проверено на
     # tetgen 0.8.4: '-m' с фоновой сеткой на плоскостном PLC расчётного
