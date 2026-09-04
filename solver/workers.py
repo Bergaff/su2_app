@@ -879,6 +879,32 @@ class SessionRunner(QThread):
     # Автоконфиг: предложение устойчивого пресета после расхождения
     # ------------------------------------------------------------------
     @staticmethod
+    def _usable(r):
+        """Прогон действительно дал аэродинамику, а не нули.
+
+        Признак — наличие коэффициентов, а НЕ флаги error/stopped. Это
+        важно: прогон, вставший на плато (log10(rms) = -2.3 при норме -7),
+        тоже помечен error=True, но коэффициенты у него настоящие, и его
+        как раз надо сохранять — это и есть случай, ради которого вводилось
+        предпочтение второго порядка.
+
+        А разошедшийся прогон history.csv не оставляет вовсе и так и
+        остаётся с cl=cd=cm=0.0 из _result(): коэффициенты проставляются
+        только из разбора history.csv (res.update({"cl": hist["cl"], ...}),
+        строка ~828). Такие нули нельзя выдавать за результат.
+
+        Проверка «все три нуля», а не «cl != 0»: на симметричном профиле
+        при нулевом угле атаки Cl законно равен нулю, но Cd ненулевой.
+        """
+        if not r:
+            return False
+        for k in ("cl", "cd", "cm"):
+            v = r.get(k)
+            if isinstance(v, (int, float)) and abs(float(v)) > 1e-12:
+                return True
+        return False
+
+    @staticmethod
     def _better_result(prev, new, log_cb):
         """Лучший из двух прогонов одной точки.
 
@@ -898,7 +924,13 @@ class SessionRunner(QThread):
         # всё подряд. Поэтому сравнение по невязке систематически выбирает
         # менее точный прогон — так в отчёт и уходил Cd = 0.36 из расчёта
         # первым порядком, хотя рядом лежал результат вторым порядком.
-        if prev.get("second_order") is True and new.get("second_order") is False:
+        # ...но только если прогон вторым порядком вообще что-то посчитал.
+        # Без этой проверки разошедшийся второй порядок (cl=cd=cm=0.0)
+        # выигрывал у сошедшегося первого, флаг ошибки снимался, и в отчёт
+        # уходила строка «3.0, 0.0, 0.0, 0.0, 0» при «1 успешных».
+        if (prev.get("second_order") is True
+                and new.get("second_order") is False
+                and SessionRunner._usable(prev)):
             kept = dict(prev)
             kept["error"] = False
             kept["error_msg"] = (
@@ -913,6 +945,16 @@ class SessionRunner(QThread):
                    "первого порядка достигается схемной вязкостью."
                    % (new.get("rms"), prev.get("rms")))
             return kept
+
+        # Прогон без результата не может выиграть ни по какому признаку.
+        if not SessionRunner._usable(prev):
+            if SessionRunner._usable(new):
+                log_cb("Внимание: прогон вторым порядком разошёлся и не дал "
+                       "коэффициентов; оставлен повтор (%s). Коэффициенты "
+                       "приблизительные: порядок схемы снижен."
+                       % ("2-й порядок" if new.get("second_order")
+                          else "1-й порядок"))
+            return new
 
         rp, rn = prev.get("rms"), new.get("rms")
         if not isinstance(rp, (int, float)) or not isinstance(rn, (int, float)):

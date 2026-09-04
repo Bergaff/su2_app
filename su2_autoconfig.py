@@ -53,6 +53,11 @@ import shutil
 #   TIME_DISCRE_FLOW     — EULER_IMPLICIT: 8 из 8.
 #   NUM_METHOD_GRAD      — WEIGHTED_LEAST_SQUARES: 7 из 8.
 #   LINEAR_SOLVER_ITER   — 2..5 (3×4, 5×3, 2×1): 8 из 8, 15 нет ни разу.
+# Эти наблюдения записаны как ориентир, но применять их напрямую нельзя:
+# у нас препроцессор ILU, а в кейсах LU_SGS, и снижение итераций до 5 было
+# проверено прогоном вместе с прекондиционером — дало расходимость. Пока
+# что побеждает то, что подтверждено прогоном на этой сетке, а не кейсом
+# на чужой.
 #   LINEAR_SOLVER        — FGMRES: 6 из 8.
 # Отдельно TestCases/euler/turbofan_MFR_coupling идёт на
 # MACH_NUMBER= 0.1672 — почти точно режим AeroOpt (V=60 м/с, M=0.176) —
@@ -63,13 +68,13 @@ PRESETS = {
     "safe": {
         "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
         "CFL_NUMBER": "5.0",
-        "CFL_ADAPT": "NO",
+        "CFL_ADAPT": "YES",
         "CFL_ADAPT_PARAM": "( 0.5, 1.5, 1.0, 1000.0, 0.1 )",
         "MUSCL_FLOW": "NO",
         "ENTROPY_FIX_COEFF": "0.1",
         "NUM_METHOD_GRAD": "GREEN_GAUSS",
         "LINEAR_SOLVER": "FGMRES",
-        "LINEAR_SOLVER_ITER": "5",
+        "LINEAR_SOLVER_ITER": "15",
     },
     # «Точно» (ultra): второй порядок (MUSCL) с ограничителем. Единственный
     # режим, в котором Cd имеет физический смысл. Собран как копия базового
@@ -77,9 +82,10 @@ PRESETS = {
     # не меняет — он нужен как явная точка отсчёта и как страховка, если
     # базовый конфиг кто-то правил руками.
     #
-    # CFL фиксированный, без адаптации: рост CFL по рампе проверен двумя
-    # прогонами и оба раза давал расходимость (Residual > 10^20 на 482-й и
-    # на 1128-й итерации), тогда как фиксированный CFL 1.0 не расходится.
+    # Адаптация CFL оставлена: именно с ней базовый конфиг дошёл до
+    # log10(rms[Rho]) = -2.34 без расходимости. Потолок рампы 5.0 —
+    # поднятие до 50.0 проверено прогоном и дало расходимость на 1128-й
+    # итерации, возвращать его нельзя.
     "ultra": {
         "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
         "MUSCL_FLOW": "YES",
@@ -88,12 +94,12 @@ PRESETS = {
         "ENTROPY_FIX_COEFF": "0.005",
         "NUM_METHOD_GRAD": "WEIGHTED_LEAST_SQUARES",
         "CFL_NUMBER": "1.0",
-        "CFL_ADAPT": "NO",
+        "CFL_ADAPT": "YES",
         "CFL_ADAPT_PARAM": "( 0.5, 1.2, 0.5, 5.0 )",
         "LINEAR_SOLVER": "FGMRES",
         "LINEAR_SOLVER_PREC": "ILU",
         "LINEAR_SOLVER_ERROR": "1e-6",
-        "LINEAR_SOLVER_ITER": "5",
+        "LINEAR_SOLVER_ITER": "15",
     },
 }
 

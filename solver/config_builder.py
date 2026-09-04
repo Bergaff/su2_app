@@ -56,7 +56,19 @@ def _format_marker_value_pairs(markers: Optional[Iterable[str]],
 LOW_MACH_THRESHOLD = 0.3
 
 
-def low_mach_lines(mach) -> str:
+# Автоматическое включение прекондиционера ВЫКЛЮЧЕНО. Проверено прогоном:
+# базовый конфиг без него на M=0.176 не расходился, а стоял на
+# log10(rms[Rho]) = -2.34; тот же конфиг с LOW_MACH_PREC/CORR= YES
+# разошёлся на 1111-й итерации (Residual > 10^20). Официальный кейс
+# TestCases/euler/turbofan_MFR_coupling использует этот прекондиционер на
+# M=0.167, но со схемой JST и MUSCL_FLOW= NO, а у нас ROE с MUSCL_FLOW=
+# YES — сочетание, которое ни один кейс не подтверждает. Опция оставлена
+# в диалоге настроек SU2: включать её нужно осознанно, одним прогоном, а
+# не по умолчанию.
+LOW_MACH_AUTO = False
+
+
+def low_mach_lines(mach, auto=LOW_MACH_AUTO) -> str:
     """Строки прекондиционирования для малых чисел Маха.
 
     ``LOW_MACH_PREC`` — прекондиционер Roe-Turkel, снимает жёсткость
@@ -70,6 +82,8 @@ def low_mach_lines(mach) -> str:
     даже за 6000 итераций, а сопротивление выходит в разы больше
     индуктивного: схема Роу на низких махах вносит лишнюю вязкость.
     """
+    if not auto:
+        return "LOW_MACH_PREC= NO\nLOW_MACH_CORR= NO"
     try:
         m = float(mach)
     except (TypeError, ValueError):
@@ -78,9 +92,11 @@ def low_mach_lines(mach) -> str:
     return "LOW_MACH_PREC= %s\nLOW_MACH_CORR= %s" % (on, on)
 
 
-# Итераций линейного решателя. Во всех восьми официальных кейсах SU2 это
-# 2..5 (3 — четыре кейса, 5 — три, 2 — один); 15 не встречается ни разу.
-LINEAR_SOLVER_ITER = 5
+# Итераций линейного решателя. В официальных кейсах SU2 это 2..5, но там
+# препроцессор LU_SGS, а у нас ILU: при меньшем числе итераций ньютоновский
+# шаг решается грубее. Снижение до 5 было проверено прогоном вместе с
+# прекондиционером и дало расходимость, поэтому возвращено проверенное 15.
+LINEAR_SOLVER_ITER = 15
 
 CFL_PARAM_SAFE = "( 0.5, 1.2, 0.5, 5.0 )"
 CFL_PARAM_FAST = "( 0.1, 2.0, 10.0, 1000.0 )"
@@ -196,12 +212,12 @@ def build_euler_config(p: Mapping, markers=None, restart: bool = False,
     else:
         inner_iter, inner_why = _inner_iter_for_quality(mesh_quality), ""
     cfl_param = CFL_PARAM_FAST if cfl_aggressive else CFL_PARAM_SAFE
-    # Адаптация CFL включается только по явному желанию. Во всех восьми
-    # официальных кейсах SU2 (TestCases/euler/*, TestCases/navierstokes/*)
-    # стоит CFL_ADAPT= NO либо ключ не задан вовсе, то есть по умолчанию
-    # выключен: фиксированный CFL — норма, а не осторожность. Именно рост
-    # CFL по рампе и ронял расчёт в расходимость.
-    cfl_adapt = "YES" if cfl_aggressive else "NO"
+    # Адаптация CFL остаётся включённой по умолчанию: именно с ней базовый
+    # конфиг дошёл до log10(rms[Rho]) = -2.34 без расходимости, а
+    # выключение было проверено прогоном и в расходимость не спасло.
+    # В официальных кейсах SU2 адаптация выключена везде (8 из 8), но там
+    # другие сетки; менять проверенное на рекомендованное сразу нельзя.
+    cfl_adapt = "YES"
     lin_iter = LINEAR_SOLVER_ITER
     lm_lines = low_mach_lines(p['mach'])
     # === T1: MARKER_SYM — плоскости симметрии ========================
@@ -307,12 +323,12 @@ def build_rans_config(p: Mapping, markers=None, restart: bool = False,
     else:
         inner_iter, inner_why = _inner_iter_for_quality(mesh_quality), ""
     cfl_param = CFL_PARAM_FAST if cfl_aggressive else CFL_PARAM_SAFE
-    # Адаптация CFL включается только по явному желанию. Во всех восьми
-    # официальных кейсах SU2 (TestCases/euler/*, TestCases/navierstokes/*)
-    # стоит CFL_ADAPT= NO либо ключ не задан вовсе, то есть по умолчанию
-    # выключен: фиксированный CFL — норма, а не осторожность. Именно рост
-    # CFL по рампе и ронял расчёт в расходимость.
-    cfl_adapt = "YES" if cfl_aggressive else "NO"
+    # Адаптация CFL остаётся включённой по умолчанию: именно с ней базовый
+    # конфиг дошёл до log10(rms[Rho]) = -2.34 без расходимости, а
+    # выключение было проверено прогоном и в расходимость не спасло.
+    # В официальных кейсах SU2 адаптация выключена везде (8 из 8), но там
+    # другие сетки; менять проверенное на рекомендованное сразу нельзя.
+    cfl_adapt = "YES"
     lin_iter = LINEAR_SOLVER_ITER
     lm_lines = low_mach_lines(p['mach'])
 

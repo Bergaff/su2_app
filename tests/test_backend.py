@@ -364,8 +364,8 @@ with tempfile.TemporaryDirectory() as td:
     out, changes = AC.apply_preset(cfg, "safe")
     txt = open(cfg, encoding="utf-8").read()
     check("apply_preset safe: CFL_NUMBER= 5.0", "CFL_NUMBER= 5.0" in txt)
-    check("apply_preset safe: CFL_ADAPT= NO (как во всех кейсах SU2)",
-          "CFL_ADAPT= NO" in txt)
+    check("apply_preset safe: CFL_ADAPT= YES (проверено прогоном)",
+          "CFL_ADAPT= YES" in txt)
     check("apply_preset safe: MUSCL_FLOW= NO (1-й порядок)", "MUSCL_FLOW= NO" in txt)
     check("apply_preset safe: рампа CFL задана", "CFL_ADAPT_PARAM=" in txt)
     check("apply_preset safe: границы не тронуты",
@@ -379,8 +379,9 @@ with tempfile.TemporaryDirectory() as td:
     txt3 = open(cfg, encoding="utf-8").read()
     check("ultra: второй порядок, CFL 1.0",
           "CFL_NUMBER= 1.0" in txt3 and "MUSCL_FLOW= YES" in txt3)
-    check("ultra: линейный решатель как в базовом конфиге (1e-6, 5 итераций)",
-          "LINEAR_SOLVER_ERROR= 1e-6" in txt3 and "LINEAR_SOLVER_ITER= 5" in txt3)
+    check("ultra: линейный решатель как в базовом конфиге (1e-6, 15 итераций)",
+          "LINEAR_SOLVER_ERROR= 1e-6" in txt3
+          and "LINEAR_SOLVER_ITER= 15" in txt3)
     check("ultra: второй порядок MUSCL_FLOW= YES", "MUSCL_FLOW= YES" in txt3)
     check("ultra: рампа CFL до 5.0, как в базовом конфиге",
           "( 0.5, 1.2, 0.5, 5.0 )" in txt3)
@@ -490,24 +491,62 @@ with tempfile.TemporaryDirectory() as td:
     check("неизвестный порядок схемы не ломает выбор",
           _unk.get("cd") == 0.36, str(_unk.get("cd")))
 
+    # Регрессия прогона от 2026-09-04. Второй порядок разошёлся
+    # (Residual > 10^20 на 1111-й итерации), повтор первым порядком
+    # сошёлся до log10(rms[Rho]) = -7.00, а в отчёт ушла строка
+    # «3.0, 0.0, 0.0, 0.0, 0» и сессия отчиталась «1 успешных»:
+    # разошедшийся прогон выигрывал по порядку схемы, а его флаг ошибки
+    # при этом снимался.
+    _div = {"aoa": 3.0, "cl": 0.0, "cd": 0.0, "cm": 0.0, "rms": None,
+            "error": True, "error_msg": "Расчёт разошёлся",
+            "stopped": False, "second_order": True}
+    _conv = {"aoa": 3.0, "cl": 0.42, "cd": 0.05, "cm": 0.2, "rms": -7.0,
+             "error": False, "error_msg": "",
+             "stopped": False, "second_order": False}
+    check("_usable: разошедшийся прогон с нулями не считается результатом",
+          _SR._usable(_div) is False and _SR._usable(_conv) is True)
+    _r1 = _SR._better_result(_div, _conv, _logs.append)
+    check("разошедшийся 2-й порядок НЕ выигрывает у сошедшегося 1-го",
+          _r1.get("cd") == 0.05 and _r1.get("cl") == 0.42,
+          "cd=%s cl=%s" % (_r1.get("cd"), _r1.get("cl")))
+    check("нулевой результат не подменяет собой настоящий",
+          not (_r1.get("cd") == 0.0 and _r1.get("cl") == 0.0),
+          str(_r1.get("cd")))
+    check("выбранный результат не помечен ошибкой ложно",
+          _r1.get("error") is False and _r1.get("rms") == -7.0,
+          "error=%s rms=%s" % (_r1.get("error"), _r1.get("rms")))
+    check("в логе сказано, что прогон разошёлся",
+          any("разошёлся" in m for m in _logs), str(_logs[-1:])[:90])
+    # Оба разошлись — честная ошибка, а не нули под видом результата.
+    _r2 = _SR._better_result(_div, dict(_conv, error=True, cl=0.0, cd=0.0,
+                                        cm=0.0, rms=None), _logs.append)
+    check("когда оба прогона провалились, ошибка остаётся ошибкой",
+          _r2.get("error") is True, str(_r2.get("error")))
+
     # Прекондиционирование по низкому Маху. На V=60 м/с это M=0.176, и
     # сжимаемый решатель там жёсток по акустике: невязка встаёт на -2.3,
     # а сопротивление выходит в разы больше индуктивного.
     import solver.config_builder as _CB2
-    check("низкий мах включает прекондиционер",
-          _CB2.low_mach_lines(0.176) == "LOW_MACH_PREC= YES\nLOW_MACH_CORR= YES",
+    check("по умолчанию прекондиционер выключен (прогон разошёлся с ним)",
+          _CB2.low_mach_lines(0.176) == "LOW_MACH_PREC= NO\nLOW_MACH_CORR= NO"
+          and _CB2.LOW_MACH_AUTO is False,
           _CB2.low_mach_lines(0.176))
-    check("высокий мах его выключает",
-          _CB2.low_mach_lines(0.85) == "LOW_MACH_PREC= NO\nLOW_MACH_CORR= NO",
-          _CB2.low_mach_lines(0.85))
+    check("при явном включении низкий мах его включает",
+          _CB2.low_mach_lines(0.176, auto=True)
+          == "LOW_MACH_PREC= YES\nLOW_MACH_CORR= YES",
+          _CB2.low_mach_lines(0.176, auto=True))
+    check("при явном включении высокий мах его выключает",
+          _CB2.low_mach_lines(0.85, auto=True)
+          == "LOW_MACH_PREC= NO\nLOW_MACH_CORR= NO",
+          _CB2.low_mach_lines(0.85, auto=True))
     check("нечитаемый мах не роняет сборку конфига",
           "LOW_MACH_PREC= NO" in _CB2.low_mach_lines("abc"))
     _ph = {"aoa": 3.0, "mach": 0.176, "pressure": 101325.0,
            "temperature": 288.15, "density": 1.225, "ref_length": 1.12,
            "ref_area": 9.742, "ox": -0.883, "oy": 0.0, "oz": 0.0}
     _txt = _CB2.build_euler_config(_ph, markers=["airfoil"])
-    check("EULER-конфиг содержит обе строки прекондиционера",
-          "LOW_MACH_PREC= YES" in _txt and "LOW_MACH_CORR= YES" in _txt)
+    check("EULER-конфиг содержит обе строки прекондиционера (выключены)",
+          "LOW_MACH_PREC= NO" in _txt and "LOW_MACH_CORR= NO" in _txt)
     _cfg_lm = os.path.join(td, "lm_full.cfg")
     with open(_cfg_lm, "w", encoding="utf-8", newline="") as _fl:
         _fl.write(_txt)
@@ -517,16 +556,13 @@ with tempfile.TemporaryDirectory() as td:
     # Во всех восьми официальных кейсах SU2 адаптация CFL выключена, а
     # итераций линейного решателя 2..5. Именно рост CFL по рампе и давал
     # расходимость в прогонах.
-    check("базовый конфиг: CFL_ADAPT= NO без явного флага",
-          "CFL_ADAPT= NO" in _txt)
-    check("флаг агрессивного CFL по-прежнему включает адаптацию",
-          "CFL_ADAPT= YES" in _CB2.build_euler_config(
-              _ph, markers=["airfoil"], cfl_aggressive=True))
-    check("базовый конфиг: 5 итераций линейного решателя",
-          "LINEAR_SOLVER_ITER= 5" in _txt)
+    check("базовый конфиг: адаптация CFL включена (проверено прогоном)",
+          "CFL_ADAPT= YES" in _txt)
+    check("базовый конфиг: 15 итераций линейного решателя",
+          "LINEAR_SOLVER_ITER= 15" in _txt)
     check("ultra совпадает с базовым конфигом по CFL_ADAPT и итерациям",
-          AC.PRESETS["ultra"]["CFL_ADAPT"] == "NO"
-          and AC.PRESETS["ultra"]["LINEAR_SOLVER_ITER"] == "5")
+          AC.PRESETS["ultra"]["CFL_ADAPT"] == "YES"
+          and AC.PRESETS["ultra"]["LINEAR_SOLVER_ITER"] == "15")
     _ph2 = dict(_ph, mach=0.85)
     _txt2 = _CB2.build_euler_config(_ph2, markers=["airfoil"])
     check("RANS-шаблон тоже содержит ключ (единый код)",
@@ -1405,8 +1441,8 @@ with tempfile.TemporaryDirectory() as td:
     # Все ключи пресета уже есть в базовом конфиге, поэтому они правятся
     # на месте и отдельный блок не создаётся (блок нужен только для
     # отсутствующих ключей).
-    check("пресет применён на месте: CFL 5.0 без адаптации, 1-й порядок",
-          "CFL_NUMBER= 5.0" in _txt and "CFL_ADAPT= NO" in _txt
+    check("пресет применён на месте: CFL 5.0 с адаптацией, 1-й порядок",
+          "CFL_NUMBER= 5.0" in _txt and "CFL_ADAPT= YES" in _txt
           and "MUSCL_FLOW= NO" in _txt)
     check("пресет применён на месте: TIME_DISCRE_FLOW= EULER_IMPLICIT",
           "TIME_DISCRE_FLOW= EULER_IMPLICIT" in _txt)
