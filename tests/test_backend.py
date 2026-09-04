@@ -573,9 +573,11 @@ with tempfile.TemporaryDirectory() as td:
     open(_cfg3, "w", encoding="utf-8").write(
         "SOLVER= EULER\nMACH_NUMBER= 0.176\nMUSCL_FLOW= YES\n"
         "CFL_NUMBER= 1.0\nLOW_MACH_PREC= NO\n")
+    _d3 = AC.describe_config_scheme(_cfg3)
     check("describe предупреждает о выключенном прекондиционере на низком махе",
-          "LOW_MACH_PREC= NO" in AC.describe_config_scheme(_cfg3),
-          AC.describe_config_scheme(_cfg3))
+          "LOW_MACH_PREC= NO" in _d3, _d3)
+    check("и предупреждает, что включать его рискованно",
+          "расходимость" in _d3, _d3[-90:])
     open(_cfg3, "w", encoding="utf-8").write(
         "SOLVER= EULER\nMACH_NUMBER= 0.176\nMUSCL_FLOW= YES\n"
         "CFL_NUMBER= 1.0\nLOW_MACH_PREC= YES\n")
