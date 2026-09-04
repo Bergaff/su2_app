@@ -477,9 +477,21 @@ def build_body_fitted_grid(body_meshes, body_min, body_max, margin,
     body_facets = [tuple(sorted(int(remap[x]) for x in f))
                    for f in body_faces]
     marker = [f for f in body_facets if f in boundary]
+    boundary_ratio = len(marker) / max(len(body_faces), 1)
     log("   Готово: граней тела на границе сетки: %d из %d (%.2f%%)"
-        % (len(marker), len(body_faces),
-           100.0 * len(marker) / max(len(body_faces), 1)))
+        % (len(marker), len(body_faces), 100.0 * boundary_ratio))
+
+    # Дыры в стенке. ``recovery`` выше проверяет, что грани тела есть ГДЕ-ТО
+    # в тетраэдральной сетке (в т.ч. внутри объёма), а SU2 требует, чтобы
+    # маркер airfoil был собран именно с границы. Если на границу вышло
+    # меньше ``min_recovery`` граней, поверхность тела дырявая: SU2
+    # разойдётся (Residual > 10^20) независимо от пресета. Возвращаем None и
+    # уходим на картезианский путь, а вызывающий код честно сообщит причину.
+    if boundary_ratio < min_recovery:
+        log("   Внимание: на границу сетки вышло %.1f%% граней тела — "
+            "поверхность дырявая, SU2 разойдётся. Возврат на картезианскую "
+            "сетку фона." % (100.0 * boundary_ratio))
+        return None
 
     cells = np.hstack([np.full((len(tets_new), 1), 4, dtype=np.int64),
                        tets_new]).ravel()

@@ -180,6 +180,21 @@ _td = _case(None)
 check("без config.cfg масштаб 1.0", symmetry_scale(_td) == 1.0,
       symmetry_scale(_td))
 
+# --- физический потолок коэффициентов ------------------------------------
+# Разошедшийся расчёт (дырявая стенка) пишет history.csv с числами 1e19.
+# Такой «результат» нельзя выдавать за успех: он проходит проверку «не
+# нули», но физически невозможен. MAX_PHYSICAL_COEFF отсекает blow-up —
+# SU2Worker.run вернёт error, а не «успешный» результат с CL=1e19.
+from solver.workers import MAX_PHYSICAL_COEFF
+
+check("MAX_PHYSICAL_COEFF определён (1e3)",
+      isinstance(MAX_PHYSICAL_COEFF, (int, float)) and MAX_PHYSICAL_COEFF == 1e3,
+      MAX_PHYSICAL_COEFF)
+check("нормальные CL/CD ниже потолка",
+      abs(0.30) < MAX_PHYSICAL_COEFF and abs(0.020) < MAX_PHYSICAL_COEFF)
+check("blow-up CL=1.34e19 превышает потолок",
+      abs(1.34e19) > MAX_PHYSICAL_COEFF)
+
 # --- «Полный самолёт» подстраивает ГО по фюзеляжу ------------------------
 # Без этого hs_pos_x остаётся заводским (6.5 м) при фюзеляже, который
 # кончается на x=+4: оперение висело в 2.5 м позади хвоста.
