@@ -36,6 +36,7 @@ from official_cases import (
     body_markers_from_config,
     parse_su2_text,
     read_su2_boundary,
+    is_manifold_closed,
 )
 from official_cases.downloader import fetch_remote, download_mesh, meshes_dir
 
@@ -329,6 +330,46 @@ def test_download_mesh_caches():
     _ok("download_mesh(): кэширует сетку в meshes/")
 
 
+def test_is_manifold_closed():
+    # Замкнутый тетраэдр из 4 треугольников — замкнут.
+    closed = [(0, 1, 2), (0, 2, 3), (0, 3, 1), (1, 3, 2)]
+    assert is_manifold_closed(closed) is True
+    # Один треугольник — открытый край.
+    assert is_manifold_closed([(0, 1, 2)]) is False
+    # Квадрат из двух треугольников — открытый (внешний контур).
+    assert is_manifold_closed([(0, 1, 2), (0, 2, 3)]) is False
+    # Пустой список — не замкнут.
+    assert is_manifold_closed([]) is False
+    _ok("is_manifold_closed различает замкнутую и открытую поверхность")
+
+
+def test_parse_2d_line_boundary():
+    """2D-границы (линии, тип 3) больше не отбрасываются: профиль читается."""
+    import tempfile
+    import os as _os
+    text = ("NDIME= 2\n"
+            "NPOIN= 4\n"
+            "0.0 0.0\n"
+            "1.0 0.0\n"
+            "1.0 1.0\n"
+            "0.0 1.0\n"
+            "NELEM= 1\n"
+            "5 0 1 2\n"
+            "NMARK= 1\n"
+            "MARKER_TAG= airfoil\n"
+            "MARKER_ELEMS= 4\n"
+            "3 0 1\n"
+            "3 1 2\n"
+            "3 2 3\n"
+            "3 3 0\n")
+    parsed = parse_su2_text(text)
+    # Линии сохранились (раньше отбрасывались из-за len(nodes)>=3).
+    assert parsed["ndime"] == 2
+    assert parsed["markers"]["airfoil"], parsed["markers"]
+    assert len(parsed["markers"]["airfoil"]) == 4, parsed["markers"]
+    _ok("parse_su2_text сохраняет 2D-границы (линии, тип 3)")
+
+
 if __name__ == "__main__":
     print("== test_official_cases ==")
     test_catalogue()
@@ -338,6 +379,8 @@ if __name__ == "__main__":
     test_loader_helpers()
     test_body_markers_from_config()
     test_read_su2_boundary_synthetic()
+    test_is_manifold_closed()
+    test_parse_2d_line_boundary()
     test_diagnose_low_mach_euler()
     test_compare_file()
     test_prepare_case_dir_offline()

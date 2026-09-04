@@ -74,6 +74,7 @@ from .loader import (
 from .surface import (
     parse_su2_text,
     read_su2_boundary,
+    is_manifold_closed,
 )
 
 __all__ = [
@@ -102,4 +103,5 @@ __all__ = [
     "body_markers_from_config",
     "parse_su2_text",
     "read_su2_boundary",
+    "is_manifold_closed",
 ]

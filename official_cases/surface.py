@@ -160,7 +160,10 @@ def parse_su2_text(text: str) -> dict:
                             nodes.append(int(t))
                         except ValueError:
                             break
-                    if len(nodes) >= 3:
+                    # Граничные элементы бывают и линиями (тип 3, 2 узла) в
+                    # 2D-сетках — их тоже сохраняем (раньше отбрасывали,
+                    # и 2D-профили давали пустую поверхность).
+                    if len(nodes) >= 2:
                         elems.append((etype, tuple(nodes)))
                 if tag is not None:
                     markers[tag] = elems
@@ -265,3 +268,27 @@ def _pad_point(p: Sequence[float], ndime: int) -> Tuple[float, float, float]:
     while len(vals) < 3:
         vals.append(0.0)
     return (vals[0], vals[1], vals[2])
+
+
+def is_manifold_closed(triangles: Sequence[Sequence[int]]) -> bool:
+    """Проверяет, является ли треугольная поверхность замкнутой манifold-поверхностью.
+
+    Для замкнутой ориентированной манifold-поверхности каждое ребро входит
+    ровно в два треугольника. Если хоть одно ребро имеет другую кратность
+    (1 — открытый край, >2 — «бабочка»), тело незамкнуто: его нельзя
+    облечь телtoоблекающей сеткой, и re-mesh даст ступенчатую сетку.
+
+    Возвращает True только если треугольников > 0 и все рёбра кратны 2.
+    """
+    from collections import Counter
+    edges = Counter()
+    for t in triangles:
+        if len(t) < 3:
+            continue
+        a, b, c = int(t[0]), int(t[1]), int(t[2])
+        for (u, v) in ((a, b), (b, c), (c, a)):
+            e = (u, v) if u < v else (v, u)
+            edges[e] += 1
+    if not edges:
+        return False
+    return all(count == 2 for count in edges.values())
