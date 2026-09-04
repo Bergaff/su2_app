@@ -432,7 +432,14 @@ def _gmsh_mesh(stl_path, body_pts, body_faces, bounds,
         signal.signal = _noop_signal
         gmsh.option.setNumber("General.Terminal", 1)
         gmsh.option.setNumber("Mesh.Algorithm", 6)          # фронтальный (теты)
-        gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 1)
+        # Гладкое поле Distance->Threshold задаёт размер в объёме само.
+        # MeshSizeExtendFromBoundary=1 продлевает размер от граничных граней
+        # STL (разного размера) внутрь и делает переход неровным — именно
+        # такой «рваный» размер даёт растянутые ячейки и валит MUSCL. Ставим 0.
+        try:
+            gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+        except Exception:
+            pass
         gmsh.option.setNumber("Mesh.MeshSizeMin", h_near)
         gmsh.option.setNumber("Mesh.MeshSizeMax", h_far)
         # Качество ячеек: без оптимизатора gmsh отдаёт сырой тетраэдральный
