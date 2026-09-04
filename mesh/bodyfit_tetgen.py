@@ -344,6 +344,78 @@ def tet_faces(tets):
     return flat, np.arange(len(flat)) // 4
 
 
+def _tet_face_keys(tet):
+    """Сортированные ключи 4 граней тетраэдра (для поиска по словарю)."""
+    a, b, c, d = (int(x) for x in tet)
+    return [
+        tuple(sorted((a, b, c))),
+        tuple(sorted((a, b, d))),
+        tuple(sorted((a, c, d))),
+        tuple(sorted((b, c, d))),
+    ]
+
+
+def classify_exterior_tets(points, tets, body_face_keys, body_bbox):
+    """Топологическая заливка снаружи: какие тетраэдры ВНЕ тела.
+
+    В отличие от геометрического ``select_enclosed_points`` (точка-в-объёме,
+    который ошибается на стыках крыло/фюзеляж и оставляет дыры в стенке),
+    здесь наружность определяется ТОПОЛОГИЧЕСКИ:
+
+      1. Семена — тетраэдры, чей центроид лежит вне ограничивающего
+         параллелепипеда тела (``body_bbox``). Они гарантированно снаружи:
+         тело целиком внутри своего bbox, а тетраэдр не пересекает
+         поверхность тела (TetGen с ключом Y не даёт crossing-тетраэдров).
+      2. Заливка идёт от семян по граням тетраэдров, но НЕ пересекает грани
+         тела (``body_face_keys``). Если поверхность тела замкнута, заливка
+         останавливается на ней и внутренность не помечается.
+
+    Возвращает булев массив ``exterior`` размера ``len(tets)``.
+
+    Плюс способа: на замкнутой поверхности ~100% граней тела выходит на
+    границу (маркер airfoil), чего геометрический метод не даёт. Если же
+    поверхность тела дырявая, заливка просачивается внутрь — тогда почти
+    все тетраэдры помечаются «снаружи», и вышестоящий код это отвергнет.
+    """
+    from collections import deque
+    n = len(tets)
+
+    # adjacency: ключ грани -> [номера тетраэдров]
+    face_map = {}
+    for ti in range(n):
+        for f in _tet_face_keys(tets[ti]):
+            face_map.setdefault(f, []).append(ti)
+
+    # Семена: центроиды вне bbox тела.
+    centroids = np.asarray(points, dtype=float)[np.asarray(tets)].mean(axis=1)
+    bmin, bmax = body_bbox[0], body_bbox[1]
+    outside_seed = (
+        (centroids[:, 0] < bmin[0]) | (centroids[:, 0] > bmax[0]) |
+        (centroids[:, 1] < bmin[1]) | (centroids[:, 1] > bmax[1]) |
+        (centroids[:, 2] < bmin[2]) | (centroids[:, 2] > bmax[2])
+    )
+    seeds = np.where(outside_seed)[0]
+
+    blocked = {tuple(int(x) for x in row) for row in body_face_keys}
+
+    exterior = np.zeros(n, dtype=bool)
+    dq = deque()
+    for s in seeds:
+        if not exterior[s]:
+            exterior[s] = True
+            dq.append(s)
+    while dq:
+        ti = dq.popleft()
+        for f in _tet_face_keys(tets[ti]):
+            if f in blocked:      # не пересекаем поверхность тела
+                continue
+            for nb in face_map.get(f, ()):
+                if nb != ti and not exterior[nb]:
+                    exterior[nb] = True
+                    dq.append(nb)
+    return exterior
+
+
 def count_recovered(points, tets, body_pts, body_faces):
     """Сколько входных граней тела присутствует в объёмной сетке.
 
@@ -363,13 +435,8 @@ def count_recovered(points, tets, body_pts, body_faces):
     return n_rec, int(len(body_faces)), float(dist.max()), vmap
 
 
-def remove_interior_tets(points, tets, body_pts, body_faces, log=print):
-    """Убрать тетраэдры, попавшие внутрь тела.
-
-    Классификация по центроиду через VTK select_enclosed_points — тот же
-    вызов, которым пользуется картезианский путь и который проверен на
-    этой геометрии. Возвращает индексы наружных тетраэдров.
-    """
+def _geometric_interior(points, tets, body_pts, body_faces):
+    """Прежний способ: точка-в-объёме через VTK select_enclosed_points."""
     flat = np.hstack([np.full((len(body_faces), 1), 3, dtype=np.int64),
                       body_faces]).ravel()
     body = pv.PolyData(body_pts, flat)
@@ -383,9 +450,52 @@ def remove_interior_tets(points, tets, body_pts, body_faces, log=print):
     enclosed = pv.PolyData(centers).select_enclosed_points(
         body, tolerance=1e-5, check_surface=False)
     inside = np.asarray(enclosed["SelectedPoints"]).astype(bool)
+    return inside
+
+
+def remove_interior_tets(points, tets, body_pts, body_faces, log=print,
+                         recovered_face_keys=None, body_bbox=None):
+    """Убрать тетраэдры, попавшие внутрь тела.
+
+    Основной способ — **топологическая заливка снаружи**
+    (``classify_exterior_tets``): она не пересекает грани тела, поэтому на
+    замкнутой поверхности ~100% граней выходит на границу (маркер airfoil),
+    и стенка не дырявая. Строго геометрический ``select_enclosed_points``
+    ошибается на стыках крыло/фюзеляж (19% граней «утонули» внутрь, SU2
+    расходился). Если топология дала сбой (нет семян, почти всё снаружи —
+    тело дырявое и заливка просочилась) — фолбэк на геометрию.
+
+    ``recovered_face_keys`` — множество сортированных троек индексов узлов
+    сетки, образующих поверхность тела (в координатах ``tets``).
+    ``body_bbox`` — (min_xyz, max_xyz) габарит тела для выбора семян.
+
+    Возвращает индексы наружных тетраэдров.
+    """
+    # --- топологическая заливка (основной путь) ------------------------
+    if recovered_face_keys is not None and body_bbox is not None:
+        try:
+            exterior = classify_exterior_tets(
+                points, tets, recovered_face_keys, body_bbox)
+            inside = ~exterior
+            n_in = int(inside.sum())
+            n_out = int(exterior.sum())
+            # Заливка «протекла» внутрь (тело дырявое) или нет семян —
+            # почти всё помечено снаружи. Такой результат не даёт стенки,
+            # уходим на геометрию (а она потом будет отвергнута по доле
+            # граней на границе).
+            if n_in > 0 and n_out > 0:
+                log("   Готово (топологическая заливка): внутри тела %d, "
+                    "снаружи %d тетраэдров" % (n_in, n_out))
+                return np.where(exterior)[0]
+        except Exception as e:                                   # pragma: no cover
+            log("   Внимание: топологическая заливка не удалась (%s) — "
+                "фолбэк на геометрию" % e)
+
+    # --- геометрический фолбэк (прежний путь) -------------------------
+    inside = _geometric_interior(points, tets, body_pts, body_faces)
     ext = np.where(~inside)[0]
-    log("   Готово: удалено тетраэдров внутри тела: %d, осталось %d"
-        % (int(inside.sum()), len(ext)))
+    log("   Готово (геометрический, точка-в-объёме): удалено внутри тела "
+        "%d, осталось %d" % (int(inside.sum()), len(ext)))
     return ext
 
 
@@ -445,7 +555,7 @@ def build_body_fitted_grid(body_meshes, body_min, body_max, margin,
     if points is None or len(tets) == 0:
         return None
 
-    n_rec, n_tot, dev, _ = count_recovered(points, tets, body_pts, body_faces)
+    n_rec, n_tot, dev, vmap = count_recovered(points, tets, body_pts, body_faces)
     recovery = n_rec / max(n_tot, 1)
     log("   Граней тела сохранено в сетке: %d из %d (%.2f%%), "
         "отклонение узлов %.1e" % (n_rec, n_tot, 100.0 * recovery, dev))
@@ -455,7 +565,21 @@ def build_body_fitted_grid(body_meshes, body_min, body_max, margin,
             % (100.0 * min_recovery))
         return None
 
-    ext = remove_interior_tets(points, tets, body_pts, body_faces, log=log)
+    # Ключи граней тела в координатах объёмной сетки (для топологической
+    # заливки): сопоставляем входные вершины выходным через vmap из
+    # count_recovered. Поверхность тела будем «не пересекать» при заливке.
+    recovered_face_keys = None
+    try:
+        recovered_face_keys = {
+            tuple(sorted(int(vmap[x]) for x in f)) for f in body_faces}
+    except Exception:
+        recovered_face_keys = None
+    body_bbox = (np.asarray(body_pts, dtype=float).min(axis=0),
+                 np.asarray(body_pts, dtype=float).max(axis=0))
+
+    ext = remove_interior_tets(
+        points, tets, body_pts, body_faces, log=log,
+        recovered_face_keys=recovered_face_keys, body_bbox=body_bbox)
     if len(ext) < 100:
         log("   Внимание: после вырезания тела осталось %d тетраэдров"
             % len(ext))
