@@ -61,7 +61,7 @@ from PyQt5.QtGui import QColor, QFont, QMouseEvent
 
 from config.settings import (
     ROLES, ROLE_COLORS, MESH_QUALITY, WORK_DIR_BASE, RESULTS_DIR,
-    MESH_FILE, PREVIEW_MESH, config,
+    MESH_FILE, PREVIEW_MESH, config, MESH_DIAGNOSIS,
 )
 from config.flight_conditions import (
     FlightConditions,
@@ -903,8 +903,8 @@ class MainWindow(QMainWindow):
         wiz_lay.addWidget(btn_wiz_help)
         lay3.addWidget(wizard_group)
         btn_load_lay = QHBoxLayout()
-        self.btn_add_fuselage = QPushButton("Фюзеляж")
-        self.btn_add_fuselage.clicked.connect(self.load_stl_fuselage)
+        self.btn_add_import = QPushButton("Импорт")
+        self.btn_add_import.clicked.connect(self.load_stl_import)
         self.btn_add_body = QPushButton("STL")
         self.btn_add_body.clicked.connect(self.add_bodies)
         self.btn_add_primitive = QPushButton("Примитив")
@@ -913,7 +913,7 @@ class MainWindow(QMainWindow):
         menu.addAction("Цилиндр", lambda: self._create_primitive("Цилиндр"))
         menu.addAction("Сфера", lambda: self._create_primitive("Сфера"))
         self.btn_add_primitive.setMenu(menu)
-        btn_load_lay.addWidget(self.btn_add_fuselage)
+        btn_load_lay.addWidget(self.btn_add_import)
         btn_load_lay.addWidget(self.btn_add_body)
         btn_load_lay.addWidget(self.btn_add_primitive)
         lay3.addLayout(btn_load_lay)
@@ -925,10 +925,6 @@ class MainWindow(QMainWindow):
         simplify_layout.addWidget(self.btn_simplify_simple)
         simplify_layout.addWidget(self.btn_simplify_medium)
         lay3.addLayout(simplify_layout)
-        self.btn_heal_stl = QPushButton("Лечить выбранный STL")
-        self.btn_heal_stl.clicked.connect(self.heal_selected_stl)
-        self.btn_heal_stl.setEnabled(False)
-        lay3.addWidget(self.btn_heal_stl)
         self.btn_union_bodies = QPushButton("Объединить пересекающиеся тела")
         self.btn_union_bodies.setToolTip(
             "Разрезает тела по линиям пересечения и отбрасывает то, что "
@@ -3141,7 +3137,6 @@ class MainWindow(QMainWindow):
 
     def on_table_click(self, row, col):
         self.select_and_highlight_body(row)
-        self.btn_heal_stl.setEnabled(0 <= row < len(self.bodies))
 
     def _get_fuselage_body(self):
         return next((b for b in self.bodies if b["role"] == "fuselage"), None)
@@ -3296,11 +3291,11 @@ class MainWindow(QMainWindow):
     # =============================================================
     # ЗАГРУЗКА STL
     # =============================================================
-    def load_stl_fuselage(self):
+    def load_stl_import(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Загрузить фюзеляж", "", self._geometry_file_filter())
+            self, "Импорт геометрии", "", self._geometry_file_filter())
         for p in paths:
-            self._add_body(p, "fuselage")
+            self._add_body(p, "import")
         # КАМЕРУ НЕ СБРАСЫВАЕМ
         self.update_flow_arrow()
 
@@ -3834,13 +3829,13 @@ class MainWindow(QMainWindow):
                                         np.array(flat_faces)).triangulate().clean(tolerance=1e-6)
             fuselage_mesh.compute_normals(auto_orient_normals=True, inplace=True)
             for b in self.bodies:
-                if b["role"] == "fuselage" and b.get("actor"):
+                if b["role"] == "import" and b.get("actor"):
                     self.plotter.remove_actor(b["actor"])
-            self.bodies = [b for b in self.bodies if b["role"] != "fuselage"]
+            self.bodies = [b for b in self.bodies if b["role"] != "import"]
             os.makedirs(WORK_DIR_BASE, exist_ok=True)
             path = os.path.join(WORK_DIR_BASE, "generated_fuselage.stl")
             fuselage_mesh.save(path)
-            color = ROLE_COLORS["fuselage"]
+            color = ROLE_COLORS.get("import", ROLE_COLORS["other"])
             actor = self.plotter.add_mesh(fuselage_mesh, color=color, opacity=0.8,
                                           show_edges=True)
             self.bodies.append({
@@ -4132,14 +4127,14 @@ class MainWindow(QMainWindow):
             self.log_text.append(f"Экспортировано: {path}")
 
     def export_fuselage(self):
-        fuselage = next((b for b in self.bodies if b["role"] == "fuselage"), None)
-        if not fuselage:
-            QMessageBox.warning(self, "Ошибка", "Фюзеляж не найден.")
+        import_body = next((b for b in self.bodies if b["role"] == "import"), None)
+        if not import_body:
+            QMessageBox.warning(self, "Ошибка", "Импортированное тело не найдено.")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Экспорт фюзеляжа",
-                                              "fuselage.stl", "STL (*.stl)")
+        path, _ = QFileDialog.getSaveFileName(self, "Экспорт импортированного тела",
+                                              "import.stl", "STL (*.stl)")
         if path:
-            fuselage["mesh"].save(path)
+            import_body["mesh"].save(path)
             self.log_text.append(f"Фюзеляж экспортирован: {path}")
 
     def export_wing(self):
@@ -4300,6 +4295,11 @@ class MainWindow(QMainWindow):
                                  msg + "\n\nПостройте сетку заново.")
             self.mesh_ready = False
             return False
+        # Проверка телооблекающей сетки
+        if not MESH_DIAGNOSIS.get("body_fitted", True):
+            # Сообщаем пользователю о проблеме с сеткой
+            self.log_text.append("Внимание:сетка не облегает тела. Результаты могут быть неточными.")
+            self.mesh_ready = False
         self.log_text.append(f"Готово: Проверка сетки: {msg}")
         return True
 
