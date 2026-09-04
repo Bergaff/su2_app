@@ -489,6 +489,50 @@ with tempfile.TemporaryDirectory() as td:
     check("неизвестный порядок схемы не ломает выбор",
           _unk.get("cd") == 0.36, str(_unk.get("cd")))
 
+    # Прекондиционирование по низкому Маху. На V=60 м/с это M=0.176, и
+    # сжимаемый решатель там жёсток по акустике: невязка встаёт на -2.3,
+    # а сопротивление выходит в разы больше индуктивного.
+    import solver.config_builder as _CB2
+    check("низкий мах включает прекондиционер",
+          _CB2.low_mach_lines(0.176) == "LOW_MACH_PREC= YES\nLOW_MACH_CORR= YES",
+          _CB2.low_mach_lines(0.176))
+    check("высокий мах его выключает",
+          _CB2.low_mach_lines(0.85) == "LOW_MACH_PREC= NO\nLOW_MACH_CORR= NO",
+          _CB2.low_mach_lines(0.85))
+    check("нечитаемый мах не роняет сборку конфига",
+          "LOW_MACH_PREC= NO" in _CB2.low_mach_lines("abc"))
+    _ph = {"aoa": 3.0, "mach": 0.176, "pressure": 101325.0,
+           "temperature": 288.15, "density": 1.225, "ref_length": 1.12,
+           "ref_area": 9.742, "ox": -0.883, "oy": 0.0, "oz": 0.0}
+    _txt = _CB2.build_euler_config(_ph, markers=["airfoil"])
+    check("EULER-конфиг содержит обе строки прекондиционера",
+          "LOW_MACH_PREC= YES" in _txt and "LOW_MACH_CORR= YES" in _txt)
+    _cfg_lm = os.path.join(td, "lm_full.cfg")
+    with open(_cfg_lm, "w", encoding="utf-8", newline="") as _fl:
+        _fl.write(_txt)
+    _ok_lm, _err_lm = AC.validate_config(_cfg_lm)
+    check("EULER-конфиг с прекондиционером валиден для SU2", _ok_lm,
+          str(_err_lm[:2]))
+    _ph2 = dict(_ph, mach=0.85)
+    _txt2 = _CB2.build_euler_config(_ph2, markers=["airfoil"])
+    check("RANS-шаблон тоже содержит ключ (единый код)",
+          "LOW_MACH_PREC= NO" in _CB2.build_rans_config(
+              dict(_ph2, turb_model="SA", reynolds=5.0e6),
+              markers=["airfoil"]))
+    _cfg3 = os.path.join(td, "lm.cfg")
+    open(_cfg3, "w", encoding="utf-8").write(
+        "SOLVER= EULER\nMACH_NUMBER= 0.176\nMUSCL_FLOW= YES\n"
+        "CFL_NUMBER= 1.0\nLOW_MACH_PREC= NO\n")
+    check("describe предупреждает о выключенном прекондиционере на низком махе",
+          "LOW_MACH_PREC= NO" in AC.describe_config_scheme(_cfg3),
+          AC.describe_config_scheme(_cfg3))
+    open(_cfg3, "w", encoding="utf-8").write(
+        "SOLVER= EULER\nMACH_NUMBER= 0.176\nMUSCL_FLOW= YES\n"
+        "CFL_NUMBER= 1.0\nLOW_MACH_PREC= YES\n")
+    check("describe подтверждает включённый прекондиционер",
+          "Прекондиционирование по низкому Маху включено"
+          in AC.describe_config_scheme(_cfg3))
+
 # детектор по history.csv
 with tempfile.TemporaryDirectory() as td:
     case = os.path.join(td, "case")
@@ -1403,6 +1447,9 @@ from solver import workers as WK
 # каждое имя присутствует в option_map через addEnumOption/add*Option.
 _SU2_V8_OPTIONS = frozenset({
     "AOA", "CFL_ADAPT", "CFL_ADAPT_PARAM", "CFL_NUMBER", "CFL_REDUCTION_TURB",
+    # Обе опции есть в SU2 v8.5: Common/src/CConfig.cpp:1920 и 1922,
+    # addBoolOption, по умолчанию false.
+    "LOW_MACH_PREC", "LOW_MACH_CORR",
     "CONV_CAUCHY_ELEMS", "CONV_CAUCHY_EPS", "CONV_NUM_METHOD_FLOW",
     "CONV_NUM_METHOD_TURB", "CONV_RESIDUAL_MINVAL", "CONV_STARTITER",
     "ENTROPY_FIX_COEFF", "FREESTREAM_PRESSURE", "FREESTREAM_TEMPERATURE",

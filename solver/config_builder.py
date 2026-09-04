@@ -49,6 +49,35 @@ def _format_marker_value_pairs(markers: Optional[Iterable[str]],
 # осторожный по умолчанию: на сетке, которая не разрешает геометрию,
 # высокий CFL не ускоряет расчёт, а роняет его быстрее. Пока маркер
 # airfoil берётся из лестницы объёмной сетки, безопаснее остаться на 5.0.
+# Порог, ниже которого сжимаемый решатель становится жёстким по акустике:
+# звуковые волны идут в 1/M раз быстрее потока, поэтому невязка плотности
+# почти не падает, как бы долго ни шёл расчёт. На V=60 м/с у земли это
+# M=0.176 — то есть типичный режим AeroOpt, а не редкий случай.
+LOW_MACH_THRESHOLD = 0.3
+
+
+def low_mach_lines(mach) -> str:
+    """Строки прекондиционирования для малых чисел Маха.
+
+    ``LOW_MACH_PREC`` — прекондиционер Roe-Turkel, снимает жёсткость
+    системы по акустике; ``LOW_MACH_CORR`` — поправка после реконструкции
+    MUSCL на избыточную диссипацию схемы Роу. Обе в SU2 по умолчанию
+    выключены (Common/src/CConfig.cpp:1920 и 1922), а CONV_NUM_METHOD_FLOW=
+    ROE задан у нас явно — то есть это ровно тот случай, для которого они
+    сделаны.
+
+    Без них на M=0.176 невязка встаёт на log10(res) ~ -2.3 и не идёт ниже
+    даже за 6000 итераций, а сопротивление выходит в разы больше
+    индуктивного: схема Роу на низких махах вносит лишнюю вязкость.
+    """
+    try:
+        m = float(mach)
+    except (TypeError, ValueError):
+        m = 0.0
+    on = "YES" if 0.0 < m < LOW_MACH_THRESHOLD else "NO"
+    return "LOW_MACH_PREC= %s\nLOW_MACH_CORR= %s" % (on, on)
+
+
 CFL_PARAM_SAFE = "( 0.5, 1.2, 0.5, 5.0 )"
 CFL_PARAM_FAST = "( 0.1, 2.0, 10.0, 1000.0 )"
 
@@ -163,6 +192,7 @@ def build_euler_config(p: Mapping, markers=None, restart: bool = False,
     else:
         inner_iter, inner_why = _inner_iter_for_quality(mesh_quality), ""
     cfl_param = CFL_PARAM_FAST if cfl_aggressive else CFL_PARAM_SAFE
+    lm_lines = low_mach_lines(p['mach'])
     # === T1: MARKER_SYM — плоскости симметрии ========================
     # Если включены плоскости (XY/XZ/YZ) и в сетке есть
     # соответствующие маркеры, SU2 посчитает только симметричную
@@ -212,6 +242,7 @@ SLOPE_LIMITER_FLOW= VENKATAKRISHNAN
 VENKAT_LIMITER_COEFF= 0.05
 ENTROPY_FIX_COEFF= 0.005
 NUM_METHOD_GRAD= WEIGHTED_LEAST_SQUARES
+{lm_lines}
 CFL_NUMBER= 1.0
 CFL_ADAPT= YES
 CFL_ADAPT_PARAM= {cfl_param}
@@ -265,6 +296,7 @@ def build_rans_config(p: Mapping, markers=None, restart: bool = False,
     else:
         inner_iter, inner_why = _inner_iter_for_quality(mesh_quality), ""
     cfl_param = CFL_PARAM_FAST if cfl_aggressive else CFL_PARAM_SAFE
+    lm_lines = low_mach_lines(p['mach'])
 
     # === ENABLE_CUDA: GPU-ветка произведения матрицы на вектор =========
     cuda_line = "ENABLE_CUDA= YES" if enable_cuda else "% ENABLE_CUDA= NO   # выключено"
@@ -344,6 +376,7 @@ SLOPE_LIMITER_FLOW= VENKATAKRISHNAN
 VENKAT_LIMITER_COEFF= 0.05
 ENTROPY_FIX_COEFF= 0.005
 NUM_METHOD_GRAD= WEIGHTED_LEAST_SQUARES
+{lm_lines}
 CFL_NUMBER= 1.0
 CFL_ADAPT= YES
 CFL_ADAPT_PARAM= {cfl_param}

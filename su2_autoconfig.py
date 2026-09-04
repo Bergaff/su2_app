@@ -520,7 +520,8 @@ _SCHEME_KEYS = ("TIME_DISCRE_FLOW", "MUSCL_FLOW", "CFL_NUMBER", "CFL_ADAPT",
                 "CFL_ADAPT_PARAM", "SLOPE_LIMITER_FLOW", "VENKAT_LIMITER_COEFF",
                 "ENTROPY_FIX_COEFF", "NUM_METHOD_GRAD", "LINEAR_SOLVER",
                 "LINEAR_SOLVER_PREC", "LINEAR_SOLVER_ITER",
-                "LINEAR_SOLVER_ERROR")
+                "LINEAR_SOLVER_ERROR", "MACH_NUMBER", "LOW_MACH_PREC",
+                "LOW_MACH_CORR")
 
 
 def read_config_values(path, keys=_SCHEME_KEYS):
@@ -572,8 +573,23 @@ def describe_config_scheme(path):
     tail = ("Cd в этом режиме имеет смысл."
             if second else
             "Cd в этом режиме завышен схемной вязкостью — читать его нельзя.")
+    # На низких махах сжимаемый решатель жёсток по акустике: без
+    # прекондиционера Roe-Turkel невязка встаёт и сопротивление выходит
+    # в разы больше индуктивного.
+    try:
+        mach = float(v.get("MACH_NUMBER", ""))
+    except (TypeError, ValueError):
+        mach = None
+    prec = str(v.get("LOW_MACH_PREC", "")).upper().startswith("Y")
+    if prec:
+        lm = " Прекондиционирование по низкому Маху включено."
+    elif mach is not None and mach < 0.3:
+        lm = (" ВНИМАНИЕ: M=%.3f < 0.3, а LOW_MACH_PREC= NO — невязка на "
+              "таком режиме почти не падает, а Cd завышен." % mach)
+    else:
+        lm = ""
     return (f"Конфиг: {order}, CFL {v.get('CFL_NUMBER', '?')} ({adapt}), "
-            f"{tag}. {tail}")
+            f"{tag}. {tail}{lm}")
 
 
 def _cfg_file(path):
