@@ -1728,7 +1728,7 @@ class MainWindow(QMainWindow):
         # Page 14-17: аэроупругость, прочность, спецфункции, пресеты (ТЗ)
         from ui.analysis_pages import (
             build_aeroelastic_page, build_presets_page, build_info_page,
-            build_specials_page, build_structural_page)
+            build_specials_page, build_structural_page, preset_table_params)
         self.page_aeroelastic, self.ae_w = build_aeroelastic_page(
             on_check=self.run_aeroelastic_check,
             on_plot=self.plot_vg_diagram)
@@ -7155,29 +7155,24 @@ class MainWindow(QMainWindow):
         return params
 
     def export_config_preset(self):
-        """Экспорт пресета настроек SU2 в файл .su2preset."""
+        """Экспорт текущего конфига (или его выбранных значений) в .su2preset."""
         import su2_preset_format as PF
         w = self.pr_w
-        source = w["source"].currentData()
         try:
-            name = w["name"].text().strip() or "Без имени"
-            if source == "session":
-                params = self._session_params()
-                if not params:
-                    w["out"].setText(
-                        "Внимание: Настройки проекта ещё не созданы — сначала "
-                        "подготовьте расчёт либо выберите встроенный шаблон.")
-                    return
-                description = "Экспорт текущих настроек проекта AeroOpt"
-                based_on = None
+            if "table" in w:
+                params = preset_table_params(w["table"])
             else:
-                preset = PF.builtin_presets().get(source)
-                if not preset:
-                    w["out"].setText("Внимание: Встроенный шаблон не найден")
-                    return
-                params = dict(preset.get("params") or {})
-                description = str(preset.get("description") or "")
-                based_on = source
+                params = {}
+            label = w["combo"].currentText() if "combo" in w else "пресет"
+            if not params:
+                w["out"].setText(
+                    "Внимание: нечего экспортировать — сначала выберите "
+                    "конфиг или заполните значения.")
+                return
+            # Имя файла выводим из подписи конфига (без префиксов вида
+            # «Встроенный: / Официальный: / Мой: ») либо из названия пресета.
+            name = label.split(": ", 1)[-1].strip() or "пресет"
+            name = name.replace(":", "-").replace("/", "-")
             check = PF.validate_preset(PF.make_preset(name, params))
             if not check["ok"]:
                 w["out"].setText("Внимание: Пресет не прошёл проверку:\n"
@@ -7189,8 +7184,7 @@ class MainWindow(QMainWindow):
                 f"Пресет AeroOpt (*{PF.EXTENSION});;JSON (*.json)")
             if not path:
                 return
-            PF.export_preset(path, name, params, description=description,
-                             based_on=based_on)
+            PF.export_preset(path, name, params)
             w["out"].setText(
                 PF.describe_format() + "\n\nСохранено: " + path
                 + f"\nПараметров: {len(params)}\n\nСодержимое:\n"
@@ -7200,7 +7194,7 @@ class MainWindow(QMainWindow):
             w["out"].setText(f"Внимание: Ошибка экспорта: {e}")
 
     def import_config_preset(self):
-        """Импорт и проверка пресета."""
+        """Импорт и проверка пресета — значения попадают в таблицу."""
         import su2_preset_format as PF
         w = self.pr_w
         path, _ = QFileDialog.getOpenFileName(
@@ -7214,8 +7208,16 @@ class MainWindow(QMainWindow):
             w["out"].setText(f"Внимание: Не удалось прочитать пресет: {e}")
             return
         self._imported_preset = preset
-        w["name"].setText(preset.get("name") or "Импортированный")
         params = preset.get("params") or {}
+        # Заполняем редактируемую таблицу — пользователь может править,
+        # применить или сохранить как свой пресет.
+        if "table" in w:
+            table = w["table"]
+            table.setRowCount(0)
+            table.setRowCount(len(params))
+            for i, (k, v) in enumerate(sorted(params.items())):
+                table.setItem(i, 0, QTableWidgetItem(str(k)))
+                table.setItem(i, 1, QTableWidgetItem(str(v)))
         lines = [f"Импорт: {os.path.basename(path)}",
                  f"Имя: {preset.get('name')}",
                  f"Версия формата: {preset.get('schema_version')}",
@@ -7228,14 +7230,21 @@ class MainWindow(QMainWindow):
         self.log_text.append(f"Пресет импортирован: {path}")
 
     def apply_imported_preset(self):
-        """Применяет импортированный пресет к настройкам проекта."""
+        """Применяет конфиг (из таблицы или импортированный) к проекту."""
         import su2_preset_format as PF
         w = self.pr_w
+        if "table" in w:
+            params = preset_table_params(w["table"])
+        else:
+            params = {}
         preset = self._imported_preset
-        if not preset:
-            w["out"].setText("Внимание: Сначала импортируйте файл пресета")
+        if not params and preset:
+            params = dict(preset.get("params") or {})
+        if not params:
+            w["out"].setText(
+                "Внимание: Сначала импортируйте файл пресета или заполните "
+                "таблицу параметров.")
             return
-        params = dict(preset.get("params") or {})
         try:
             catalogue = PF.key_catalogue()
         except Exception:
@@ -7254,6 +7263,8 @@ class MainWindow(QMainWindow):
                         setattr(sess, k, v)
                     except Exception:
                         pass
+        label = w["combo"].currentText() if "combo" in w else ""
+        name = label or (preset.get("name") if preset else "конфиг")
         text = (f"Применено параметров: {len(applied)}\n"
                 + "\n".join("  Готово: " + a for a in applied))
         if skipped:
@@ -7264,7 +7275,7 @@ class MainWindow(QMainWindow):
                  "«SU2»: часть ключей SU2 пишется в config.cfg только при "
                  "подготовке нового расчёта.")
         w["out"].setText(text)
-        self.log_text.append(f"Готово: Пресет «{preset.get('name')}» применён: "
+        self.log_text.append(f"Готово: Пресет «{name}» применён: "
                              f"{len(applied)} параметров")
 
 
