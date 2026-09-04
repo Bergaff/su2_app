@@ -435,6 +435,17 @@ def _gmsh_mesh(stl_path, body_pts, body_faces, bounds,
         gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 1)
         gmsh.option.setNumber("Mesh.MeshSizeMin", h_near)
         gmsh.option.setNumber("Mesh.MeshSizeMax", h_far)
+        # Качество ячеек: без оптимизатора gmsh отдаёт сырой тетраэдральный
+        # меш (Delaunay/фронтальный), и на телооблекающей поверхности с
+        # мелкими тонкими элементами (ГО/ВО/руль, толщина ~0.084 м) в нём
+        # много сливеров. Именно такие ячейки валят 2-й порядок SU2 (MUSCL)
+        # с первой итерации (Residual > 10^20 при CFL даже 1.0). Включаем
+        # встроенный оптимизатор качества — он улучшает внутренние ячейки,
+        # сохраняя встроенную поверхность тела как есть.
+        try:
+            gmsh.option.setNumber("Mesh.Optimize", 1)
+        except Exception:
+            pass
         gmsh.model.add("bodyfit_gmsh")
 
         # Расчётный короб.
