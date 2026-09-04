@@ -637,6 +637,14 @@ class SU2Worker:
 
         self.log_cb(f"[{datetime.now().strftime('%H:%M:%S')}] Запуск: {' '.join(cmd)} "
                     f"(cwd={self.case_dir})")
+        # Какой именно конфиг сейчас пойдёт в расчёт: порядок схемы, CFL и
+        # применённый пресет. Без этой строки в логе видно только имя файла.
+        if su2_autoconfig is not None:
+            try:
+                self.log_cb("  " + su2_autoconfig.describe_config_scheme(
+                    os.path.join(self.case_dir, "config.cfg")))
+            except Exception:
+                pass
 
         try:
             proc = subprocess.Popen(

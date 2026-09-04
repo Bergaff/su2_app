@@ -117,45 +117,29 @@ def key_catalogue() -> Dict[str, Tuple[str, object]]:
 # ---------------------------------------------------------------------------
 
 def builtin_presets() -> Dict[str, Dict[str, object]]:
-    """Шаблоны пресетов, поставляемые с приложением."""
-    return {
-        "Стандартный": {
-            "description": "Настройки по умолчанию: CFL с адаптацией, 2-й порядок.",
-            "params": {
-                "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
-                "CFL_NUMBER": "5.0",
-                "CFL_ADAPT": "YES",
-                "MUSCL_FLOW": "YES",
-                "ENTROPY_FIX_COEFF": "0.05",
-                "NUM_METHOD_GRAD": "WEIGHTED_LEAST_SQUARES",
-            },
-        },
-        "Устойчивый (safe)": {
-            "description": "CFL 2.0 без адаптации, первый порядок. "
-                           "Для расходящихся задач.",
-            "params": {
-                "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
-                "CFL_NUMBER": "2.0",
-                "CFL_ADAPT": "NO",
-                "MUSCL_FLOW": "NO",
-                "ENTROPY_FIX_COEFF": "0.1",
-                "NUM_METHOD_GRAD": "WEIGHTED_LEAST_SQUARES",
-            },
-        },
-        "Ультра-устойчивый (ultra)": {
-            "description": "CFL 0.5, усиленная энтропийная поправка, "
-                           "20 итераций линейного решателя.",
-            "params": {
-                "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
-                "CFL_NUMBER": "0.5",
-                "CFL_ADAPT": "NO",
-                "MUSCL_FLOW": "NO",
-                "ENTROPY_FIX_COEFF": "0.2",
-                "NUM_METHOD_GRAD": "WEIGHTED_LEAST_SQUARES",
-                "LINEAR_SOLVER_ITER": "20",
-            },
-        },
-    }
+    """Шаблоны пресетов, поставляемые с приложением.
+
+    Ровно два — ``ultra`` и ``safe``. Значения и подписи берутся из
+    :mod:`su2_autoconfig`: раньше здесь лежала третья копия тех же чисел,
+    и она расходилась с тем, что реально подставлял автоконфиг.
+    """
+    try:
+        import su2_autoconfig
+        out = {}
+        for name in su2_autoconfig.PRESET_ORDER:
+            label, desc = su2_autoconfig.PRESET_INFO.get(name, (name, ""))
+            out[name] = {
+                "description": ("%s. %s" % (label, desc)).strip(),
+                "params": dict(su2_autoconfig.PRESETS[name]),
+            }
+        return out
+    except Exception:                                    # pragma: no cover
+        return {
+            "ultra": {"description": "Долго, но точно.",
+                      "params": {"MUSCL_FLOW": "YES"}},
+            "safe": {"description": "Быстро, но грубо.",
+                     "params": {"MUSCL_FLOW": "NO"}},
+        }
 
 
 # ---------------------------------------------------------------------------

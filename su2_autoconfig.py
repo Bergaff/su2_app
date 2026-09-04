@@ -66,20 +66,34 @@ PRESETS = {
     # < 1.0, фактор вверх > 1.0, минимум не больше максимума.
     "ultra": {
         "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
-        "CFL_NUMBER": "0.5",
+        "CFL_NUMBER": "0.1",
         "CFL_ADAPT": "YES",
-        "CFL_ADAPT_PARAM": "( 0.1, 1.2, 0.5, 100.0, 0.001 )",
+        "CFL_ADAPT_PARAM": "( 0.1, 1.2, 0.1, 10.0, 0.001 )",
         "MUSCL_FLOW": "YES",
         "SLOPE_LIMITER_FLOW": "VENKATAKRISHNAN",
         "VENKAT_LIMITER_COEFF": "0.05",
-        "ENTROPY_FIX_COEFF": "0.0",
+        "ENTROPY_FIX_COEFF": "0.001",
         "NUM_METHOD_GRAD": "WEIGHTED_LEAST_SQUARES",
         "LINEAR_SOLVER_ITER": "20",
-        "LINEAR_SOLVER_ERROR": "0.2",
+        "LINEAR_SOLVER_ERROR": "0.01",
     },
 }
 
 PRESET_ORDER = ["ultra", "safe"]
+
+# Человеческое имя и пояснение к пресету. Единственное место, где они
+# заданы: и диалог настроек SU2, и страница пресетов берут их отсюда,
+# чтобы в приложении не было трёх расходящихся копий одних и тех же чисел.
+PRESET_INFO = {
+    "ultra": ("Долго, но точно",
+              "2-й порядок (MUSCL) с ограничителем Венкатакришнана. CFL "
+              "стартует с 0.1 и растёт до 10 — это рампа. Единственный "
+              "режим, в котором Cd имеет физический смысл."),
+    "safe": ("Быстро, но грубо",
+             "1-й порядок: схемная вязкость велика, поэтому Cd получается "
+             "завышенным. Годится, чтобы прикинуть Cl и довести расчёт до "
+             "сходимости на плохой сетке."),
+}
 
 # ВАЖНО: единственный символ комментария в config.cfg у SU2 - это '%'.
 # Знак '#' SU2 комментарием НЕ считает: в CConfig::TokenizeString() строка
@@ -462,6 +476,65 @@ def detect_result(path, screen_text=None):
     return {**base, "status": "unknown",
             "detail": (f"Прогон остановлен при log10(rms[Rho])={last_v:.2f} "
                        f"(итерация {last_iter}); явного расхождения нет.")}
+
+
+_SCHEME_KEYS = ("TIME_DISCRE_FLOW", "MUSCL_FLOW", "CFL_NUMBER", "CFL_ADAPT",
+                "CFL_ADAPT_PARAM", "SLOPE_LIMITER_FLOW", "VENKAT_LIMITER_COEFF",
+                "ENTROPY_FIX_COEFF", "NUM_METHOD_GRAD", "LINEAR_SOLVER_ITER",
+                "LINEAR_SOLVER_ERROR")
+
+
+def read_config_values(path, keys=_SCHEME_KEYS):
+    """Значения перечисленных ключей из config.cfg. Отсутствующие не входят."""
+    out = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                st = ln.strip()
+                if not st or st.startswith(("%", "#")) or "=" not in st:
+                    continue
+                k, v = st.split("=", 1)
+                k = k.strip()
+                if k in keys:
+                    out[k] = v.split("%")[0].strip()
+    except OSError:
+        return out
+    return out
+
+
+def match_preset(path):
+    """Имя встроенного пресета, которому config.cfg соответствует точно."""
+    vals = read_config_values(path)
+    if not vals:
+        return None
+    for name in PRESET_ORDER:
+        want = PRESETS[name]
+        if all(vals.get(k) == v for k, v in want.items()):
+            return name
+    return None
+
+
+def describe_config_scheme(path):
+    """Одна строка для лога: какая схема записана в config.cfg.
+
+    Печатается перед каждым запуском SU2_CFD, чтобы в логе было видно,
+    каким именно конфигом считается точка, — а не только то, что файл
+    называется config.cfg.
+    """
+    v = read_config_values(path)
+    if not v:
+        return "Конфиг: config.cfg прочитать не удалось"
+    second = str(v.get("MUSCL_FLOW", "")).upper().startswith("Y")
+    order = "2-й порядок (MUSCL)" if second else "1-й порядок (MUSCL выключен)"
+    adapt = ("с рампой" if str(v.get("CFL_ADAPT", "")).upper().startswith("Y")
+             else "без адаптации CFL")
+    name = match_preset(path)
+    tag = f"пресет '{name}'" if name else "пресет не применён"
+    tail = ("Cd в этом режиме имеет смысл."
+            if second else
+            "Cd в этом режиме завышен схемной вязкостью — читать его нельзя.")
+    return (f"Конфиг: {order}, CFL {v.get('CFL_NUMBER', '?')} ({adapt}), "
+            f"{tag}. {tail}")
 
 
 def suggest(path, screen_text=None, current_preset=None):

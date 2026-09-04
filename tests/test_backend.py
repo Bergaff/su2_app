@@ -375,15 +375,36 @@ with tempfile.TemporaryDirectory() as td:
           txt2.count("CFL_NUMBER=") == 1 and txt2.count("CFL_ADAPT=") == 1)
     AC.apply_preset(cfg, "ultra")
     txt3 = open(cfg, encoding="utf-8").read()
-    check("ultra: CFL 0.5 + LINEAR_SOLVER_ITER 20",
-          "CFL_NUMBER= 0.5" in txt3 and "LINEAR_SOLVER_ITER= 20" in txt3)
+    check("ultra: CFL 0.1 + LINEAR_SOLVER_ITER 20",
+          "CFL_NUMBER= 0.1" in txt3 and "LINEAR_SOLVER_ITER= 20" in txt3)
+    check("ultra: энтропийная поправка как в SU2 по умолчанию",
+          "ENTROPY_FIX_COEFF= 0.001" in txt3)
+    check("ultra: допуск линейного решателя не разболтан",
+          "LINEAR_SOLVER_ERROR= 0.01" in txt3)
     check("ultra: второй порядок MUSCL_FLOW= YES", "MUSCL_FLOW= YES" in txt3)
-    check("ultra: рампа CFL до 100", "( 0.1, 1.2, 0.5, 100.0, 0.001 )" in txt3)
+    check("ultra: рампа CFL до 10", "( 0.1, 1.2, 0.1, 10.0, 0.001 )" in txt3)
     check("restore_original", AC.restore_original(cfg) is True)
     check("оригинал восстановлен", "CFL_ADAPT= YES" in
           open(cfg, encoding="utf-8").read())
     check("неизвестный пресет → ValueError",
           _raises(ValueError, AC.apply_preset, cfg, "nope"))
+
+    # Что именно записано в конфиге — для строки в логе перед запуском
+    AC.apply_preset(cfg, "ultra")
+    check("match_preset узнаёт ultra", AC.match_preset(cfg) == "ultra",
+          str(AC.match_preset(cfg)))
+    _d = AC.describe_config_scheme(cfg)
+    check("describe называет второй порядок", "2-й порядок" in _d, _d)
+    check("describe называет пресет", "пресет 'ultra'" in _d, _d)
+    AC.apply_preset(cfg, "safe")
+    check("match_preset узнаёт safe", AC.match_preset(cfg) == "safe",
+          str(AC.match_preset(cfg)))
+    _d2 = AC.describe_config_scheme(cfg)
+    check("describe для safe предупреждает про Cd",
+          "1-й порядок" in _d2 and "читать его нельзя" in _d2, _d2)
+    check("describe на отсутствующем файле не падает",
+          "прочитать не удалось" in
+          AC.describe_config_scheme(os.path.join(td, "нет-такого.cfg")))
 
 # детектор по history.csv
 with tempfile.TemporaryDirectory() as td:
@@ -622,7 +643,8 @@ check("FORMAT_ID/EXTENSION заданы",
 _cat = PF.key_catalogue()
 check("каталог ключей непустой", len(_cat) >= 10, f"{len(_cat)} ключей")
 _b = PF.builtin_presets()
-check("встроенные шаблоны: ≥ 3", len(_b) >= 3, str(list(_b)))
+check("встроенных шаблонов ровно два: ultra и safe",
+      sorted(_b) == ["safe", "ultra"], str(list(_b)))
 for _name, _pre in _b.items():
     _rep = PF.validate_preset(PF.make_preset(_name, _pre["params"]))
     check(f"шаблон «{_name}» проходит валидацию", _rep["ok"],
@@ -1250,7 +1272,7 @@ with tempfile.TemporaryDirectory() as td:
     AC.apply_preset(p_cfg, "ultra")
     _txt2 = open(p_cfg, encoding="utf-8").read()
     check("повторный пресет: ultra применился и конфиг валиден",
-          "CFL_NUMBER= 0.5" in _txt2 and AC.validate_config(p_cfg)[0] is True,
+          "CFL_NUMBER= 0.1" in _txt2 and AC.validate_config(p_cfg)[0] is True,
           str(AC.validate_config(p_cfg)[1][:2]))
 
     # Если ключа в конфиге нет - он дописывается блоком под '%'.

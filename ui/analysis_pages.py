@@ -260,9 +260,14 @@ def build_presets_page(on_export=None, on_import=None, on_apply=None) -> tuple:
     w["name"] = QLineEdit("Мой пресет")
     w["source"] = QComboBox()
     w["source"].addItem("Текущие настройки проекта", "session")
-    w["source"].addItem("Встроенный: Стандартный", "std")
-    w["source"].addItem("Встроенный: Быстро, но грубо (safe, 1-й порядок)", "safe")
-    w["source"].addItem("Встроенный: Долго, но точно (ultra, 2-й порядок)", "ultra")
+    try:
+        import su2_autoconfig as _AC
+        for _n in _AC.PRESET_ORDER:
+            _lbl = _AC.PRESET_INFO.get(_n, (_n, ""))[0]
+            w["source"].addItem("Встроенный: %s (%s)" % (_lbl, _n), _n)
+    except Exception:
+        w["source"].addItem("Встроенный: Долго, но точно (ultra)", "ultra")
+        w["source"].addItem("Встроенный: Быстро, но грубо (safe)", "safe")
     w["btn_export"] = QPushButton("Экспортировать пресет…")
     w["btn_import"] = QPushButton("Импортировать пресет…")
     w["btn_apply"] = QPushButton("Готово: Применить импортированный к проекту")

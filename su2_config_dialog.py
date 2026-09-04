@@ -66,26 +66,21 @@ def _appdata_dir():
 
 PRESETS_JSON = os.path.join(_appdata_dir(), "su2_presets.json")
 
-# Встроенные пресеты (часть значений - те же, что в su2_autoconfig).
-BUILTIN_PRESETS = {
-    "Устойчивый (safe)": {
-        "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
-        "CFL_NUMBER": "2.0",
-        "CFL_ADAPT": "NO",
-        "MUSCL_FLOW": "NO",
-        "ENTROPY_FIX_COEFF": "0.1",
-        "NUM_METHOD_GRAD": "WEIGHTED_LEAST_SQUARES",
-    },
-    "Ультра-устойчивый (ultra)": {
-        "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
-        "CFL_NUMBER": "0.5",
-        "CFL_ADAPT": "NO",
-        "MUSCL_FLOW": "NO",
-        "ENTROPY_FIX_COEFF": "0.2",
-        "NUM_METHOD_GRAD": "WEIGHTED_LEAST_SQUARES",
-        "LINEAR_SOLVER_ITER": "20",
-    },
-}
+# Встроенные пресеты — ровно два, ultra и safe. Значения и подписи берутся
+# из su2_autoconfig: раньше здесь лежала своя копия чисел, и она расходилась
+# с тем, что реально подставлял автоконфиг.
+try:
+    BUILTIN_PRESETS = {k: dict(v) for k, v in su2_autoconfig.PRESETS.items()}
+except Exception:                                        # pragma: no cover
+    BUILTIN_PRESETS = {
+        "ultra": {"TIME_DISCRE_FLOW": "EULER_IMPLICIT", "MUSCL_FLOW": "YES"},
+        "safe": {"TIME_DISCRE_FLOW": "EULER_IMPLICIT", "MUSCL_FLOW": "NO"},
+    }
+
+try:
+    import su2_preset_format
+except Exception:                                        # pragma: no cover
+    su2_preset_format = None
 
 
 # ---------------------------------------------------------------------------
@@ -410,9 +405,31 @@ class Su2ConfigDialog(QDialog):
         b_save.clicked.connect(self._save_current_as_preset)
         pres.addWidget(b_save)
         b_del = QPushButton("Удалить мой пресет")
+        b_del.setToolTip("Удалить выбранный пользовательский пресет. "
+                         "Встроенные ultra и safe не удаляются.")
         b_del.clicked.connect(self._delete_user_preset)
         pres.addWidget(b_del)
+        b_ren = QPushButton("Переименовать…")
+        b_ren.setToolTip("Переименовать выбранный пользовательский пресет.")
+        b_ren.clicked.connect(self._rename_user_preset)
+        pres.addWidget(b_ren)
+        b_exp = QPushButton("Экспорт…")
+        b_exp.setToolTip("Выгрузить выбранный пресет в файл .su2preset, "
+                         "чтобы перенести на другую машину.")
+        b_exp.clicked.connect(self._export_preset)
+        pres.addWidget(b_exp)
         root.addLayout(pres)
+
+        # Какие именно ключи записаны в выбранном пресете.
+        self.lbl_preset_params = QLabel("")
+        self.lbl_preset_params.setWordWrap(True)
+        self.lbl_preset_params.setTextInteractionFlags(
+            Qt.TextSelectableByMouse)
+        self.lbl_preset_params.setStyleSheet(
+            "color: #4A4A4A; font-size: 10px; font-family: Consolas, monospace;")
+        self.preset_combo.currentTextChanged.connect(self._show_preset_params)
+        root.addWidget(self.lbl_preset_params)
+        self._show_preset_params()
 
         # ---- кнопки ----
         btns = QHBoxLayout()
@@ -563,6 +580,82 @@ class Su2ConfigDialog(QDialog):
         self.preset_combo.setCurrentText(name)
         QMessageBox.information(self, "Мой пресет",
                                 f"Пресет «{name}» сохранён.")
+
+    def _show_preset_params(self, name=None):
+        """Показывает, какие ключи записаны в выбранном пресете."""
+        name = name if name is not None else self.preset_combo.currentText()
+        p = all_presets().get(name)
+        if not p:
+            self.lbl_preset_params.setText("")
+            return
+        lines = "\n".join("  %s= %s" % (k, p[k]) for k in sorted(p))
+        if name in BUILTIN_PRESETS:
+            info = {}
+            try:
+                info = su2_autoconfig.PRESET_INFO.get(name, ("", ""))
+            except Exception:
+                info = ("", "")
+            head = "Встроенный «%s» — %s. Изменить нельзя: сохраните под своим именем." % (
+                name, info[0] or "пресет")
+            if info[1]:
+                head += "\n" + info[1]
+        else:
+            head = "Мой пресет «%s»." % name
+        self.lbl_preset_params.setText("%s\nКлючей: %d\n%s" % (head, len(p), lines))
+
+    def _rename_user_preset(self):
+        """Переименовывает пользовательский пресет."""
+        name = self.preset_combo.currentText()
+        if name in BUILTIN_PRESETS:
+            QMessageBox.information(self, "Переименование",
+                                    "Встроенные пресеты ultra и safe "
+                                    "переименовывать нельзя.")
+            return
+        presets = load_user_presets()
+        if name not in presets:
+            return
+        new, ok = QInputDialog.getText(self, "Переименовать пресет",
+                                       "Новое название:", text=name)
+        if not ok:
+            return
+        new = new.strip()
+        if not new or new == name:
+            return
+        if new in BUILTIN_PRESETS or new in presets:
+            QMessageBox.warning(self, "Переименование",
+                                "Имя «%s» уже занято." % new)
+            return
+        presets[new] = presets.pop(name)
+        save_user_presets(presets)
+        self._reload_preset_combo()
+        self.preset_combo.setCurrentText(new)
+
+    def _export_preset(self):
+        """Выгружает выбранный пресет в .su2preset."""
+        name = self.preset_combo.currentText()
+        p = all_presets().get(name)
+        if not p:
+            return
+        if su2_preset_format is None:
+            QMessageBox.warning(self, "Экспорт пресета",
+                                "Модуль su2_preset_format не загружен.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт пресета", name + su2_preset_format.EXTENSION,
+            "Пресет AeroOpt (*" + su2_preset_format.EXTENSION + ")")
+        if not path:
+            return
+        try:
+            su2_preset_format.export_preset(
+                path, name, dict(p),
+                description="Экспорт из AeroOpt",
+                based_on=name if name in BUILTIN_PRESETS else None)
+        except Exception as e:
+            QMessageBox.critical(self, "Экспорт пресета",
+                                 "Не удалось записать файл:\n%s" % e)
+            return
+        QMessageBox.information(self, "Экспорт пресета",
+                                "Пресет «%s» сохранён:\n%s" % (name, path))
 
     def _delete_user_preset(self):
         name = self.preset_combo.currentText()
