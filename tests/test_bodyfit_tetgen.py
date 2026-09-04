@@ -214,6 +214,32 @@ def test_bg_grid_ordering():
     check("вдали размер больше, чем у тела", sizes[-1] > sizes[0])
 
 
+def test_bg_axes_strictly_contain_bounds():
+    """Фоновая область СТРОГО шире bounds (иначе TetGen падает в
+    'Interpolating mesh size' на совпадении с границей короба)."""
+    m = _load_bodyfit()
+    bounds = (-28.08, 42.62, -34.45, 34.45, -30.35, 30.35)
+    body_min = np.array([-5.0, -5.6, -1.5])
+    body_max = np.array([8.0, 5.6, 1.5])
+    h_far = (bounds[1] - bounds[0]) / 12.0
+    axes, h_near, _, _ = m._bg_axes(bounds, body_min, body_max, 0.3462, h_far)
+    check("оси построены (не слишком велики)", axes is not None)
+    if axes is None:
+        return
+    pts = m._structured_grid_pts(axes)
+    x0, x1, y0, y1, z0, z1 = bounds
+    check("фон строго шире bounds по минимумам",
+          pts[:, 0].min() < x0 and pts[:, 1].min() < y0 and pts[:, 2].min() < z0)
+    check("фон строго шире bounds по максимумам",
+          pts[:, 0].max() > x1 and pts[:, 1].max() > y1 and pts[:, 2].max() > z1)
+    # Ни один узел короба не лежит ровно на фоновой границе.
+    box_pts, _ = m.box_surface(bounds, h_far)
+    inside = ((box_pts[:, 0] > pts[:, 0].min()) & (box_pts[:, 0] < pts[:, 0].max()) &
+              (box_pts[:, 1] > pts[:, 1].min()) & (box_pts[:, 1] < pts[:, 1].max()) &
+              (box_pts[:, 2] > pts[:, 2].min()) & (box_pts[:, 2] < pts[:, 2].max()))
+    check("все узлы короба строго внутри фоновой области", inside.all())
+
+
 if __name__ == "__main__":
     print("== test_bodyfit_tetgen ==")
     test_classify_exterior_blocks_body_faces()
@@ -224,5 +250,6 @@ if __name__ == "__main__":
     test_size_field_for_points()
     test_size_field_h_far_no_less_than_near()
     test_bg_grid_ordering()
+    test_bg_axes_strictly_contain_bounds()
     print("== " + ("OK" if not FAIL else f"FAIL {len(FAIL)}") + " ==")
     sys.exit(1 if FAIL else 0)

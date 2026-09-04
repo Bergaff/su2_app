@@ -415,28 +415,23 @@ def build_size_field_background(bounds, body_min, body_max, body_pts,
         # Поле не даст выигрыша: весь домен одного масштаба.
         return None
 
-    bmin = np.asarray(body_min, dtype=float) - 2.0 * h_near
-    bmax = np.asarray(body_max, dtype=float) + 2.0 * h_near
-    orders = [(x0, x1, bmin[0], bmax[0]),
-              (y0, y1, bmin[1], bmax[1]),
-              (z0, z1, bmin[2], bmax[2])]
+    # КРИТИЧНО: фоновая область должна СТРОГО вмещать расчётный короб, а не
+    # совпадать с ним. Узлы основного PLC (box_surface от bounds) лежат ровно
+    # на границе короба; если фон повторяет те же границы, эти узлы попадают
+    # на грани фоновых тетов, и TetGen в «Interpolating mesh size» интерполирует
+    # в вырожденной барицентрике -> сегфолт. Отступаем фон наружу на 3% размера
+    # области (как это делает штатный пример tetgen с осевым запасом eps).
+    extent = max(x1 - x0, y1 - y0, z1 - z0)
 
-    # Первый проход; если узлов слишком много — огрубляем шаг у тела.
-    for _ in range(4):
-        axes = [make_graded_axis(lo, hi, ilo, ihi, h_near, h_far)
-                for (lo, hi, ilo, ihi) in orders]
-        n_nodes = int(len(axes[0]) * len(axes[1]) * len(axes[2]))
-        if n_nodes <= MAX_BG_NODES:
-            break
-        h_near = h_near * 1.6
-    else:
+    axes, h_near, bmin, bmax = _bg_axes(
+        bounds, body_min, body_max, h_near, h_far, max_nodes=MAX_BG_NODES)
+    if axes is None:
         log("   Внимание: фоновая сетка поля размера слишком велика — "
             "строю без неё.")
         return None
 
     pts = _structured_grid_pts(axes)
 
-    extent = max(x1 - x0, y1 - y0, z1 - z0)
     span = float(np.max(bmax - bmin))
     # Расстояние, на котором размер достигает h_far: ~2 габарита тела, но не
     # больше 0.55 габарита области, чтобы у короба поле уже было крупным и
@@ -451,6 +446,40 @@ def build_size_field_background(bounds, body_min, body_max, body_pts,
         "вдали %.4f м (переход ~%.1f м)"
         % (int(grid.n_points), h_near, h_far, L))
     return grid
+
+
+def _bg_axes(bounds, body_min, body_max, h_near, h_far, max_nodes=MAX_BG_NODES):
+    """Оси фоновой сетки поля размера (чистая numpy, без pyvista).
+
+    Возвращает ``(axes, h_near, bmin, bmax)``. Оси **строго шире** ``bounds``
+    (запас ``0.03*extent``), чтобы узлы основного короба лежали строго внутри
+    фоновой области — иначе TetGen падает в «Interpolating mesh size» на
+    грани фонового тета (см. build_size_field_background). Если даже после
+    огрубления шага узлов больше ``max_nodes`` — возвращает ``(None, ...)``.
+    """
+    x0, x1, y0, y1, z0, z1 = [float(b) for b in bounds]
+    h_near = max(float(h_near), 1e-9)
+    h_far = max(float(h_far), h_near)
+    if h_far <= h_near * 1.05:
+        h_far = h_near * 1.05
+
+    extent = max(x1 - x0, y1 - y0, z1 - z0)
+    pad = float(0.03 * extent)
+
+    bmin = np.asarray(body_min, dtype=float) - 2.0 * h_near
+    bmax = np.asarray(body_max, dtype=float) + 2.0 * h_near
+    orders = [(x0 - pad, x1 + pad, bmin[0], bmax[0]),
+              (y0 - pad, y1 + pad, bmin[1], bmax[1]),
+              (z0 - pad, z1 + pad, bmin[2], bmax[2])]
+
+    for _ in range(4):
+        axes = [make_graded_axis(lo, hi, ilo, ihi, h_near, h_far)
+                for (lo, hi, ilo, ihi) in orders]
+        n_nodes = int(len(axes[0]) * len(axes[1]) * len(axes[2]))
+        if n_nodes <= max_nodes:
+            return axes, h_near, bmin, bmax
+        h_near = h_near * 1.6
+    return None, h_near, bmin, bmax
 
 
 def _structured_grid_pts(axes):
