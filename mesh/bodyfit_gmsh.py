@@ -43,6 +43,7 @@ gmsh), покрыты тестами. Сам вызов gmsh обёрнут в t
 from __future__ import annotations
 
 import os
+import signal
 import struct
 import tempfile
 
@@ -401,8 +402,22 @@ def _gmsh_mesh(stl_path, body_pts, body_faces, bounds,
     import pyvista as pv
     x0, x1, y0, y1, z0, z1 = [float(b) for b in bounds]
 
-    gmsh.initialize()
+    # gmsh при инициализации/работе регистрирует обработчик сигналов
+    # (SIGINT/SIGTERM), а Python разрешает это только в ГЛАВНОМ потоке. Генерация
+    # сетки идёт в фоновом QThread, поэтому gmsh без обхода падает с
+    # "ValueError: signal only works in main thread of the main interpreter".
+    # Временно подменяем signal.signal на заглушку на время сессии gmsh и
+    # восстанавливаем в finally — gmsh считает, что обработчик установлен, а
+    # в фоновом потоке он всё равно не работает.
+    _orig_signal = signal.signal
+
+    def _noop_signal(sig, handler):
+        return handler
+
+    signal.signal = _noop_signal
     try:
+        gmsh.initialize()
+        signal.signal = _noop_signal
         gmsh.option.setNumber("General.Terminal", 1)
         gmsh.option.setNumber("Mesh.Algorithm", 6)          # фронтальный (теты)
         gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 1)
@@ -518,4 +533,8 @@ def _gmsh_mesh(stl_path, body_pts, body_faces, bounds,
             (len(tets_new), len(used)))
         return grid, body_keys, boundary_ratio
     finally:
-        gmsh.finalize()
+        signal.signal = _orig_signal
+        try:
+            gmsh.finalize()
+        except Exception:                               # pragma: no cover
+            pass
