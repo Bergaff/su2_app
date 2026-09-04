@@ -89,10 +89,72 @@ def test_four_face_keys():
           str(keys))
 
 
+def test_collect_airfoil_facets_uses_vmap():
+    """Грани тела переводятся в узлы сетки ЧЕРЕЗ vmap.
+
+    Раньше здесь был remap[x] для x в body_faces, но x — индекс ВХОДНОЙ
+    поверхности, а не узла сетки. Когда TetGen перенумеровывает узлы
+    (входные точки не остаются в начале массива), грани тела перестают
+    совпадать с реальной границей наружной сетки, маркер airfoil терял
+    ~20% граней, и телооблекающая сетка ложно отвергалась как дырявая.
+    """
+    m = _load_bodyfit()
+    # Полная объёмная сетка из 8 узлов. Тело — тетраэдр на узлах 4,5,6,7
+    # (то есть vmap НЕ тождественный: входная вершина k -> узел k+4).
+    points = np.array([
+        [1.0, 1.0, 1.0],   # 0 — наружный
+        [-1.0, 1.0, 1.0],  # 1 — наружный
+        [1.0, -1.0, 1.0],  # 2 — наружный
+        [1.0, 1.0, -1.0],  # 3 — наружный
+        [0.0, 0.0, 0.0],   # 4 — вершина тела A
+        [1.0, 0.0, 0.0],   # 5 — вершина тела B
+        [0.0, 1.0, 0.0],   # 6 — вершина тела C
+        [0.0, 0.0, 1.0],   # 7 — вершина тела D
+    ], dtype=float)
+    # Тет 0 — «тело» (внутренний), теты 1..4 — наружные, каждый примыкает
+    # к одной грани тела и потому делает её границей наружной области.
+    tets = np.array([
+        [4, 5, 6, 7],   # 0: тело (внутренний)
+        [4, 5, 6, 0],   # 1: наружный, грань (4,5,6)
+        [4, 5, 7, 1],   # 2: наружный, грань (4,5,7)
+        [4, 6, 7, 2],   # 3: наружный, грань (4,6,7)
+        [5, 6, 7, 3],   # 4: наружный, грань (5,6,7)
+    ], dtype=np.int64)
+    # Входная поверхность тела: 4 грани тетраэдра (индексы входных вершин 0..3).
+    body_faces = np.array([
+        [0, 1, 2],
+        [0, 1, 3],
+        [0, 2, 3],
+        [1, 2, 3],
+    ], dtype=np.int64)
+    vmap = np.array([4, 5, 6, 7], dtype=np.int64)  # входная k -> узел k+4
+    ext = np.array([1, 2, 3, 4], dtype=np.int64)   # наружные теты (тело вырезано)
+
+    marker, ratio = m.collect_airfoil_facets(points, tets, ext, vmap, body_faces)
+    check("все 4 грани тела вышли на границу (vmap-перенумерация)",
+          len(marker) == 4 and ratio > 0.999,
+          f"marker={len(marker)}, ratio={ratio:.3f}")
+
+    # Доказываем, что СТАРЫЙ путь (remap[x], без vmap) дал бы дыры.
+    ext_tets = tets[ext]
+    used = np.unique(ext_tets.ravel())
+    remap = np.full(len(points), -1, dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    flat = m.tet_faces(remap[ext_tets])[0]
+    uniq, cnt = np.unique(flat, axis=0, return_counts=True)
+    boundary = {tuple(int(x) for x in r) for r in uniq[cnt == 1]}
+    old_bad = [tuple(sorted(int(remap[x]) for x in f)) for f in body_faces]
+    old_marker = [f for f in old_bad if f in boundary]
+    check("старый путь (remap[x]) потерял бы грани — регрессия поймана",
+          len(old_marker) < 4,
+          f"old_marker={len(old_marker)}")
+
+
 if __name__ == "__main__":
     print("== test_bodyfit_tetgen ==")
     test_classify_exterior_blocks_body_faces()
     test_classify_exterior_no_seed_all_inside()
     test_four_face_keys()
+    test_collect_airfoil_facets_uses_vmap()
     print("== " + ("OK" if not FAIL else f"FAIL {len(FAIL)}") + " ==")
     sys.exit(1 if FAIL else 0)
