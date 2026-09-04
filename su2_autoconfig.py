@@ -64,18 +64,32 @@ PRESETS = {
     # (фактор вниз, фактор вверх, предел CFL мин, предел CFL макс,
     #  допустимая невязка ЛУ). Ограничения из того же файла: фактор вниз
     # < 1.0, фактор вверх > 1.0, минимум не больше максимума.
+    # ultra собран как ТОЧНАЯ копия базового конфига solver/config_builder.py
+    # (тот прогон не расходится, он только встаёт на log10(rms) = -2.20) с
+    # одним отличием: потолок CFL в рампе поднят с 5.0 до 50.0.
+    #
+    # Почему так. Прошлый ultra расходился (Residual > 10^20 на итерации 482,
+    # потом 1361), и расходился не «потому что второй порядок», а потому что
+    # отличался от рабочей базы сразу по пяти ключам. Главный подозреваемый -
+    # LINEAR_SOLVER_ERROR: в базе 1e-6, в ultra было 0.01, то есть в 10000 раз
+    # слабее. При неявной схеме неточно решённый ньютоновский шаг - это
+    # готовый механизм расходимости; косвенно на это указывает и то, что
+    # ужесточение с 0.2 до 0.01 отодвинуло расходимость с 482-й на 1361-ю
+    # итерацию. Теперь линейный решатель не трогается вообще.
     "ultra": {
         "TIME_DISCRE_FLOW": "EULER_IMPLICIT",
-        "CFL_NUMBER": "0.1",
-        "CFL_ADAPT": "YES",
-        "CFL_ADAPT_PARAM": "( 0.1, 1.2, 0.1, 10.0, 0.001 )",
         "MUSCL_FLOW": "YES",
         "SLOPE_LIMITER_FLOW": "VENKATAKRISHNAN",
         "VENKAT_LIMITER_COEFF": "0.05",
-        "ENTROPY_FIX_COEFF": "0.001",
+        "ENTROPY_FIX_COEFF": "0.005",
         "NUM_METHOD_GRAD": "WEIGHTED_LEAST_SQUARES",
-        "LINEAR_SOLVER_ITER": "20",
-        "LINEAR_SOLVER_ERROR": "0.01",
+        "CFL_NUMBER": "1.0",
+        "CFL_ADAPT": "YES",
+        "CFL_ADAPT_PARAM": "( 0.5, 1.2, 0.5, 50.0 )",
+        "LINEAR_SOLVER": "FGMRES",
+        "LINEAR_SOLVER_PREC": "ILU",
+        "LINEAR_SOLVER_ERROR": "1e-6",
+        "LINEAR_SOLVER_ITER": "15",
     },
 }
 
@@ -84,6 +98,22 @@ PRESET_ORDER = ["ultra", "safe"]
 # Человеческое имя и пояснение к пресету. Единственное место, где они
 # заданы: и диалог настроек SU2, и страница пресетов берут их отсюда,
 # чтобы в приложении не было трёх расходящихся копий одних и тех же чисел.
+def _preset_summary(name):
+    """«Долго, но точно: 2-й порядок, CFL 1.0» — по фактическим значениям.
+
+    Числа в тексте берутся из самого пресета, поэтому подпись не может
+    устареть, когда значения меняются. Раньше текст был зашит вручную и
+    пережил две смены значений: в логе писалось «CFL 0.5 с рампой до 100»,
+    хотя в конфиг уже подставлялся CFL 0.1 с рампой до 10.
+    """
+    p = PRESETS.get(name, {})
+    label = PRESET_INFO.get(name, (name, ""))[0]
+    second = str(p.get("MUSCL_FLOW", "")).upper().startswith("Y")
+    return "%s: %s, CFL %s" % (
+        label, "2-й порядок" if second else "1-й порядок",
+        p.get("CFL_NUMBER", "?"))
+
+
 PRESET_INFO = {
     "ultra": ("Долго, но точно",
               "2-й порядок (MUSCL) с ограничителем Венкатакришнана. CFL "
@@ -478,9 +508,14 @@ def detect_result(path, screen_text=None):
                        f"(итерация {last_iter}); явного расхождения нет.")}
 
 
+# Ключи, по которым лог описывает схему и по которым пресет узнаётся в
+# config.cfg. Список обязан покрывать все ключи обоих пресетов, иначе
+# match_preset() не найдёт совпадения: отсутствующий в config ключ даёт
+# None, а в пресете - значение, и сравнение не проходит.
 _SCHEME_KEYS = ("TIME_DISCRE_FLOW", "MUSCL_FLOW", "CFL_NUMBER", "CFL_ADAPT",
                 "CFL_ADAPT_PARAM", "SLOPE_LIMITER_FLOW", "VENKAT_LIMITER_COEFF",
-                "ENTROPY_FIX_COEFF", "NUM_METHOD_GRAD", "LINEAR_SOLVER_ITER",
+                "ENTROPY_FIX_COEFF", "NUM_METHOD_GRAD", "LINEAR_SOLVER",
+                "LINEAR_SOLVER_PREC", "LINEAR_SOLVER_ITER",
                 "LINEAR_SOLVER_ERROR")
 
 
@@ -546,15 +581,18 @@ def suggest(path, screen_text=None, current_preset=None):
     if st in ("diverged", "error", "unknown"):
         if current_preset is None:
             return "apply_preset", "ultra", \
-                "Расчёт не сошёлся. Применён пресет 'Точно' (второй порядок, " \
-                "CFL 0.5 с рампой до 100) и выполнен перезапуск."
+                "Расчёт не сошёлся. Применён пресет 'ultra' (%s), " \
+                "выполнен перезапуск." % _preset_summary("ultra")
         idx = PRESET_ORDER.index(current_preset) if current_preset in PRESET_ORDER else -1
         if idx < len(PRESET_ORDER) - 1:
             nxt = PRESET_ORDER[idx + 1]
+            rough = not str(PRESETS.get(nxt, {}).get("MUSCL_FLOW", "")
+                            ).upper().startswith("Y")
             return "apply_preset", nxt, \
                 f"Пресет '{current_preset}' не помог. Применён '{nxt}' " \
-                f"(первый порядок): сойдётся вероятнее, но схемная вязкость " \
-                f"велика и Cd в этом режиме читать нельзя."
+                f"({_preset_summary(nxt)})" + (
+                    ": сойдётся вероятнее, но схемная вязкость велика и "
+                    "Cd в этом режиме читать нельзя." if rough else ".")
         return "abort", None, \
             "Не помог и первый порядок - дело, вероятно, в сетке " \
             "(качество ячеек у тела). Результата, которому можно верить, " \

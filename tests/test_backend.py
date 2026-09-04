@@ -1,5 +1,6 @@
 """Функциональные тесты бэкенда (без GUI-зависимостей).
 Запуск: python3 tests/test_backend.py  (из корня проекта)"""
+import io
 import os
 import sys
 import tempfile
@@ -375,14 +376,12 @@ with tempfile.TemporaryDirectory() as td:
           txt2.count("CFL_NUMBER=") == 1 and txt2.count("CFL_ADAPT=") == 1)
     AC.apply_preset(cfg, "ultra")
     txt3 = open(cfg, encoding="utf-8").read()
-    check("ultra: CFL 0.1 + LINEAR_SOLVER_ITER 20",
-          "CFL_NUMBER= 0.1" in txt3 and "LINEAR_SOLVER_ITER= 20" in txt3)
-    check("ultra: энтропийная поправка как в SU2 по умолчанию",
-          "ENTROPY_FIX_COEFF= 0.001" in txt3)
-    check("ultra: допуск линейного решателя не разболтан",
-          "LINEAR_SOLVER_ERROR= 0.01" in txt3)
+    check("ultra: второй порядок, CFL 1.0",
+          "CFL_NUMBER= 1.0" in txt3 and "MUSCL_FLOW= YES" in txt3)
+    check("ultra: линейный решатель как в базовом конфиге (1e-6)",
+          "LINEAR_SOLVER_ERROR= 1e-6" in txt3 and "LINEAR_SOLVER_ITER= 15" in txt3)
     check("ultra: второй порядок MUSCL_FLOW= YES", "MUSCL_FLOW= YES" in txt3)
-    check("ultra: рампа CFL до 10", "( 0.1, 1.2, 0.1, 10.0, 0.001 )" in txt3)
+    check("ultra: рампа CFL до 50", "( 0.5, 1.2, 0.5, 50.0 )" in txt3)
     check("restore_original", AC.restore_original(cfg) is True)
     check("оригинал восстановлен", "CFL_ADAPT= YES" in
           open(cfg, encoding="utf-8").read())
@@ -405,6 +404,52 @@ with tempfile.TemporaryDirectory() as td:
     check("describe на отсутствующем файле не падает",
           "прочитать не удалось" in
           AC.describe_config_scheme(os.path.join(td, "нет-такого.cfg")))
+
+    # Текст рекомендации строится по фактическим значениям пресета, а не
+    # зашит вручную: иначе он устаревает при смене значений (так и было -
+    # в логе писалось "CFL 0.5 с рампой до 100" при CFL 0.1 и рампе до 10).
+    _case2 = os.path.join(td, "case_div")
+    os.makedirs(_case2, exist_ok=True)
+    with open(os.path.join(_case2, "history.csv"), "w", encoding="utf-8") as _fh:
+        _fh.write('"Inner_Iter","RMS[Rho]","CL"\n0,-2.0,0.1\n50,12.0,1e10\n')
+    _act, _pre, _note = AC.suggest(_case2)
+    check("в тексте рекомендации CFL из самого пресета",
+          _pre is not None and ("CFL %s" % AC.PRESETS[_pre]["CFL_NUMBER"]) in _note,
+          _note)
+    check("в тексте нет зашитых чисел другого пресета",
+          all(("CFL %s" % v["CFL_NUMBER"]) not in _note
+              for k, v in AC.PRESETS.items() if k != _pre), _note)
+
+    # ultra обязан совпадать с базовым конфигом config_builder, кроме
+    # потолка CFL: базовый прогон не расходится, и любое лишнее отличие -
+    # это потенциальный механизм расходимости.
+    _src = io.open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "solver", "config_builder.py"),
+        encoding="utf-8").read()
+    import solver.config_builder as _CB
+    # В шаблоне config_builder часть значений - плейсхолдеры f-строки.
+    # Без их разворачивания CFL_ADAPT_PARAM просто не попал бы в сравнение,
+    # и проверка «отличается только потолком CFL» прошла бы впустую.
+    _ph = {"cfl_param": _CB.CFL_PARAM_SAFE}
+    _base = {}
+    for _m in _re.finditer(r"^\s*([A-Z][A-Z0-9_]*)= (.+)$", _src, _re.M):
+        _v = _m.group(2).strip()
+        if _v.startswith("{") and _v.endswith("}"):
+            _v = _ph.get(_v[1:-1])
+            if _v is None:
+                continue
+        _base.setdefault(_m.group(1), _v)
+    check("CFL_ADAPT_PARAM базового конфига развёрнут (иначе сравнение пустое)",
+          _base.get("CFL_ADAPT_PARAM") == _CB.CFL_PARAM_SAFE,
+          str(_base.get("CFL_ADAPT_PARAM")))
+    _diff = {k: (AC.PRESETS["ultra"][k], _base.get(k))
+             for k in AC.PRESETS["ultra"]
+             if k in _base and AC.PRESETS["ultra"][k] != _base[k]}
+    check("ultra отличается от базового конфига только потолком CFL",
+          list(_diff) == ["CFL_ADAPT_PARAM"], str(_diff))
+    check("общие ключи ultra и базового конфига сверены (тест не выродился)",
+          len([k for k in AC.PRESETS["ultra"] if k in _base]) >= 10,
+          str(len([k for k in AC.PRESETS["ultra"] if k in _base])))
 
 # детектор по history.csv
 with tempfile.TemporaryDirectory() as td:
@@ -1272,7 +1317,7 @@ with tempfile.TemporaryDirectory() as td:
     AC.apply_preset(p_cfg, "ultra")
     _txt2 = open(p_cfg, encoding="utf-8").read()
     check("повторный пресет: ultra применился и конфиг валиден",
-          "CFL_NUMBER= 0.1" in _txt2 and AC.validate_config(p_cfg)[0] is True,
+          "CFL_NUMBER= 1.0" in _txt2 and AC.validate_config(p_cfg)[0] is True,
           str(AC.validate_config(p_cfg)[1][:2]))
 
     # Если ключа в конфиге нет - он дописывается блоком под '%'.
