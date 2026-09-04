@@ -47,6 +47,11 @@ os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
 import numpy as np
 import pyvista as pv
 from pyvistaqt import QtInteractor
+# preset_table_params определён в ui/analysis_pages.py. Раньше он импортировался
+# локально внутри __init__ и был доступен только там; export_config_preset и
+# apply_imported_preset (другие методы) не могли его найти — apply_imported_preset
+# падал с NameError вне try/except. Перенесён на уровень модуля.
+from ui.analysis_pages import preset_table_params
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QGroupBox, QFileDialog, QMessageBox,
@@ -1728,7 +1733,7 @@ class MainWindow(QMainWindow):
         # Page 14-17: аэроупругость, прочность, спецфункции, пресеты (ТЗ)
         from ui.analysis_pages import (
             build_aeroelastic_page, build_presets_page, build_info_page,
-            build_specials_page, build_structural_page, preset_table_params)
+            build_specials_page, build_structural_page)
         self.page_aeroelastic, self.ae_w = build_aeroelastic_page(
             on_check=self.run_aeroelastic_check,
             on_plot=self.plot_vg_diagram)

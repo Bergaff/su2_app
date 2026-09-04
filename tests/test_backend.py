@@ -1245,6 +1245,21 @@ with tempfile.TemporaryDirectory() as td:
 check("_session_params читает объект расчёта",
       isinstance(_w6._session_params(), dict))
 
+# Регрессия: apply_imported_preset падал с NameError ('preset_table_params' is
+# not defined), потому что функция импортировалась локально внутри __init__ и
+# не была видна другим методам. Это ловится только когда в pr_w есть 'table'
+# (в реальном окне он есть; в _mk_window выше его не было — тест не доставал
+# до падавшей строки). Здесь проверяем сам путь с таблицей.
+_w6b = _mk_window()
+_w6b.pr_w = {**_w6b.pr_w,
+             "table": _FakeTable([["CFL_NUMBER", "3.5"],
+                                  ["MUSCL_FLOW", "YES"]])}
+_w6b._imported_preset = None
+_w6b.apply_imported_preset()
+check("apply_imported_preset с таблицей не падает NameError",
+      isinstance(_w6b.pr_w["out"].text(), str)
+      and "Применено параметров" in _w6b.pr_w["out"].text())
+
 print("== ui.main_window: DOE-таблица и адаптация по Cp ==")
 _w7 = _mk_window()
 check("_doe_param_names: расширенный набор параметров",
