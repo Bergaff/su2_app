@@ -479,6 +479,10 @@ class MainWindow(QMainWindow):
         self.flight = FlightConditions()
 
         self.bodies = []
+        # Единицы модели: множитель, уже применённый к координатам
+        # загруженной геометрии. 1.0 = метры. Меняется в Design Rules
+        # (метод apply_model_units), а не только при импорте CAD.
+        self._model_unit_factor = 1.0
         self.next_body_id = 0
         self.all_results = []
         self.worker = None
@@ -823,6 +827,36 @@ class MainWindow(QMainWindow):
         # --- QGroupBox: Design Rules (содержимое бывшей page_rules)
         rules_group = QGroupBox("Правила проектирования (Design Rules)")
         rules_lay = QVBoxLayout(rules_group)
+
+        # === Единицы модели: задать или изменить в любой момент =========
+        units_group = QGroupBox("Единицы модели")
+        units_lay = QVBoxLayout(units_group)
+        units_lay.addWidget(QLabel(
+            "При импорте CAD единицы спрашиваются отдельно. Здесь их можно\n"
+            "задать или исправить потом: выбор означает «модель сейчас задана\n"
+            "в этих единицах», а «Применить» пересчитывает уже загруженную\n"
+            "геометрию в метры. Повторное нажатие с тем же выбором ничего\n"
+            "не меняет. Расчёт всегда идёт в метрах."))
+        units_row = QHBoxLayout()
+        self.combo_model_units = QComboBox()
+        for _lbl, _f in _CAD_SCALE_CHOICES:
+            self.combo_model_units.addItem(_lbl, _f)
+        # По умолчанию метры - координаты читаются как есть.
+        self.combo_model_units.setCurrentIndex(
+            max(0, [f for _l, f in _CAD_SCALE_CHOICES].index(1.0)))
+        self.btn_apply_units = QPushButton("Применить ко всей геометрии")
+        self.btn_apply_units.setToolTip(
+            "Пересчитать координаты всех загруженных тел под выбранные\n"
+            "единицы. Сетка после этого считается устаревшей.")
+        self.btn_apply_units.clicked.connect(self.apply_model_units)
+        units_row.addWidget(self.combo_model_units, 1)
+        units_row.addWidget(self.btn_apply_units)
+        units_lay.addLayout(units_row)
+        self.lbl_model_units = QLabel("Геометрия не загружена.")
+        self.lbl_model_units.setStyleSheet("color: #4A4A4A; font-size: 10px;")
+        units_lay.addWidget(self.lbl_model_units)
+        rules_lay.addWidget(units_group)
+        # =================================================================
 
         preset_group = QGroupBox("Готовые наборы (пресеты)")
         pg_lay = QHBoxLayout(preset_group)
@@ -3207,6 +3241,80 @@ class MainWindow(QMainWindow):
     # =============================================================
     # СПРАВОЧНЫЕ ДАННЫЕ
     # =============================================================
+    def _model_bbox(self):
+        """Габарит всей загруженной геометрии в метрах: строка 'X x Y x Z'."""
+        pts = [np.asarray(b["mesh"].points, dtype=float)
+               for b in self.bodies
+               if b.get("mesh") is not None
+               and len(np.asarray(b["mesh"].points, dtype=float)) > 0]
+        if not pts:
+            return ""
+        d = np.vstack(pts)
+        ext = d.max(0) - d.min(0)
+        return " x ".join(f"{v:.3f}" for v in ext)
+
+    def _refresh_model_units_label(self):
+        """Подпись под выбором единиц: текущие единицы и габарит модели."""
+        bb = self._model_bbox()
+        if not bb:
+            self.lbl_model_units.setText("Геометрия не загружена.")
+            return
+        self.lbl_model_units.setText(
+            f"Выбрано: {self.combo_model_units.currentText()}\n"
+            f"Габарит модели сейчас: {bb} м")
+
+    def apply_model_units(self):
+        """Пересчитывает загруженную геометрию под выбранные единицы.
+
+        Комбо-бокс хранит единицы, в которых модель находится СЕЙЧАС, а
+        ``self._model_unit_factor`` - множитель, уже применённый к
+        координатам. Пересчёт идёт по их отношению, поэтому операция
+        идемпотентна: повторное нажатие с тем же выбором геометрию не трогает.
+        """
+        if not self.bodies:
+            self.log_text.append(
+                "Внимание: нет загруженной геометрии - переводить нечего.")
+            return
+        new_factor = self.combo_model_units.currentData()
+        if not new_factor:
+            return
+        new_factor = float(new_factor)
+        label = self.combo_model_units.currentText()
+        k = new_factor / float(self._model_unit_factor)
+        if abs(k - 1.0) < 1e-12:
+            self.log_text.append(
+                f"Готово: модель уже задана в единицах «{label}», "
+                f"геометрия не менялась.")
+            self._refresh_model_units_label()
+            return
+
+        before = self._model_bbox()
+        moved, failed = 0, 0
+        for b in self.bodies:
+            m = b.get("mesh")
+            if m is None:
+                continue
+            try:
+                m.points = np.asarray(m.points, dtype=float) * k
+                moved += 1
+            except Exception as e:
+                failed += 1
+                self.log_text.append(f"  Ошибка: {b['name']}: {e}")
+        self._model_unit_factor = new_factor
+        try:
+            self.plotter.render()
+        except Exception:
+            pass
+        self.log_text.append(
+            f"Готово: единицы модели - «{label}». Пересчитано тел: "
+            f"{moved} из {len(self.bodies)}, множитель {k:g}."
+            + (f" С ошибками: {failed}." if failed else ""))
+        after = self._model_bbox()
+        if before and after:
+            self.log_text.append(f"  Габарит был {before} м, стал {after} м.")
+        self._refresh_model_units_label()
+        self.invalidate_mesh("изменены единицы модели")
+
     def calculate_reference_data(self):
         wing = next((b for b in self.bodies if b["role"] == "wing"), None)
         if wing:
