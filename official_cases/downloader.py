@@ -164,6 +164,7 @@ def prepare_case_run_dir(case_id: str, out_dir: str) -> dict:
     mesh_in_dir = os.path.join(out_dir, "mesh.su2")
     shutil.copy2(target, mesh_in_dir)
     text = rewrite_mesh_filename(bundled_config_text(case.config_file), "mesh.su2")
+    text, notes = sanitize_config_for_run(text, out_dir)
     cfg_out = os.path.join(out_dir, "config.cfg")
     with open(cfg_out, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
@@ -172,7 +173,71 @@ def prepare_case_run_dir(case_id: str, out_dir: str) -> dict:
         "case_dir": out_dir,
         "config": cfg_out,
         "mesh": mesh_in_dir,
+        "notes": notes,
     }
+
+
+def sanitize_config_for_run(text: str, out_dir: str) -> tuple:
+    """Приготовить официальный config.cfg к одиночному запуску.
+
+    Официальные конфиги писались в расчёте на продолжение: часть из них
+    стартует с RESTART_SOL= YES (замер на turb_NACA0012_sa: SU2 v8.2
+    падает на старте с "Unable to open SU2 restart file
+    solution_flow_sa.dat", потому что файла решения в свежем каталоге
+    нет). Другая часть не задаёт HISTORY_OUTPUT вообще — и SU2 v8 пишет
+    в history только невязки, без CL/CD, тогда приложение не может
+    прочитать коэффициенты (замер на turb_SA_RAE2822). Здесь:
+
+    1. RESTART_SOL= YES при отсутствии файла решения -> NO;
+    2. в HISTORY_OUTPUT добавляется FORCES (ключа нет — добавляется
+       целиком со ITER и RMS_RES).
+
+    Возвращает (текст, список человеческих правок).
+    """
+    import re as _re
+    notes = []
+
+    def _get_key(key):
+        m = _re.search(r"^\s*%s\s*=\s*(.+?)\s*(?:%%.*)?$" % key,
+                       text, _re.MULTILINE | _re.IGNORECASE)
+        return m.group(1).strip() if m else None
+
+    # --- RESTART_SOL ---
+    restart = _get_key("RESTART_SOL")
+    if restart and restart.upper().startswith("Y"):
+        sol = _get_key("SOLUTION_FILENAME") or "solution_flow.dat"
+        sol_path = os.path.join(out_dir, sol)
+        if not os.path.isfile(sol_path):
+            text = _re.sub(r"^(\s*RESTART_SOL\s*=\s*).+$",
+                           r"\1NO  # AeroOpt: файла решения нет в чистом "
+                           r"каталоге - старт с нуля",
+                           text, count=1, flags=_re.MULTILINE | _re.IGNORECASE)
+            notes.append("RESTART_SOL= YES -> NO (файла решения %s в "
+                         "каталоге нет - официальный конфиг ждёт "
+                         "продолжения, одиночный запуск без него падает "
+                         "с 'Unable to open SU2 restart file')" % sol)
+
+    # --- HISTORY_OUTPUT: добавить FORCES ---
+    hist = _get_key("HISTORY_OUTPUT")
+    def _has_forces(val):
+        return "FORCE" in val.upper()
+    if hist is None:
+        text += ("\n% AeroOpt: коэффициенты сил обязаны попасть в "
+                 "history.csv\nHISTORY_OUTPUT= ( ITER, RMS_RES, FORCES )\n")
+        notes.append("HISTORY_OUTPUT отсутствовал - добавлен "
+                     "(ITER, RMS_RES, FORCES): иначе SU2 v8 пишет в "
+                     "history только невязки, без CL/CD")
+    elif not _has_forces(hist):
+        if "(" in hist and ")" in hist:
+            new_val = hist.replace("(", "( FORCES,", 1)
+        else:
+            new_val = hist + ", FORCES"
+        text = _re.sub(r"^(\s*HISTORY_OUTPUT\s*=).*$",
+                       lambda mm: mm.group(1) + " " + new_val,
+                       text, count=1, flags=_re.MULTILINE | _re.IGNORECASE)
+        notes.append("в HISTORY_OUTPUT добавлен FORCES (было %s): без "
+                     "этого в history.csv нет CL/CD" % hist)
+    return text, notes
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ official_cases/surface.py — извлечение поверхности тел
 
 from __future__ import annotations
 
+import numpy as np
 from typing import List, Optional, Sequence, Tuple
 
 # Число узлов граничного элемента по его типу (SU2):
@@ -292,3 +293,346 @@ def is_manifold_closed(triangles: Sequence[Sequence[int]]) -> bool:
     if not edges:
         return False
     return all(count == 2 for count in edges.values())
+
+
+# ---------------------------------------------------------------------------
+# Починка геометрии официальных кейсов до замкнутого тела
+# ---------------------------------------------------------------------------
+# Официальные поверхности SU2 — часто НЕ тела: у 2D-профилей (NACA0012,
+# RAE2822) маркер стенки — это ЛИНИИ контура (NDIME=2), у полу-моделей
+# (ONERA M6) — открытая оболочка с краем в плоскости симметрии. Вокруг
+# такой поверхности телооблегающую сетку не построить. Здесь поверхность
+# доводится до замкнутого тела: профиль вытягивается по размаху, полу-
+# модель зеркалится. После этого кейс считается как обычная геометрия
+# приложения: пользователь сам строит сетку и сам запускает расчёт.
+
+
+def read_profile_segments(mesh_path: str,
+                          markers: Optional[Sequence[str]] = None) -> list:
+    """Линейные сегменты маркеров тела из 2D-сетки .su2.
+
+    Возвращает список пар 2D-точек ``[((x1, y1), (x2, y2)), ...]``.
+    Для NDIME=3 сегментов не бывает — вернётся пустой список.
+    """
+    with open(mesh_path, "r", encoding="ascii", errors="ignore") as f:
+        text = f.read()
+    parsed = parse_su2_text(text)
+    pts = parsed["points"]
+    wanted = None
+    if markers is not None and any(markers):
+        wanted = {str(m).strip() for m in markers if str(m).strip()}
+    segs = []
+    for tag, elems in parsed["markers"].items():
+        if wanted is not None and str(tag) not in wanted:
+            continue
+        if wanted is None and not _is_body_marker(tag):
+            continue
+        for etype, nodes in elems:
+            if int(etype) != 3 or len(nodes) < 2:
+                continue
+            try:
+                a = pts[int(nodes[0])]
+                b = pts[int(nodes[1])]
+            except (IndexError, ValueError):
+                continue
+            segs.append(((float(a[0]), float(a[1])),
+                         (float(b[0]), float(b[1]))))
+    return segs
+
+
+def chain_loops(segments: Sequence, tol_rel: float = 1e-6) -> list:
+    """Склеить сегменты в замкнутые петли.
+
+    ``segments`` — пары 2D-точек. Концы свариваются с допуском
+    ``tol_rel`` от диаграммы габаритов. Возвращает список петель
+    (списков точек (x, y)); последняя точка НЕ повторяет первую.
+    """
+    if not segments:
+        return []
+    xs = [p[0] for s in segments for p in s]
+    ys = [p[1] for s in segments for p in s]
+    diag = max(max(xs) - min(xs), max(ys) - min(ys), 1e-12)
+    tol = tol_rel * diag
+
+    def key(p):
+        return (int(round(p[0] / tol)), int(round(p[1] / tol)))
+
+    adj: dict = {}
+    for si, (a, b) in enumerate(segments):
+        adj.setdefault(key(a), []).append((si, key(b)))
+        adj.setdefault(key(b), []).append((si, key(a)))
+    used = [False] * len(segments)
+    loops = []
+    for si0 in range(len(segments)):
+        if used[si0]:
+            continue
+        used[si0] = True
+        a, b = segments[si0]
+        loop_keys = [key(a), key(b)]
+        loop_pts = {key(a): a, key(b): b}
+        # расширяем в обе стороны
+        for direction in (0, 1):
+            while True:
+                cur = loop_keys[-1] if direction == 0 else loop_keys[0]
+                nxt = None
+                for sj, other in adj.get(cur, ()):
+                    if not used[sj]:
+                        nxt = (sj, other)
+                        break
+                if nxt is None:
+                    break
+                sj, other = nxt
+                used[sj] = True
+                if direction == 0:
+                    loop_keys.append(other)
+                else:
+                    loop_keys.insert(0, other)
+                # координаты другого конца сегмента
+                sa, sb = segments[sj]
+                for pp in (sa, sb):
+                    if key(pp) == other:
+                        loop_pts[other] = pp
+                        break
+                if other == loop_keys[0 if direction == 0 else 1] and \
+                        len(loop_keys) > 2:
+                    break
+        # замкнутая петля: первый и последний ключ совпадают
+        if len(loop_keys) >= 4 and loop_keys[0] == loop_keys[-1]:
+            loop_keys = loop_keys[:-1]
+            loops.append([loop_pts[k] for k in loop_keys])
+    return loops
+
+
+def _triangulate_polygon(pts: Sequence) -> list:
+    """Триангуляция простого полигона (ухластая вырезка).
+
+    ``pts`` — вершины в порядке обхода против часовой стрелки в плоскости
+    (x, z). Возвращает тройки индексов вершин. Вырожденные/невыпуклые
+    места терпит; совсем испорченный полигон отдаёт веером.
+    """
+    n = len(pts)
+    if n < 3:
+        return []
+    idx = list(range(n))
+    tris = []
+
+    def cross(o, a, b):
+        return ((a[0] - o[0]) * (b[1] - o[1])
+                - (a[1] - o[1]) * (b[0] - o[0]))
+
+    guard = 0
+    while len(idx) > 3 and guard < 20 * n * n:
+        guard += 1
+        m = len(idx)
+        cut = False
+        for k in range(m):
+            i0, i1, i2 = idx[k - 1], idx[k], idx[(k + 1) % m]
+            a, b, c = pts[i0], pts[i1], pts[i2]
+            if cross(a, b, c) <= 1e-14:
+                continue                       # рефлексный/вырожденный угол
+            ok = True
+            for j in idx:
+                if j in (i0, i1, i2):
+                    continue
+                p = pts[j]
+                if (cross(a, b, p) >= -1e-14
+                        and cross(b, c, p) >= -1e-14
+                        and cross(c, a, p) >= -1e-14):
+                    ok = False
+                    break
+            if ok:
+                tris.append((i0, i1, i2))
+                idx.pop(k)
+                cut = True
+                break
+        if not cut:
+            break
+    if len(idx) == 3:
+        tris.append((idx[0], idx[1], idx[2]))
+    elif len(idx) > 3:                          # fallback: веер
+        for k in range(1, len(idx) - 1):
+            tris.append((idx[0], idx[k], idx[k + 1]))
+    return tris
+
+
+def extrude_loop_to_solid(loop: Sequence, span: float) -> tuple:
+    """Вытянуть 2D-контур (x, y) в замкнутое 3D-тело по оси Y.
+
+    Контур профиля лежит в плоскости XZ (2D-сетка SU2: x — хорда,
+    y — вертикаль -> у приложения вертикаль это Z). Тело занимает
+    Y из ``[-span/2, +span/2]``, торцы — плоские крышки. Ориентация
+    граней — наружу. Возвращает (points, faces).
+    """
+    if len(loop) < 3 or span <= 0:
+        return [], []
+    h = 0.5 * float(span)
+    # Контур против часовой стрелки в (x, z): знаковая площадь > 0.
+    area2 = 0.0
+    for k in range(len(loop)):
+        x1, y1 = loop[k]
+        x2, y2 = loop[(k + 1) % len(loop)]
+        area2 += x1 * y2 - x2 * y1
+    pts2d = list(loop) if area2 > 0 else list(loop)[::-1]
+    # Убрать дубли вершин (замыкание петли могло остаться в списке).
+    clean = []
+    seen = set()
+    for p in pts2d:
+        k = (round(p[0], 12), round(p[1], 12))
+        if k in seen:
+            continue
+        seen.add(k)
+        clean.append(p)
+    if len(clean) < 3:
+        return [], []
+    verts = []
+    bot_of = []
+    top_of = []
+    for (x, y) in clean:
+        bot_of.append(len(verts)); verts.append((x, -h, y))
+        top_of.append(len(verts)); verts.append((x, +h, y))
+    faces = []
+    n = len(clean)
+    # Кожа: для ребра (i -> i+1) CCW наружная нормаль (dz, 0, -dx).
+    for i in range(n):
+        i2 = (i + 1) % n
+        b1, t1 = bot_of[i], top_of[i]
+        b2, t2 = bot_of[i2], top_of[i2]
+        faces.append((b1, t1, t2))
+        faces.append((b1, t2, b2))
+    # Крышки: низ наружу -Y, верх наружу +Y.
+    cap = _triangulate_polygon(clean)
+    for (a, b, c) in cap:
+        faces.append((bot_of[a], bot_of[c], bot_of[b]))   # низ: -Y
+        faces.append((top_of[a], top_of[b], top_of[c]))   # верх: +Y
+    return verts, faces
+
+
+def open_boundary_plane(points: Sequence, faces: Sequence):
+    """Ось, на плоскости по которой лежат ВСЕ открытые рёбра, или None.
+
+    Открытое ребро — ребро с кратностью 1. У полу-моделей SU2 открытый
+    край лежит в плоскости симметрии (y=0 и т.п.).
+    """
+    from collections import Counter
+    cnt = Counter()
+    for f in faces:
+        a, b, c = int(f[0]), int(f[1]), int(f[2])
+        for (u, v) in ((a, b), (b, c), (c, a)):
+            cnt[(u, v) if u < v else (v, u)] += 1
+    open_edges = [e for e, k in cnt.items() if k == 1]
+    if not open_edges:
+        return None
+    verts = sorted({v for e in open_edges for v in e})
+    p = np.asarray([points[v] for v in verts], dtype=float)
+    diag = float(np.ptp(np.asarray(points, dtype=float), axis=0).max()) or 1.0
+    for axis in range(3):
+        vals = p[:, axis]
+        if float(np.abs(vals - vals[0]).max()) <= 1e-5 * diag:
+            return axis, float(vals[0])
+    return None
+
+
+def mirror_close_solid(points: Sequence, faces: Sequence):
+    """Зеркалировать открытую полу-модель по плоскости открытого края.
+
+    Возвращает (points, faces) замкнутого тела или None, если открытый
+    край не лежит ни в одной координатной плоскости.
+    """
+    plane = open_boundary_plane(points, faces)
+    if plane is None:
+        return None
+    axis, coord = plane
+    pts = [tuple(float(c) for c in p) for p in points]
+    m = pts + [tuple(2.0 * coord - p[axis] if k == axis else p[k]
+                     for k in range(3)) for p in pts]
+    faces = [tuple(int(x) for x in f) for f in faces]
+    mfaces = faces + [tuple(reversed(f)) for f in
+                      [(a + len(pts), b + len(pts), c + len(pts))
+                       for (a, b, c) in faces]]
+    # Сварка совпавших вершин (квантование от габарита).
+    arr = np.asarray(m, dtype=float)
+    diag = float(np.ptp(arr, axis=0).max()) or 1.0
+    q = np.round(arr / (1e-7 * diag)).astype(np.int64)
+    uniq: dict = {}
+    remap = []
+    for row in q:
+        t = tuple(row)
+        if t not in uniq:
+            uniq[t] = len(uniq)
+        remap.append(uniq[t])
+    out_pts = [None] * len(uniq)
+    for old_i, new_i in enumerate(remap):
+        if out_pts[new_i] is None:
+            out_pts[new_i] = m[old_i]
+    # ВАЖНО: не сортируем узлы внутри грани — сортировка уничтожает
+    # ориентацию, и знаковый объём замкнутой поверхности схлопывается
+    # в нуль (замерено на полу-боксе). Дубликаты снимаем точным
+    # совпадением троек в исходном порядке обхода.
+    out_faces = [t for t in dict.fromkeys(
+        (remap[a], remap[b], remap[c]) for (a, b, c) in mfaces)]
+    # Ориентация наружу: знаковый объём > 0, иначе всё вывернуть.
+    vol6 = 0.0
+    for (a, b, c) in out_faces:
+        p0, p1, p2 = np.asarray(out_pts[a]), np.asarray(out_pts[b]), \
+            np.asarray(out_pts[c])
+        vol6 += float(np.dot(p0, np.cross(p1, p2)))
+    if vol6 < 0:
+        out_faces = [tuple(reversed(f)) for f in out_faces]
+    return out_pts, out_faces
+
+
+def fix_body_surface(mesh_path: str, markers: Optional[Sequence[str]] = None,
+                     span_factor: float = 2.0) -> Optional[dict]:
+    """Довести поверхность официального кейса до замкнутого тела.
+
+    Возвращает dict с ключами points/triangles/note или None, если
+    починить не удалось. Порядок попыток:
+
+    1. Уже замкнута — вернуть как есть.
+    2. 2D-профиль (NDIME=2, контур из линий) — вытянуть по размаху
+       ``span_factor`` × хорда (по умолчанию 2 хорды): получается
+       конечное крыло; вычислительно это 3D, у торцов теряется часть
+       подъёмной силы — честное приближение, а не 2D-постановка.
+    3. Открытая полу-модель с краем в координатной плоскости —
+       зеркалирование с сваркой.
+    """
+    surf = read_su2_boundary(mesh_path, markers=markers)
+    tris = surf.get("triangles") or []
+    pts = surf.get("points") or []
+    if tris and is_manifold_closed(tris):
+        return {"points": pts, "triangles": tris,
+                "note": "поверхность уже замкнута"}
+    # Попытка 2: 2D-профиль.
+    try:
+        segs = read_profile_segments(mesh_path, markers=markers)
+        loops = chain_loops(segs)
+    except Exception:
+        loops = []
+    if loops:
+        loop = max(loops, key=len)
+        xs = [p[0] for p in loop]
+        chord = max(xs) - min(xs)
+        if chord > 0:
+            span = float(span_factor) * chord
+            v3, f3 = extrude_loop_to_solid(loop, span)
+            if v3 and is_manifold_closed(f3):
+                return {"points": v3, "triangles": f3,
+                        "note": ("2D-профиль (%d точек контура) вытянут в "
+                                 "тело: размах %.4g = %.1f хорд. Это "
+                                 "конечное крыло, а не 2D-постановка: у "
+                                 "торцов часть подъёмной силы теряется."
+                                 % (len(loop), span, span_factor))}
+    # Попытка 3: открытая полу-модель.
+    if tris and pts:
+        try:
+            m = mirror_close_solid(pts, tris)
+        except Exception:
+            m = None
+        if m is not None:
+            mp, mf = m
+            if is_manifold_closed(mf):
+                return {"points": mp, "triangles": mf,
+                        "note": ("полу-модель отражена по плоскости "
+                                 "открытого края: %d -> %d граней"
+                                 % (len(tris), len(mf)))}
+    return None

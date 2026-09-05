@@ -61,8 +61,9 @@ from PyQt5.QtWidgets import (
     QSplitter, QScrollArea, QTreeWidget, QTreeWidgetItem, QStackedWidget,
     QToolTip, QSlider, QInputDialog, QSizePolicy, QFrame,
 )
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject, QLockFile, QStandardPaths
-from PyQt5.QtGui import QColor, QFont, QMouseEvent
+from PyQt5.QtCore import (Qt, QTimer, QThread, pyqtSignal, QObject, QLockFile,
+                          QStandardPaths, QEvent)
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QMouseEvent
 
 from config.settings import (
     ROLES, ROLE_COLORS, MESH_QUALITY, WORK_DIR_BASE, RESULTS_DIR,
@@ -88,7 +89,7 @@ from mesh.gmsh_generator import generate_mesh_impl
 from mesh.mesh_worker import MeshWorker, MeshAdaptWorker
 from solver.workers import (
     SU2Worker, SweepWorker, OptimizationWorker, SessionRunner,
-    OfficialCaseRunWorker, hidden_subprocess_kwargs, _mesh_npoin,
+    hidden_subprocess_kwargs, _mesh_npoin,
 )
 from solver.session import CalculationSession
 
@@ -427,6 +428,72 @@ class AeroPlotCanvas(FigureCanvas):
 # ---------------------------------------------------------------------------
 # Главное окно
 # ---------------------------------------------------------------------------
+class _ButtonTextFitFilter(QObject):
+    """Сжимает шрифт QPushButton, если текст не влезает в кнопку.
+
+    Фильтр ставится на QApplication и ловит Resize/Show всех кнопок
+    (включая диалоги). При нехватке ширины размер шрифта уменьшается
+    от базового (11px, как в стиле окна) до 7px; при расширении кнопки
+    возвращается обратно. Стиль кнопки не затирается: размер шрифта
+    дописывается к исходному styleSheet — под стиль приложения
+    (font-size задаётся в CSS, поэтому QFont/QSetFont здесь не работает).
+    """
+
+    BASE_PX = 11
+    MIN_PX = 7
+
+    def eventFilter(self, obj, event):
+        try:
+            if (event.type() in (QEvent.Resize, QEvent.Show)
+                    and isinstance(obj, QPushButton)):
+                self._fit(obj)
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _fit(btn):
+        text = btn.text()
+        if not text:
+            return
+        w = btn.width()
+        if w <= 0:
+            return
+        avail = w - 26                 # паддинги 12px + рамка 1px с двух сторон
+        if btn.menu() is not None:
+            avail -= 16                # стрелка раскрывающегося меню
+        if avail <= 20:
+            return
+        base = btn.property("_fit_base_px")
+        if base is None:
+            base = _ButtonTextFitFilter.BASE_PX
+            btn.setProperty("_fit_base_px", base)
+        base_style = btn.property("_fit_base_style")
+        if base_style is None:
+            base_style = btn.styleSheet() or ""
+            btn.setProperty("_fit_base_style", base_style)
+        cur = btn.property("_fit_cur_px")
+        probe = QFont(btn.font())
+        probe.setPixelSize(int(base))
+        if QFontMetrics(probe).horizontalAdvance(text) <= avail:
+            # Влезает базовым — снять сжатие, если оно было.
+            if cur is not None and int(cur) != int(base):
+                btn.setStyleSheet(base_style)
+                btn.setProperty("_fit_cur_px", None)
+            return
+        size = int(cur) if cur else int(base)
+        size = min(size, int(base))
+        while size > _ButtonTextFitFilter.MIN_PX:
+            probe.setPixelSize(size)
+            if QFontMetrics(probe).horizontalAdvance(text) <= avail:
+                break
+            size -= 1
+        if cur is None or int(cur) != size:
+            add = ("font-size: %dpx;" % size)
+            btn.setStyleSheet((base_style + "\n" if base_style else "") + add)
+            btn.setProperty("_fit_cur_px", size)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -487,6 +554,15 @@ class MainWindow(QMainWindow):
                 background-color: #FBFBFC; border-bottom-color: #FBFBFC; font-weight: bold;
             }
         """)
+
+        # Текст кнопок не должен выходить за границы кнопок: при
+        # нехватке ширины шрифт кнопки сжимается автоматически (и
+        # возвращается обратно при расширении). Фильтр на QApplication —
+        # покрывает и диалоги.
+        _app = QApplication.instance()
+        if _app is not None:
+            self._btn_fit_filter = _ButtonTextFitFilter(self)
+            _app.installEventFilter(self._btn_fit_filter)
 
         # ------------------------ данные -------------------------------
         # Полётные условия — теперь единый объект
@@ -966,9 +1042,12 @@ class MainWindow(QMainWindow):
         # кнопка всё равно создаётся, но остаётся выключенной.
         self.btn_add_official = QPushButton("Официальная геометрия")
         self.btn_add_official.setToolTip(
-            "Добавить геометрию из официального тест-кейса SU2 (ONERA M6 "
-            "и др.) как компонент. 3D-сетка при необходимости скачивается "
-            "из официального репозитория SU2 в official_cases/meshes/.")
+            "Добавить геометрию из официального тест-кейса SU2 (ONERA M6, "
+            "NACA0012, RAE2822 и др.) как компонент. 3D-сетка при "
+            "необходимости скачивается из официального репозитория SU2. "
+            "Незамкнутая поверхность (2D-профиль, полу-модель) автоматически "
+            "доводится до тела; сетка строится своя, расчёт запускается "
+            "вручную — автозапуска официального кейса больше нет.")
         if official_cases is None:
             self.btn_add_official.setEnabled(False)
         else:
@@ -3716,8 +3795,42 @@ class MainWindow(QMainWindow):
         # плоские контуры. Ни то, ни другое телооблекающая сетка не облегает,
         # и повторный re-mesh даёт ступенчатую сетку и мусорные Cl/Cd.
         if not tris or not pts or not official_cases.is_manifold_closed(tris):
-            self._prepare_official_case_run(case, case_id, markers)
-            return
+            # Официальная поверхность не годится для телооблегающей сетки
+            # как есть: у 2D-профилей (NACA0012, RAE2822) маркер стенки —
+            # линии контура, у полу-моделей (ONERA M6) — открытая
+            # оболочка. Пробуем починить геометрию до замкнутого тела
+            # (профиль — вытяжкой по размаху, полу-модель — зеркалом).
+            # АВТОЗАПУСКА ОФИЦИАЛЬНОГО КЕЙСА БОЛЬШЕ НЕТ: геометрия
+            # добавляется как обычное тело — сетку строим свою, расчёт
+            # запускается кнопкой Расчёт, как у любой геометрии.
+            fixed = None
+            try:
+                fixed = official_cases.fix_body_surface(
+                    mesh_path, markers=markers or None)
+            except Exception as e:
+                self.log_text.append(
+                    f"Внимание: починить геометрию «{case.name}» не "
+                    f"удалось: {type(e).__name__}: {e}")
+            if fixed is None:
+                self.log_text.append(
+                    f"Внимание: «{case.name}» — поверхность не замкнута, "
+                    f"и автоматически превратить её в тело не удалось. "
+                    f"Телооблегающую сетку вокруг такой поверхности "
+                    f"строить нельзя. Официальный кейс можно запустить "
+                    f"вручную по его эталонной сетке: "
+                    f"python -m official_cases prepare {case_id} <каталог>")
+                QMessageBox.warning(
+                    self, "Официальная геометрия",
+                    f"«{case.name}»: официальная поверхность не замкнута "
+                    f"(2D-профиль или полу-модель), автоматически в "
+                    f"замкнутое тело её превратить не удалось.\n\n"
+                    f"Сетка вокруг такой поверхности не строится. Кейс "
+                    f"можно запустить вручную по официальной сетке:\n"
+                    f"python -m official_cases prepare {case_id} <каталог>")
+                return
+            pts = fixed["points"]
+            tris = fixed["triangles"]
+            self.log_text.append("Готово: %s" % fixed.get("note", ""))
 
         # Собираем pyvista.PolyData из точек и треугольников.
         try:
@@ -3756,66 +3869,6 @@ class MainWindow(QMainWindow):
                 f"{len(pts)} точек, {len(tris)} треугольников, "
                 f"маркеры: {list(surf.get('markers') or {})}")
         self.update_flow_arrow()
-
-    def _start_official_run(self, case, case_dir):
-        """Запускает подготовленный официальный кейс в фоне (один клик)."""
-        compute_device = getattr(self, "_compute_device_pending", "cpu")
-        gpu_percent = int(getattr(self, "_gpu_percent_pending", 0) or 0)
-        cpu_cores = 1
-        sess = getattr(self, "session", None)
-        if sess is not None:
-            cpu_cores = int(getattr(sess, "cpu_cores", 1) or 1)
-        worker = OfficialCaseRunWorker(
-            case_dir, cpu_cores=cpu_cores,
-            compute_device=compute_device, gpu_percent=gpu_percent,
-            case_name=case.name, ref_cl=case.ref_cl, ref_cd=case.ref_cd,
-            parent=self,
-        )
-        worker.log_signal.connect(self.log_text.append)
-        worker.finished_signal.connect(self._on_official_run_finished)
-        self._official_workers = getattr(self, "_official_workers", [])
-        self._official_workers.append(worker)
-        self.log_text.append(
-            f"Внимание: запускаю официальный кейс «{case.name}» напрямую "
-            f"(его эталонная сетка SU2). Это {case.solver}-расчёт по "
-            f"официальному config.cfg.")
-        worker.start()
-
-    def _on_official_run_finished(self, ok, message):
-        self.log_text.append(message)
-        QMessageBox.information(
-            self, "Официальный кейс",
-            message if ok else f"Не удалось выполнить официальный кейс.\n\n{message}")
-
-    def _prepare_official_case_run(self, case, case_id, markers):
-        """Готовит официальный кейс к запуску и запускает его (один клик).
-
-        Официальные сетки SU2 — это уже построенные телооблегающие объёмные
-        меши (крыло/профиль + дальнее поле + симметрия). Они НЕ являются
-        замкнутыми телами, поэтому телооблекающую сетку заново из них не
-        построить — только ступеньку, на которой SU2 расходится. Вместо
-        этого кейс запускается как есть по официальным сетке и config.cfg
-        (это и есть эталонная сетка), а пользователь получает эталонные Cl/Cd.
-        """
-        import os
-        out_dir = os.path.join(WORK_DIR_BASE, f"_official_{case_id}")
-        try:
-            official_cases.prepare_case_run_dir(case_id, out_dir)
-        except Exception as e:
-            self.log_text.append(
-                f"Ошибка: не удалось подготовить официальный кейс "
-                f"«{case.name}»: {e}")
-            QMessageBox.critical(
-                self, "Официальная геометрия",
-                f"Не удалось подготовить официальный кейс «{case.name}».\n\n"
-                f"{type(e).__name__}: {e}")
-            return
-        self.log_text.append(
-            f"Внимание: «{case.name}» — официальная объёмная сетка SU2, а не "
-            f"замкнутое тело. Повторно облечь её сеткой нельзя (получилась бы "
-            f"ступенька и мусорные Cl/Cd), поэтому кейс запускается как есть: "
-            f"эталонная сетка + официальный config.cfg.")
-        self._start_official_run(case, out_dir)
 
     # =============================================================
     # ТАБЛИЦА ТЕЛ

@@ -76,6 +76,11 @@ from .surface import (
     parse_su2_text,
     read_su2_boundary,
     is_manifold_closed,
+    read_profile_segments,
+    chain_loops,
+    extrude_loop_to_solid,
+    mirror_close_solid,
+    fix_body_surface,
 )
 
 __all__ = [
@@ -106,4 +111,9 @@ __all__ = [
     "parse_su2_text",
     "read_su2_boundary",
     "is_manifold_closed",
+    "read_profile_segments",
+    "chain_loops",
+    "extrude_loop_to_solid",
+    "mirror_close_solid",
+    "fix_body_surface",
 ]
