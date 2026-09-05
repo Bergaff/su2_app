@@ -31,6 +31,7 @@ import glob
 import json
 import os
 import re
+import sys
 
 try:
     from PyQt5.QtWidgets import (
@@ -48,6 +49,14 @@ except ImportError:  # PySide2
     from PySide2.QtCore import Qt
 
 import su2_autoconfig
+
+# Официальные кейсы SU2 (конфиги + 3D-сетки) — вспомогательный stdlib-пакет.
+# Если его нет (например, при частичной сборке), диалог просто скроет
+# соответствующую группу.
+try:
+    import official_cases
+except Exception:                                        # pragma: no cover
+    official_cases = None
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +90,11 @@ try:
     import su2_preset_format
 except Exception:                                        # pragma: no cover
     su2_preset_format = None
+
+# Пресеты с официальных кейсов SU2 (заполняются после определения PARAMS).
+# Каждый пресет — это настройки, которые реально стоят в официальном
+# config.cfg, сверенные с полями диалога. Нельзя удалить/переименовать.
+OFFICIAL_PRESETS = {}     # имя -> {ключ: значение}
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +267,109 @@ PARAMS = [
 
 
 # ---------------------------------------------------------------------------
+# Официальные пресеты SU2 (из встроенных официальных config.cfg)
+# ---------------------------------------------------------------------------
+# Ключи, которые диалог умеет показывать/применять. Для официального пресета
+# берём только их — в официальном config.cfg сотни строк (в т.ч. DV_*,
+# FFD_* для оптимизации), которые диалог не умеет показать и применять
+# не должен (они меняют постановку, а не численную схему).
+_DIALOG_PARAM_KEYS = {row[1] for row in PARAMS}
+
+
+def read_config_text_keys(text: str) -> dict:
+    """Разбирает текст config.cfg в словарь активных ``KEY= value``.
+
+    Отличается от ``read_config`` тем, что принимает строку, а не файл, и
+    работает с '%' как единственным комментарием SU2 (как и сам SU2).
+    """
+    out = {}
+    for raw in (text or "").splitlines():
+        s = raw.split("%", 1)[0].strip()
+        if not s or "=" not in s:
+            continue
+        key, _, val = s.partition("=")
+        k = key.strip()
+        if k:
+            out[k] = val.strip()
+    return out
+
+
+def _map_official_cfg_to_preset(text: str) -> dict:
+    """Собирает из официального config.cfg пресет только из диалоговых ключей."""
+    cfg = read_config_text_keys(text)
+    return {k: v for k, v in cfg.items() if k in _DIALOG_PARAM_KEYS}
+
+
+def _official_metadata_params(case) -> dict:
+    """Запасные параметры пресета из метаданных кейса.
+
+    Используется, когда встроенный ``config.cfg`` кейса не удалось прочитать
+    (например, в собранном приложении не развёрнута папка ``configs/`` или
+    файл повреждён). Так пресет всё равно появится в списке и задаст хотя бы
+    решатель и режим обтекания — этого достаточно, чтобы не считать
+    сжимаемым решателем на малых скоростях.
+    """
+    params = {}
+    solver = getattr(case, "solver", None)
+    if solver:
+        params["SOLVER"] = solver
+    mach = getattr(case, "mach", None)
+    if mach is not None and float(mach) > 0:
+        params["MACH_NUMBER"] = "%.6f" % float(mach)
+    aoa = getattr(case, "aoa", None)
+    if aoa is not None:
+        params["AOA"] = "%.2f" % float(aoa)
+    return params
+
+
+def _build_official_presets():
+    """Наполняет ``OFFICIAL_PRESETS`` из встроенных официальных кейсов SU2.
+
+    Каждый пресет — это настройки, которые реально стоят в официальном
+    config.cfg, но только те, которые диалог умеет применить. Значения
+    «заморожены» на момент импорта: правки официальных файлов в
+    ``official_cases/configs/`` подхватятся при следующем запуске.
+
+    Один неудачный кейс не рушит всё: ошибка чтения конкретного
+    ``config.cfg`` логируется в stderr, а пресет строится из метаданных,
+    чтобы он остался доступен в выпадающем списке.
+    """
+    if official_cases is None:
+        return
+    OFFICIAL_PRESETS.clear()
+    for cid in official_cases.list_cases():
+        try:
+            case = official_cases.get_case(cid)
+        except Exception as e:                               # pragma: no cover
+            print(f"su2_config_dialog: не удалось получить кейс {cid}: {e}",
+                  file=sys.stderr)
+            continue
+        params = {}
+        try:
+            text = official_cases.bundled_config_text(case.config_file)
+            params = _map_official_cfg_to_preset(text)
+        except Exception as e:                               # pragma: no cover
+            print(f"su2_config_dialog: не прочитан config.cfg кейса "
+                  f"{cid}: {e}", file=sys.stderr)
+        if not params:
+            # Запасной вариант из метаданных — чтобы пресет был в списке.
+            params = _official_metadata_params(case)
+        if not params:
+            continue
+        name = "Официальный: %s" % case.name
+        OFFICIAL_PRESETS[name] = {
+            "case_id": cid,
+            "description": case.description,
+            "solver": case.solver,
+            "params": params,
+        }
+
+
+# Заполняем после того, как PARAMS определён.
+_build_official_presets()
+
+
+# ---------------------------------------------------------------------------
 # Чтение/запись config.cfg (активные строки KEY= value; '%' - комментарий SU2)
 # ---------------------------------------------------------------------------
 
@@ -343,9 +460,29 @@ def save_user_presets(presets):
 
 
 def all_presets():
+    """Все пресеты: встроенные + официальные + пользовательские.
+
+    Официальные пресеты раскрываются до плоского ``{ключ: значение}``,
+    чтобы вызывающий код (`_apply_preset_to_fields`) работал одинаково.
+    Метаданные (описание, SOLVER, id кейса) лежат в ``OFFICIAL_PRESETS`` и
+    доступны через ``official_preset_meta``.
+    """
     p = dict(BUILTIN_PRESETS)
+    for name, meta in OFFICIAL_PRESETS.items():
+        p[name] = dict(meta["params"])
     p.update(load_user_presets())
     return p
+
+
+def official_preset_meta(name):
+    """Метаданные официального пресета или None."""
+    return OFFICIAL_PRESETS.get(name)
+
+
+def _is_reserved_preset(name):
+    """Встроенные (ultra/safe) и официальные пресеты нельзя переименовывать
+    или удалять — но задать поля по ним можно."""
+    return name in BUILTIN_PRESETS or name in OFFICIAL_PRESETS
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +580,9 @@ class Su2ConfigDialog(QDialog):
         self.preset_combo.currentTextChanged.connect(self._show_preset_params)
         root.addWidget(self.lbl_preset_params)
         self._show_preset_params()
+
+        # ---- официальные кейсы SU2 (конфиги + 3D-сетки) ----
+        self._build_official_group(root)
 
         # ---- кнопки ----
         btns = QHBoxLayout()
@@ -586,6 +726,11 @@ class Su2ConfigDialog(QDialog):
                                 "Это имя зарезервировано за встроенным "
                                 "пресетом. Выбери другое.")
             return
+        if name in OFFICIAL_PRESETS:
+            QMessageBox.warning(self, "Мой пресет",
+                                "Это имя занято официальным пресетом SU2. "
+                                "Выбери другое.")
+            return
         presets = load_user_presets()
         presets[name] = self._collect_values()
         save_user_presets(presets)
@@ -612,6 +757,14 @@ class Su2ConfigDialog(QDialog):
                 name, info[0] or "пресет")
             if info[1]:
                 head += "\n" + info[1]
+        elif official_preset_meta(name) is not None:
+            meta = official_preset_meta(name)
+            head = "Официальный пресет «%s» — %s. Настройки взяты из " \
+                   "официального config.cfg кейса '%s'. Изменить нельзя: " \
+                   "сохраните под своим именем." % (
+                name, meta["solver"], meta["case_id"])
+            if meta["description"]:
+                head += "\n" + meta["description"]
         else:
             head = "Мой пресет «%s»." % name
         self.lbl_preset_params.setText("%s\nКлючей: %d\n%s" % (head, len(p), lines))
@@ -624,6 +777,12 @@ class Su2ConfigDialog(QDialog):
                                     "Встроенные пресеты ultra и safe "
                                     "переименовывать нельзя.")
             return
+        if name in OFFICIAL_PRESETS:
+            QMessageBox.information(self, "Переименование",
+                                    "Официальные пресеты SU2 переименовывать "
+                                    "нельзя — они соответствуют эталонным "
+                                    "config.cfg.")
+            return
         presets = load_user_presets()
         if name not in presets:
             return
@@ -634,7 +793,7 @@ class Su2ConfigDialog(QDialog):
         new = new.strip()
         if not new or new == name:
             return
-        if new in BUILTIN_PRESETS or new in presets:
+        if new in BUILTIN_PRESETS or new in OFFICIAL_PRESETS or new in presets:
             QMessageBox.warning(self, "Переименование",
                                 "Имя «%s» уже занято." % new)
             return
@@ -677,11 +836,177 @@ class Su2ConfigDialog(QDialog):
                 self, "Мой пресет",
                 "Встроенные пресеты удалять нельзя.")
             return
+        if name in OFFICIAL_PRESETS:
+            QMessageBox.information(
+                self, "Мой пресет",
+                "Официальные пресеты SU2 удалять нельзя.")
+            return
         presets = load_user_presets()
         if name in presets:
             del presets[name]
             save_user_presets(presets)
             self._reload_preset_combo()
+
+    # ---- официальные кейсы SU2 (эталонные конфиги и 3D-сетки) ----
+    def _build_official_group(self, root):
+        """Добавляет группу «Официальные кейсы SU2» в диалог.
+
+        Полностью вспомогательная: не меняет существующие пресеты и поля,
+        а даёт доступ к официальным config.cfg SU2, скачиванию официальных
+        3D-сеток и диагностике «неправдоподобных значений».
+        """
+        box = QGroupBox("Официальные кейсы SU2 (эталонные конфиги)")
+        lay = QVBoxLayout(box)
+
+        if official_cases is None:
+            lay.addWidget(QLabel(
+                "Пакет official_cases не загружен — эталонные кейсы SU2 "
+                "недоступны."))
+            root.addWidget(box)
+            return
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Кейс:"))
+        self.official_combo = QComboBox()
+        self._reload_official_combo()
+        self.official_combo.currentTextChanged.connect(
+            self._on_official_selected)
+        row.addWidget(self.official_combo, 1)
+        lay.addLayout(row)
+
+        self.lbl_official = QLabel("")
+        self.lbl_official.setWordWrap(True)
+        self.lbl_official.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_official.setStyleSheet(
+            "color: #4A4A4A; font-size: 10px; "
+            "font-family: Consolas, monospace;")
+        lay.addWidget(self.lbl_official)
+        self._on_official_selected()
+
+        btns = QHBoxLayout()
+        b_dl = QPushButton("Скачать 3D-сетку")
+        b_dl.setToolTip("Скачать официальную сетку SU2 (3D-модель) в "
+                        "official_cases/meshes/.")
+        b_dl.clicked.connect(self._on_official_download)
+        btns.addWidget(b_dl)
+        b_wr = QPushButton("Записать конфиг рядом…")
+        b_wr.setToolTip("Сохранить официальный config.cfg в каталог "
+                        "текущего config.cfg (файл official_<id>.cfg), не "
+                        "трогая ваш config.cfg.")
+        b_wr.clicked.connect(self._on_official_write)
+        btns.addWidget(b_wr)
+        b_cmp = QPushButton("Сравнить с моим")
+        b_cmp.setToolTip("Разобрать ваш config.cfg и объяснить, почему "
+                         "значения могут быть неправдоподобно большими.")
+        b_cmp.clicked.connect(self._on_official_compare)
+        btns.addWidget(b_cmp)
+        lay.addLayout(btns)
+
+        root.addWidget(box)
+
+    def _reload_official_combo(self):
+        if official_cases is None:
+            return
+        self.official_combo.clear()
+        for cid in official_cases.list_cases():
+            case = official_cases.get_case(cid)
+            self.official_combo.addItem("%s — %s" % (cid, case.name), cid)
+
+    def _selected_official_id(self):
+        if official_cases is None:
+            return None
+        return self.official_combo.currentData()
+
+    def _on_official_selected(self):
+        cid = self._selected_official_id()
+        if not cid:
+            return
+        try:
+            case = official_cases.get_case(cid)
+        except Exception:
+            self.lbl_official.setText("")
+            return
+        parts = [
+            "%s (%sD)" % (case.solver, case.dimension),
+        ]
+        if case.mach is not None:
+            parts.append("M=%.3f" % case.mach)
+        if case.aoa is not None:
+            parts.append("AoA=%.2f°" % case.aoa)
+        if case.reynolds is not None:
+            parts.append("Re=%.3g" % case.reynolds)
+        lines = [case.name]
+        lines.append(" · ".join(parts) if parts else "")
+        if case.ref_cl is not None:
+            lines.append("Эталон SU2 (итер. %s): CL=%s, CD=%s" % (
+                case.ref_iter or "?", case.ref_cl, case.ref_cd))
+        mesh_note = "Сетка: %s" % case.mesh_filename if case.mesh_filename else \
+            "Сетка: нет"
+        if case.mesh_size:
+            mesh_note += " (%s байт)" % case.mesh_size
+        lines.append(mesh_note)
+        if case.notes:
+            lines.append("  " + case.notes)
+        self.lbl_official.setText("\n".join(lines))
+
+    def _on_official_download(self):
+        cid = self._selected_official_id()
+        if not cid:
+            return
+        try:
+            path = official_cases.download_mesh(cid)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Официальные кейсы SU2",
+                "Не удалось скачать сетку «%s»:\n%s\n\n"
+                "Нужен доступ к api.github.com (сетки SU2 качаются по "
+                "требованию)." % (cid, e))
+            return
+        QMessageBox.information(
+            self, "Официальные кейсы SU2",
+            "Сетка скачана:\n%s\n\n"
+            "Положите её рядом с config.cfg кейса, чтобы SU2 её нашёл." % path)
+
+    def _on_official_write(self):
+        cid = self._selected_official_id()
+        if not cid:
+            return
+        try:
+            case = official_cases.get_case(cid)
+        except Exception as e:
+            QMessageBox.critical(self, "Официальные кейсы SU2", str(e))
+            return
+        case_dir = os.path.dirname(os.path.abspath(self.config_path)) \
+            if self.config_path else os.getcwd()
+        out = os.path.join(case_dir, "official_%s.cfg" % cid)
+        text = official_cases.bundled_config_text(case.config_file)
+        try:
+            with open(out, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+        except OSError as e:
+            QMessageBox.critical(self, "Официальные кейсы SU2",
+                                 "Не удалось записать файл:\n%s" % e)
+            return
+        QMessageBox.information(
+            self, "Официальные кейсы SU2",
+            "Официальный config.cfg записан:\n%s\n\n"
+            "Ваш config.cfg не изменён. Этот файл можно открыть и сравнить "
+            "с текущим (например, через «Сравнить с моим»)." % out)
+
+    def _on_official_compare(self):
+        if not self.config_path or not os.path.exists(self.config_path):
+            QMessageBox.warning(self, "Официальные кейсы SU2",
+                                "Сначала откройте config.cfg кейса.")
+            return
+        try:
+            res = official_cases.compare_file(self.config_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Официальные кейсы SU2",
+                                 "Не удалось разобрать config.cfg:\n%s" % e)
+            return
+        QMessageBox.information(
+            self, "Официальные кейсы SU2",
+            official_cases.render_diagnosis(res))
 
     # ---- прочее ----
     def _pick_config(self):

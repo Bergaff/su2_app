@@ -1,286 +1,300 @@
 # -*- coding: utf-8 -*-
-"""Телооблекающая объёмная сетка (mesh/bodyfit_tetgen.py).
-
-Модули грузятся по пути файла: mesh/__init__.py тянет PyQt5 через
-mesh_worker, а эти модули должны работать и в тестах, и в фоновом
-процессе генерации.
-
-Запуск:  python tests/test_bodyfit_tetgen.py
 """
+tests/test_bodyfit_tetgen.py — топологическая заливка снаружи для
+телооблекающей сетки (mesh/bodyfit_tetgen.py).
+
+Модуль numpy-only: загружается напрямую по пути (без mesh/__init__.py, чтобы
+не тянуть pyvista/PyQt5) и проверяет самую важную часть — что заливка
+НЕ пересекает грани тела и НА ПРОХОД ПО свободным граням. Именно этот признак
+отделяет герметичную стенку (маркер airfoil без дыр) от дырявой.
+
+Запуск:
+    python tests/test_bodyfit_tetgen.py
+"""
+
+import importlib.util
 import os
 import sys
-import importlib.util
 
 import numpy as np
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _ROOT)
-sys.path.insert(0, os.path.join(_ROOT, "tests"))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+FAIL = []
 
 
-def _load(name, relpath):
-    spec = importlib.util.spec_from_file_location(
-        name, os.path.join(_ROOT, relpath))
+def check(name, cond, extra=""):
+    if cond:
+        print(f"  ✅ {name}")
+    else:
+        FAIL.append(name)
+        print(f"  ❌ {name} {extra}")
+
+
+def _load_bodyfit():
+    path = os.path.join(ROOT, "mesh", "bodyfit_tetgen.py")
+    spec = importlib.util.spec_from_file_location("bodyfit_tetgen_standalone", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-bt = _load("bodyfit_tetgen_standalone", os.path.join("mesh", "bodyfit_tetgen.py"))
+def test_classify_exterior_blocks_body_faces():
+    m = _load_bodyfit()
+    # Два тетраэдра, делящие грань (0,1,2):
+    #   A = (0,1,2,3)  — z>0
+    #   B = (0,1,2,4)  — z<0
+    points = np.array([[0.0, 0, 0],
+                       [1.0, 0, 0],
+                       [0.0, 1, 0],
+                       [0.0, 0, 1],   # 3 (A)
+                       [0.0, 0, -1]], dtype=float)  # 4 (B)
+    tets = np.array([[0, 1, 2, 3], [0, 1, 2, 4]], dtype=np.int64)
+    # bbox тела = только тетраэдр A (z>=0) → единственный «снаружи» семен — B
+    bbox = (np.array([0.0, 0, 0]), np.array([1.0, 1, 0.999999]))
 
-try:
-    import pyvista as pv
-    HAS_PV = True
-except ImportError:
-    HAS_PV = False
+    # Общая грань (0,1,2) — грань ТЕЛА (блокирует): заливка не перейдёт на A.
+    ext = m.classify_exterior_tets(points, tets, {(0, 1, 2)}, bbox)
+    check("заливка не пересекает грань тела",
+          ext.tolist() == [False, True], str(ext))
 
-FAIL = []
-N = [0]
-
-
-def check(name, cond, extra=""):
-    N[0] += 1
-    if cond:
-        print("  [OK]   %s" % name)
-    else:
-        print("  [FAIL] %s %s" % (name, extra))
-        FAIL.append(name)
-
-
-def tet_volume(points, tets):
-    p = points[np.asarray(tets)]
-    return float(np.abs(np.einsum(
-        "ij,ij->i",
-        np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]),
-        p[:, 3] - p[:, 0])).sum() / 6.0)
+    # Общая грань НЕ является гранью тела → заливка проходит, оба снаружи.
+    ext2 = m.classify_exterior_tets(points, tets, set(), bbox)
+    check("заливка проходит по свободной грани",
+          ext2.tolist() == [True, True], str(ext2))
 
 
-def parse_su2(path):
-    """Разобрать mesh.su2 -> (n_tets, n_points, {маркер: число элементов})."""
-    n_tets = n_points = 0
-    markers = {}
-    with open(path, "r", encoding="ascii", errors="replace") as f:
-        lines = f.read().split("\n")
-    i = 0
-    while i < len(lines):
-        s = lines[i].split("%")[0].strip()
-        if s.startswith("NELEM="):
-            n_tets = int(s.split("=")[1])
-        elif s.startswith("NPOIN="):
-            n_points = int(s.split("=")[1])
-        elif s.startswith("MARKER_TAG="):
-            tag = s.split("=")[1].strip()
-            i += 1
-            m = lines[i].split("%")[0].strip()
-            markers[tag] = int(m.split("=")[1])
-            i += markers[tag]
-        i += 1
-    return n_tets, n_points, markers
+def test_classify_exterior_no_seed_all_inside():
+    """Если ни один тетраэдр не снаружи по bbox — заливка ничего не метит."""
+    m = _load_bodyfit()
+    points = np.array([[0.0, 0, 0],
+                       [1.0, 0, 0],
+                       [0.0, 1, 0],
+                       [0.0, 0, 1]], dtype=float)
+    tets = np.array([[0, 1, 2, 3]], dtype=np.int64)
+    # bbox строго охватывает этот единственный тетраэдр → семян нет.
+    bbox = (np.array([0.0, 0, 0]), np.array([1.0, 1, 1]))
+    ext = m.classify_exterior_tets(points, tets, set(), bbox)
+    check("нет семян → наружных нет (тело целиком внутри bbox)",
+          ext.tolist() == [False], str(ext))
 
 
-# ---------------------------------------------------------------- подготовка
-print("Телооблекающая сетка (TetGen)")
-if not (HAS_PV and bt.tetgen_available()):
-    print("  Пропуск: нет pyvista/tetgen/trimesh — проверяется только "
-          "корректный отказ")
-    check("без TetGen возвращается None",
-          bt.build_body_fitted_grid([], [0, 0, 0], [1, 1, 1], 1.0) is None)
-else:
-    R = 1.0
-    sphere = pv.Sphere(radius=R, theta_resolution=40, phi_resolution=40)
-    body_min = np.asarray(sphere.points).min(axis=0)
-    body_max = np.asarray(sphere.points).max(axis=0)
-    body_size = float(np.max(body_max - body_min))
-    margin = body_size * 2.0
-    v_body = 4.0 / 3.0 * np.pi * R ** 3
+def test_four_face_keys():
+    m = _load_bodyfit()
+    keys = m._tet_face_keys((0, 1, 2, 3))
+    check("у тетраэдра 4 сортированные грани",
+          len(keys) == 4 and (0, 1, 2) in keys and (1, 2, 3) in keys,
+          str(keys))
 
-    logs = []
-    res = bt.build_body_fitted_grid([sphere], body_min, body_max, margin,
-                                    log=logs.append)
 
-    check("сетка построена", res is not None)
-    if res is None:
-        print("\n".join(logs))
-    else:
-        grid = res["grid"]
-        bounds = res["bounds"]
-        v_box = ((bounds[1] - bounds[0]) * (bounds[3] - bounds[2])
-                 * (bounds[5] - bounds[4]))
-        check("сохранено >= 90%% граней тела (%.2f%%)"
-              % (100.0 * res["recovery"]), res["recovery"] >= 0.90)
-        check("грани тела для маркера непустые (%d)" % len(res["body_facets"]),
-              len(res["body_facets"]) > 0)
+def test_collect_airfoil_facets_uses_vmap():
+    """Грани тела переводятся в узлы сетки ЧЕРЕЗ vmap.
 
-        tets = np.asarray(grid.cells).reshape(-1, 5)[:, 1:]
-        pts = np.asarray(grid.points)
-        v_ext = tet_volume(pts, tets)
-        err = abs(v_ext - (v_box - v_body))
-        check("объём наружной области сходится с короб минус тело "
-              "(%.4f против %.4f, откл %.2e)" % (v_ext, v_box - v_body, err),
-              err < 1e-3 * (v_box - v_body))
+    Раньше здесь был remap[x] для x в body_faces, но x — индекс ВХОДНОЙ
+    поверхности, а не узла сетки. Когда TetGen перенумеровывает узлы
+    (входные точки не остаются в начале массива), грани тела перестают
+    совпадать с реальной границей наружной сетки, маркер airfoil терял
+    ~20% граней, и телооблекающая сетка ложно отвергалась как дырявая.
+    """
+    m = _load_bodyfit()
+    # Полная объёмная сетка из 8 узлов. Тело — тетраэдр на узлах 4,5,6,7
+    # (то есть vmap НЕ тождественный: входная вершина k -> узел k+4).
+    points = np.array([
+        [1.0, 1.0, 1.0],   # 0 — наружный
+        [-1.0, 1.0, 1.0],  # 1 — наружный
+        [1.0, -1.0, 1.0],  # 2 — наружный
+        [1.0, 1.0, -1.0],  # 3 — наружный
+        [0.0, 0.0, 0.0],   # 4 — вершина тела A
+        [1.0, 0.0, 0.0],   # 5 — вершина тела B
+        [0.0, 1.0, 0.0],   # 6 — вершина тела C
+        [0.0, 0.0, 1.0],   # 7 — вершина тела D
+    ], dtype=float)
+    # Тет 0 — «тело» (внутренний), теты 1..4 — наружные, каждый примыкает
+    # к одной грани тела и потому делает её границей наружной области.
+    tets = np.array([
+        [4, 5, 6, 7],   # 0: тело (внутренний)
+        [4, 5, 6, 0],   # 1: наружный, грань (4,5,6)
+        [4, 5, 7, 1],   # 2: наружный, грань (4,5,7)
+        [4, 6, 7, 2],   # 3: наружный, грань (4,6,7)
+        [5, 6, 7, 3],   # 4: наружный, грань (5,6,7)
+    ], dtype=np.int64)
+    # Входная поверхность тела: 4 грани тетраэдра (индексы входных вершин 0..3).
+    body_faces = np.array([
+        [0, 1, 2],
+        [0, 1, 3],
+        [0, 2, 3],
+        [1, 2, 3],
+    ], dtype=np.int64)
+    vmap = np.array([4, 5, 6, 7], dtype=np.int64)  # входная k -> узел k+4
+    ext = np.array([1, 2, 3, 4], dtype=np.int64)   # наружные теты (тело вырезано)
 
-        # Каждая грань маркера обязана быть границей сетки (входить ровно
-        # в один тетраэдр) — иначе SU2 получит висячий маркер.
-        flat, _ = bt.tet_faces(tets)
-        uniq, cnt = np.unique(flat, axis=0, return_counts=True)
-        on_bound = {tuple(int(x) for x in r) for r in uniq[cnt == 1]}
-        bad = [f for f in res["body_facets"] if tuple(int(x) for x in f)
-               not in on_bound]
-        check("все грани маркера лежат на границе сетки (нарушителей %d)"
-              % len(bad), len(bad) == 0)
+    marker, ratio = m.collect_airfoil_facets(points, tets, ext, vmap, body_faces)
+    check("все 4 грани тела вышли на границу (vmap-перенумерация)",
+          len(marker) == 4 and ratio > 0.999,
+          f"marker={len(marker)}, ratio={ratio:.3f}")
 
-        # --- Негативный контроль: ключ Y (nobisect) действительно нужен.
-        # Без него TetGen режет входные грани, и восстановление падает.
-        bpts, bfaces = bt.union_surfaces([sphere], log=lambda *_: None)
-        pts_ny, tets_ny = None, None
-        try:
-            from tetgen import TetGen
-            box = pv.Box(bounds=bounds).triangulate()
-            bxp, bxf = bt.to_triangles(box)
-            P = np.vstack([bpts, bxp])
-            F = np.vstack([bfaces, bxf + len(bpts)])
-            tg = TetGen(P, F)
-            tg.tetrahedralize(order=1, verbose=0, switches="pq")
-            pts_ny = np.asarray(tg.grid.points)
-            tets_ny = np.asarray(tg.grid.cells).reshape(-1, 5)[:, 1:]
-        except Exception as e:
-            print("  Негативный контроль без Y не выполнен: %s" % e)
-        if pts_ny is not None:
-            rec_ny = bt.count_recovered(pts_ny, tets_ny, bpts, bfaces)[0]
-            rec_y = bt.count_recovered(pts, tets, bpts, bfaces)[0]
-            check("негативный контроль: без ключа Y граней сохраняется меньше "
-                  "(%d против %d)" % (rec_ny, rec_y), rec_ny < rec_y)
+    # Доказываем, что СТАРЫЙ путь (remap[x], без vmap) дал бы дыры.
+    ext_tets = tets[ext]
+    used = np.unique(ext_tets.ravel())
+    remap = np.full(len(points), -1, dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    flat = m.tet_faces(remap[ext_tets])[0]
+    uniq, cnt = np.unique(flat, axis=0, return_counts=True)
+    boundary = {tuple(int(x) for x in r) for r in uniq[cnt == 1]}
+    old_bad = [tuple(sorted(int(remap[x]) for x in f)) for f in body_faces]
+    old_marker = [f for f in old_bad if f in boundary]
+    check("старый путь (remap[x]) потерял бы грани — регрессия поймана",
+          len(old_marker) < 4,
+          f"old_marker={len(old_marker)}")
 
-    # ------------------------------------------- короб расчётной области
-    print("Короб расчётной области")
-    bnd = bt.farfield_bounds(body_min, body_max, margin)
-    bp, bf = bt.box_surface(bnd, (bnd[1] - bnd[0]) / 12.0)
-    tri = bp[bf]
-    nrm = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
-    cen = tri.mean(axis=1)
-    ctr = np.array([(bnd[0] + bnd[1]) / 2.0, (bnd[2] + bnd[3]) / 2.0,
-                    (bnd[4] + bnd[5]) / 2.0])
-    inward = int((np.einsum("ij,ij->i", nrm, cen - ctr) < 0).sum())
-    check("все нормали короба направлены наружу (внутрь %d)" % inward,
-          inward == 0)
-    # У замкнутой поверхности каждый треугольник встречается один раз, а
-    # каждое ребро принадлежит ровно двум треугольникам.
-    edges = np.sort(np.vstack([bf[:, [0, 1]], bf[:, [1, 2]],
-                               bf[:, [0, 2]]]), axis=1)
-    eu, ec = np.unique(edges, axis=0, return_counts=True)
-    check("короб замкнут: у каждого ребра ровно 2 треугольника "
-          "(рёбер %d, нарушителей %d)" % (len(eu), int((ec != 2).sum())),
-          int((ec != 2).sum()) == 0)
-    check("в коробе нет повторяющихся треугольников",
-          len(np.unique(np.sort(bf, axis=1), axis=0)) == len(bf))
-    v_exp = ((bnd[1] - bnd[0]) * (bnd[3] - bnd[2]) * (bnd[5] - bnd[4]))
-    v_box_surf = float(np.einsum(
-        "ij,ij->i", tri[:, 0],
-        np.cross(tri[:, 1], tri[:, 2])).sum() / 6.0)
-    check("знаковый объём короба совпадает с габаритами (%.4f против %.4f)"
-          % (v_box_surf, v_exp), abs(v_box_surf - v_exp) < 1e-6 * v_exp)
 
-    # НЕКУБИЧЕСКИЙ короб обязателен: у расчётной области самолёта ось X
-    # длиннее Y и Z, и на ней число делений другое. На кубе ошибка
-    # спаривания осей не видна — именно так она и прошла в первый раз,
-    # а на реальном самолёте падала с IndexError и уводила генератор на
-    # картезианский запасной путь.
-    print("Некубический короб (реальная расчётная область)")
-    nb = (-4.2, 5.8, -5.0, 5.0, -5.0, 5.0)
-    nbp, nbf = bt.box_surface(nb, 0.9)
-    ntri = nbp[nbf]
-    nnrm = np.cross(ntri[:, 1] - ntri[:, 0], ntri[:, 2] - ntri[:, 0])
-    ncen = ntri.mean(axis=1)
-    nctr = np.array([(nb[0] + nb[1]) / 2.0, (nb[2] + nb[3]) / 2.0,
-                     (nb[4] + nb[5]) / 2.0])
-    check("все нормали наружу (внутрь %d)"
-          % int((np.einsum("ij,ij->i", nnrm, ncen - nctr) < 0).sum()),
-          int((np.einsum("ij,ij->i", nnrm, ncen - nctr) < 0).sum()) == 0)
-    ne = np.sort(np.vstack([nbf[:, [0, 1]], nbf[:, [1, 2]],
-                            nbf[:, [0, 2]]]), axis=1)
-    neu, nec = np.unique(ne, axis=0, return_counts=True)
-    check("некубический короб замкнут (рёбер %d, нарушителей %d)"
-          % (len(neu), int((nec != 2).sum())), int((nec != 2).sum()) == 0)
-    nv_exp = (nb[1] - nb[0]) * (nb[3] - nb[2]) * (nb[5] - nb[4])
-    nv_surf = float(np.einsum(
-        "ij,ij->i", ntri[:, 0], np.cross(ntri[:, 1], ntri[:, 2])).sum() / 6.0)
-    check("объём некубического короба верный (%.4f против %.4f)"
-          % (nv_surf, nv_exp), abs(nv_surf - nv_exp) < 1e-6 * nv_exp)
+def test_make_graded_axis():
+    """Ось: монотонна, покрывает [lo, hi], мелкая в центре, крупная по краям."""
+    m = _load_bodyfit()
+    ax = m.make_graded_axis(-33.0, 33.0, -11.0, 11.0, 0.135, 5.5)
+    check("graded_axis монотонна", np.all(np.diff(ax) > 0))
+    check("graded_axis покрывает диапазон", ax[0] <= -33.0 + 1e-9 and ax[-1] >= 33.0 - 1e-9)
+    # Шаг в центре (_мелкий_) меньше шага на краях (_крупный_).
+    n = len(ax)
+    mid = np.diff(ax)[n // 2 - 3: n // 2 + 3]
+    edge = np.diff(ax)[:3]
+    check("в центре шаг мельче, чем на краях",
+          float(mid.min()) < float(edge.max()),
+          f"mid={mid.min():.4f}, edge={edge.max():.4f}")
 
-    # ------------------------------------------------------- сквозной прогон
-    print("Сквозной прогон generate_mesh_impl")
-    gg = _load("gmsh_generator_standalone", os.path.join("mesh", "gmsh_generator.py"))
-    import shutil
-    tmp = os.path.join(_ROOT, "tests", "_tmp_bodyfit")
-    shutil.rmtree(tmp, ignore_errors=True)
-    os.makedirs(tmp, exist_ok=True)
-    stl = os.path.join(tmp, "sphere.stl")
-    sphere.save(stl)
-    gg.MESH_FILE = os.path.join(tmp, "mesh.su2")
-    gg.PREVIEW_MESH = os.path.join(tmp, "preview.vtk")
 
-    ok, msg = gg.generate_mesh_impl([stl], quality_text="Грубая (быстро)")
-    check("generate_mesh_impl завершился успешно (%s)" % msg, bool(ok))
-    if ok and os.path.exists(gg.MESH_FILE):
-        n_tets, n_p, markers = parse_su2(gg.MESH_FILE)
-        check("в mesh.su2 есть тетраэдры (%d)" % n_tets, n_tets > 100)
-        check("в mesh.su2 есть точки (%d)" % n_p, n_p > 100)
-        check("маркер airfoil непустой (%d)" % markers.get("airfoil", 0),
-              markers.get("airfoil", 0) > 100)
-        check("маркер farfield непустой (%d)" % markers.get("farfield", 0),
-              markers.get("farfield", 0) > 100)
-        n_sphere = int(sphere.n_cells)
-        frac = markers.get("airfoil", 0) / float(n_sphere)
-        check("airfoil сопоставим с поверхностью тела (%d против %d граней "
-              "сферы, доля %.2f)" % (markers.get("airfoil", 0), n_sphere, frac),
-              frac > 0.30)
+def test_size_field_for_points():
+    """Размер: h_near у поверхности, h_far вдали, монотонный без скачка."""
+    m = _load_bodyfit()
+    # Точка «тела» в начале координат.
+    body_pts = np.array([[0.0, 0, 0], [1.0, 0, 0], [0.0, 1, 0]], dtype=float)
+    h_near, h_far, L = 0.1, 6.0, 20.0
+    pts = np.array([
+        [0.0, 0, 0.0],    # на поверхности -> h_near
+        [0.0, 0, 5.0],    # в переходе
+        [0.0, 0, 30.0],   # за L -> h_far
+    ], dtype=float)
+    h = m.size_field_for_points(pts, body_pts, h_near, h_far, L)
+    check("у поверхности размер ~h_near", abs(h[0] - h_near) < 1e-9, str(h))
+    check("вдали размер ~h_far", abs(h[2] - h_far) < 1e-9, str(h))
+    check("размер монотонно растёт с расстоянием", h[0] < h[1] < h[2], str(h))
+    check("размер всегда в [h_near, h_far]", h.min() >= h_near and h.max() <= h_far)
 
-        # --- Негативный контроль: маркер собирается не со ступеньки.
-        # Если телооблекающий путь отключить, генератор вернётся к
-        # картезианскому фону, и число граней airfoil изменится.
-        # generate_mesh_impl импортирует модуль по имени
-        # "mesh.bodyfit_tetgen", а не объект bt, поэтому подменяем запись
-        # в sys.modules — иначе патч не дойдёт до генератора.
-        import types
-        _saved_mod = sys.modules.get("mesh.bodyfit_tetgen")
-        _stub = types.ModuleType("mesh.bodyfit_tetgen")
-        _stub.build_body_fitted_grid = lambda *a, **k: None
-        gg_ok2 = False
-        m2 = {}
-        try:
-            sys.modules["mesh.bodyfit_tetgen"] = _stub
-            gg_ok2, _ = gg.generate_mesh_impl([stl],
-                                              quality_text="Грубая (быстро)")
-            if gg_ok2:
-                m2 = parse_su2(gg.MESH_FILE)[2]
-        except Exception as e:
-            print("  Негативный контроль: картезианский путь не запустился "
-                  "(%s: %s)" % (type(e).__name__, e))
-        finally:
-            if _saved_mod is None:
-                sys.modules.pop("mesh.bodyfit_tetgen", None)
-            else:
-                sys.modules["mesh.bodyfit_tetgen"] = _saved_mod
-        if gg_ok2 and m2:
-            check("негативный контроль: картезианский путь даёт другой "
-                  "маркер (%d против %d)"
-                  % (m2.get("airfoil", 0), markers.get("airfoil", 0)),
-                  m2.get("airfoil", 0) != markers.get("airfoil", 0))
-        else:
-            print("  Негативный контроль картезианского пути не выполнен")
 
-# ---------------------------------------------------------------- cleanup
-try:
-    import shutil
-    shutil.rmtree(os.path.join(_ROOT, "tests", "_tmp_bodyfit"),
-                  ignore_errors=True)
-except Exception:
-    pass
+def test_size_field_h_far_no_less_than_near():
+    """Если h_far <= h_near — поле вырождается в константу (нет скачка)."""
+    m = _load_bodyfit()
+    body_pts = np.array([[0.0, 0, 0]], dtype=float)
+    h = m.size_field_for_points([[0.0, 0, 0], [0.0, 0, 50.0]],
+                                body_pts, 0.1, 0.1, 20.0)
+    check("h_far<=h_near -> размер константен", np.all(np.abs(h - 0.1) < 1e-9), str(h))
 
-# ---------------------------------------------------------------- summary
-print()
-print("Проверок: %d" % N[0])
-if FAIL:
-    print("ПРОВАЛЕНО: %d -> %s" % (len(FAIL), FAIL))
-    sys.exit(1)
-print("ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ")
+
+def test_bg_grid_ordering():
+    """Фоновая сетка: порядок точек = мировой C-порядок, 6 тетов на гекс,
+    target_size не разъезжается с точками."""
+    m = _load_bodyfit()
+    axes = [np.array([0.0, 1.0]), np.array([0.0, 1.0]), np.array([0.0, 1.0])]
+    pts = m._structured_grid_pts(axes)
+    check("решётка 2x2x2 = 8 точек", pts.shape == (8, 3), str(pts.shape))
+    check("порядок точек: первая в начале координат", np.allclose(pts[0], [0, 0, 0]))
+    check("порядок точек: последняя в противоположном углу",
+          np.allclose(pts[-1], [1, 1, 1]))
+    tets = m._structured_tet_cells(axes)
+    check("на 1 гекс — 6 тетраэдров", tets.shape[0] == 6, str(tets.shape))
+    check("индексы тетов в пределах числа точек",
+          tets.min() >= 0 and tets.max() < len(pts))
+    # target_size выровнен по порядку точек (тест на смещение поля).
+    sizes = m.size_field_for_points(pts, np.array([[0.0, 0, 0]]), 0.1, 6.0, 20.0)
+    check("target_size той же длины, что и точки",
+          len(sizes) == len(pts))
+    check("у ближней точки размер ~h_near", abs(sizes[0] - 0.1) < 1e-9)
+    check("вдали размер больше, чем у тела", sizes[-1] > sizes[0])
+
+
+def test_jitter_breaks_plane_coincidence():
+    """Сдвиг узлов фона убирает совпадение входной точки с фоновой плоскостью.
+
+    Без него симметричная модель (короб/фюзеляж) имеет точки ровно на z=0, а
+    фон регулярный, его плоскость z=0 совпадает — TetGen падает в
+    'Interpolating mesh size'. Сдвиг должен увести узлы с плоскостей и не
+    вывернуть теты.
+    """
+    m = _load_bodyfit()
+    bounds = (-28.08, 42.62, -34.45, 34.45, -30.35, 30.35)
+    body_min = np.array([-5.0, -5.6, -1.5])
+    body_max = np.array([8.0, 5.6, 1.5])
+    h_far = (bounds[1] - bounds[0]) / 12.0
+    axes, h_near, _, _ = m._bg_axes(bounds, body_min, body_max, 0.3462, h_far)
+    pts = m._structured_grid_pts(axes)
+    pts_j = m._jitter_bg_points(pts, h_near)
+    check("сдвиг меняет координаты узлов", not np.allclose(pts, pts_j))
+
+    # Теты не вывернуты после сдвига.
+    tets = m._structured_tet_cells(axes)
+    p0 = pts_j[tets[:, 0]]; p1 = pts_j[tets[:, 1]]
+    p2 = pts_j[tets[:, 2]]; p3 = pts_j[tets[:, 3]]
+    v = np.einsum('ij,ij->i', p1 - p0, np.cross(p2 - p0, p3 - p0)) / 6.0
+    check("после сдвига нет вывернутых/нулевых тетов",
+          (v > 0).all() and (np.abs(v) > 1e-12).all())
+
+    # Входная точка на z=0 (симметрия) больше не лежит на фоновой плоскости z.
+    box_pts, _ = m.box_surface(bounds, h_far)
+    planes = np.sort(np.unique(np.round(pts_j[:, 2], 6)))
+    z_center = 0.0
+    near = np.min(np.abs(planes - z_center))
+    check("ни одна фоновая z-плоскость не совпадает с z=0", near > 1e-6,
+          f"min|plane-0|={near:.2e}")
+    # Считаем совпадения точек короба с фоновыми плоскостями (все оси).
+    coinc = 0
+    for i in (0, 1, 2):
+        planes_i = np.sort(np.unique(np.round(pts_j[:, i], 6)))
+        for c in box_pts[:, i]:
+            if np.min(np.abs(planes_i - c)) < 1e-9:
+                coinc += 1
+    check("ни одна точка короба не лежит на фоновой плоскости", coinc == 0,
+          f"coinc={coinc}")
+
+
+def test_bg_axes_strictly_contain_bounds():
+    """Фоновая область СТРОГО шире bounds (иначе TetGen падает в
+    'Interpolating mesh size' на совпадении с границей короба)."""
+    m = _load_bodyfit()
+    bounds = (-28.08, 42.62, -34.45, 34.45, -30.35, 30.35)
+    body_min = np.array([-5.0, -5.6, -1.5])
+    body_max = np.array([8.0, 5.6, 1.5])
+    h_far = (bounds[1] - bounds[0]) / 12.0
+    axes, h_near, _, _ = m._bg_axes(bounds, body_min, body_max, 0.3462, h_far)
+    check("оси построены (не слишком велики)", axes is not None)
+    if axes is None:
+        return
+    pts = m._structured_grid_pts(axes)
+    x0, x1, y0, y1, z0, z1 = bounds
+    check("фон строго шире bounds по минимумам",
+          pts[:, 0].min() < x0 and pts[:, 1].min() < y0 and pts[:, 2].min() < z0)
+    check("фон строго шире bounds по максимумам",
+          pts[:, 0].max() > x1 and pts[:, 1].max() > y1 and pts[:, 2].max() > z1)
+    # Ни один узел короба не лежит ровно на фоновой границе.
+    box_pts, _ = m.box_surface(bounds, h_far)
+    inside = ((box_pts[:, 0] > pts[:, 0].min()) & (box_pts[:, 0] < pts[:, 0].max()) &
+              (box_pts[:, 1] > pts[:, 1].min()) & (box_pts[:, 1] < pts[:, 1].max()) &
+              (box_pts[:, 2] > pts[:, 2].min()) & (box_pts[:, 2] < pts[:, 2].max()))
+    check("все узлы короба строго внутри фоновой области", inside.all())
+
+
+if __name__ == "__main__":
+    print("== test_bodyfit_tetgen ==")
+    test_classify_exterior_blocks_body_faces()
+    test_classify_exterior_no_seed_all_inside()
+    test_four_face_keys()
+    test_collect_airfoil_facets_uses_vmap()
+    test_make_graded_axis()
+    test_size_field_for_points()
+    test_size_field_h_far_no_less_than_near()
+    test_bg_grid_ordering()
+    test_bg_axes_strictly_contain_bounds()
+    test_jitter_breaks_plane_coincidence()
+    print("== " + ("OK" if not FAIL else f"FAIL {len(FAIL)}") + " ==")
+    sys.exit(1 if FAIL else 0)

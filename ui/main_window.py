@@ -47,6 +47,11 @@ os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
 import numpy as np
 import pyvista as pv
 from pyvistaqt import QtInteractor
+# preset_table_params определён в ui/analysis_pages.py. Раньше он импортировался
+# локально внутри __init__ и был доступен только там; export_config_preset и
+# apply_imported_preset (другие методы) не могли его найти — apply_imported_preset
+# падал с NameError вне try/except. Перенесён на уровень модуля.
+from ui.analysis_pages import preset_table_params
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QGroupBox, QFileDialog, QMessageBox,
@@ -83,9 +88,18 @@ from mesh.gmsh_generator import generate_mesh_impl
 from mesh.mesh_worker import MeshWorker, MeshAdaptWorker
 from solver.workers import (
     SU2Worker, SweepWorker, OptimizationWorker, SessionRunner,
-    hidden_subprocess_kwargs, _mesh_npoin,
+    OfficialCaseRunWorker, hidden_subprocess_kwargs, _mesh_npoin,
 )
 from solver.session import CalculationSession
+
+# Официальные кейсы SU2 (встроенные конфиги + 3D-сетки). Вспомогательный
+# stdlib-пакет; если его нет (частичная сборка), кнопка загрузки официальной
+# геометрии просто не появится.
+try:
+    import official_cases
+except Exception:                                        # pragma: no cover
+    official_cases = None
+
 # === T6: лицензирование (опционально — не падает, если модуль недоступен)
 _LICENSE_ERROR = ""
 
@@ -947,6 +961,35 @@ class MainWindow(QMainWindow):
         self.btn_add_primitive.setMenu(menu)
         btn_load_lay.addWidget(self.btn_add_import)
         btn_load_lay.addWidget(self.btn_add_primitive)
+        # Кнопка загрузки официальной геометрии SU2 (ONERA M6 и др.).
+        # Список случаев собирается из official_cases; если пакет недоступен,
+        # кнопка всё равно создаётся, но остаётся выключенной.
+        self.btn_add_official = QPushButton("Официальная геометрия")
+        self.btn_add_official.setToolTip(
+            "Добавить геометрию из официального тест-кейса SU2 (ONERA M6 "
+            "и др.) как компонент. 3D-сетка при необходимости скачивается "
+            "из официального репозитория SU2 в official_cases/meshes/.")
+        if official_cases is None:
+            self.btn_add_official.setEnabled(False)
+        else:
+            official_menu = QMenu()
+            self._official_menu_actions = []
+            for cid in self._downloadable_official_ids():
+                try:
+                    case = official_cases.get_case(cid)
+                except Exception:
+                    continue
+                act = official_menu.addAction(
+                    "%s — %s" % (cid, case.name),
+                    lambda checked=False, c=cid: self.load_official_geometry(c))
+                self._official_menu_actions.append(act)
+            if official_menu.actions():
+                self.btn_add_official.setMenu(official_menu)
+            else:
+                self.btn_add_official.setEnabled(False)
+                self.btn_add_official.setToolTip(
+                    "Нет официальных 3D-кейсов с доступной сеткой.")
+        btn_load_lay.addWidget(self.btn_add_official)
         lay3.addLayout(btn_load_lay)
         simplify_layout = QHBoxLayout()
         self.btn_simplify_simple = QPushButton("Упростить (грубо)")
@@ -1360,6 +1403,9 @@ class MainWindow(QMainWindow):
             "Euler (невязкий)",
             "RANS SA (вязкий, Спаларт-Аллмарас)",
             "RANS SST (вязкий, Menter k-ω)",
+            "INC Euler (несжимаемый, малые скорости)",
+            "INC RANS SA (несжимаемый вязкий)",
+            "INC RANS SST (несжимаемый вязкий)",
         ])
         s_lay.addWidget(self.combo_solver)
         lay9.addWidget(solver_group)
@@ -2947,6 +2993,9 @@ class MainWindow(QMainWindow):
             "use_ramp_aoa": bool(getattr(self, "chk_use_ramp_aoa", None) and
                                 self.chk_use_ramp_aoa.isChecked()),
             "turb_model": self.get_turb_model() if hasattr(self, "combo_solver") else "SA",
+            # Тип решателя (в т.ч. INC_* для малых скоростей) — чтобы после
+            # загрузки проекта комбо-бокс снова показывал выбранное.
+            "solver": self.get_solver() if hasattr(self, "combo_solver") else "EULER",
         }
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -3101,7 +3150,29 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         turb_model = data.get("turb_model")
-        if turb_model in ("SA", "SST") and hasattr(self, "combo_solver"):
+        # Тип решателя из сохранённого проекта (0..5). Если его нет — откат
+        # на прежнее поведение по турбомодели (Euler=0, RANS SA=1, RANS SST=2).
+        solver_restore = {
+            "EULER": 0,
+            "RANS": -1,          # разрешается по турбомодели ниже
+            "INC_EULER": 3,
+            "INC_RANS": -1,      # разрешается по турбомодели ниже (4/5)
+        }
+        solved = data.get("solver")
+        if isinstance(solved, str) and hasattr(self, "combo_solver"):
+            try:
+                idx = solver_restore.get(solved.upper())
+                if idx is not None and idx >= 0:
+                    self.combo_solver.setCurrentIndex(idx)
+                elif solved.upper().startswith("INC_RANS"):
+                    self.combo_solver.setCurrentIndex(
+                        5 if turb_model == "SST" else 4)
+                elif idx == -1:
+                    self.combo_solver.setCurrentIndex(
+                        2 if turb_model == "SST" else 1)
+            except Exception:
+                pass
+        elif turb_model in ("SA", "SST") and hasattr(self, "combo_solver"):
             try:
                 # Euler=0, RANS SA=1, RANS SST=2
                 self.combo_solver.setCurrentIndex(2 if turb_model == "SST" else 1)
@@ -3565,6 +3636,186 @@ class MainWindow(QMainWindow):
                                      f"Не удалось импортировать {ext}-файл напрямую. "
                                      "Экспортируйте его в STL из CAD-системы.")
         QApplication.restoreOverrideCursor()
+
+    # =============================================================
+    # ОФИЦИАЛЬНАЯ ГЕОМЕТРИЯ SU2 (кнопка «Официальная геометрия»)
+    # =============================================================
+    def _downloadable_official_ids(self) -> list:
+        """Идентификаторы официальных кейсов, для которых есть 3D-сетка.
+
+        Берёт из official_cases каталог и оставляет только те кейсы, у
+        которых заполнены ``mesh_path``/``mesh_filename`` (сетку можно
+        скачать). Если пакет недоступен — пустой список.
+        """
+        if official_cases is None:
+            return []
+        ids = []
+        try:
+            for cid in official_cases.list_cases():
+                case = official_cases.get_case(cid)
+                if case.mesh_path and case.mesh_filename:
+                    ids.append(cid)
+        except Exception:
+            return []
+        return ids
+
+    def load_official_geometry(self, case_id: str):
+        """Скачивает официальную сетку SU2 и добавляет тело как компонент.
+
+        Сетка при необходимости скачивается в ``official_cases/meshes/``,
+        поверхность тела вытаскивается по маркерам из официального
+        ``config.cfg`` (MARKER_EULER / MARKER_HEATFLUX) и добавляется через
+        ``_add_body`` — тот же пайплайн, что и у обычного STL.
+        """
+        if official_cases is None:
+            QMessageBox.warning(self, "Официальная геометрия",
+                                "Библиотека official_cases недоступна.")
+            return
+        try:
+            case = official_cases.get_case(case_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка",
+                                 f"Неизвестный официальный кейс: {case_id}: {e}")
+            return
+        # Загрузка и разбор сетки — тяжёлые операции, показываем wait-курсор.
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            try:
+                mesh_path = official_cases.download_mesh(case_id)
+            except Exception as e:
+                QApplication.restoreOverrideCursor()
+                self.log_text.append(
+                    f"Ошибка: не удалось скачать сетку «{case.name}»: {e}")
+                QMessageBox.critical(
+                    self, "Загрузка официальной геометрии",
+                    f"Не удалось скачать сетку кейса «{case.name}».\n\n"
+                    f"{type(e).__name__}: {e}\n\n"
+                    "Проверьте подключение к интернету и официальному "
+                    "репозиторию SU2, либо загрузите сетку вручную в "
+                    "official_cases/meshes/.")
+                return
+            markers = []
+            try:
+                cfg_text = official_cases.bundled_config_text(case.config_file)
+                markers = official_cases.body_markers_from_config(cfg_text)
+            except Exception:
+                markers = []
+            surf = official_cases.read_su2_boundary(mesh_path, markers=markers or None)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            self.log_text.append(f"Ошибка разбора официальной сетки: {e}")
+            QMessageBox.critical(self, "Официальная геометрия",
+                                 f"Не удалось разобрать сетку: {e}")
+            return
+        QApplication.restoreOverrideCursor()
+
+        tris = surf.get("triangles") or []
+        pts = surf.get("points") or []
+        # Замкнутая ли поверхность? Официальные 3D-модели SU2 — КРЫЛО/
+        # половинки с плоскостью симметрии (открытые оболочки), а 2D-профили —
+        # плоские контуры. Ни то, ни другое телооблекающая сетка не облегает,
+        # и повторный re-mesh даёт ступенчатую сетку и мусорные Cl/Cd.
+        if not tris or not pts or not official_cases.is_manifold_closed(tris):
+            self._prepare_official_case_run(case, case_id, markers)
+            return
+
+        # Собираем pyvista.PolyData из точек и треугольников.
+        try:
+            vertices = np.array([[float(p[0]), float(p[1]), float(p[2])]
+                                 for p in pts], dtype=np.float64)
+            faces = np.array([[3] + list(t) for t in tris],
+                             dtype=np.int64).ravel()
+            poly = pv.PolyData(vertices, faces)
+            poly = poly.triangulate().clean(tolerance=1e-6)
+        except Exception as e:
+            self.log_text.append(f"Ошибка сборки поверхности: {e}")
+            QMessageBox.critical(self, "Официальная геометрия",
+                                 f"Не удалось собрать поверхность: {e}")
+            return
+
+        # Пишем во временный STL и проходим через _add_body — один и тот же
+        # пайплайн (таблица, цвет, роль, invalidate_mesh), что и у импорта.
+        os.makedirs(WORK_DIR_BASE, exist_ok=True)
+        stl_path = os.path.join(
+            WORK_DIR_BASE, f"_official_{case_id}_{self.next_body_id}.stl")
+        try:
+            poly.save(stl_path)
+        except Exception as e:
+            self.log_text.append(f"Ошибка сохранения STL: {e}")
+            QMessageBox.critical(self, "Официальная геометрия",
+                                 f"Не удалось сохранить STL: {e}")
+            return
+
+        self._add_body(stl_path, "other")
+        if self.bodies:
+            self.bodies[-1]["name"] = (
+                f"Официальный: {case.name} ({len(tris)} тр.)")
+            self.update_bodies_table()
+            self.log_text.append(
+                f"Готово: Официальная геометрия «{case.name}»: "
+                f"{len(pts)} точек, {len(tris)} треугольников, "
+                f"маркеры: {list(surf.get('markers') or {})}")
+        self.update_flow_arrow()
+
+    def _start_official_run(self, case, case_dir):
+        """Запускает подготовленный официальный кейс в фоне (один клик)."""
+        compute_device = getattr(self, "_compute_device_pending", "cpu")
+        gpu_percent = int(getattr(self, "_gpu_percent_pending", 0) or 0)
+        cpu_cores = 1
+        sess = getattr(self, "session", None)
+        if sess is not None:
+            cpu_cores = int(getattr(sess, "cpu_cores", 1) or 1)
+        worker = OfficialCaseRunWorker(
+            case_dir, cpu_cores=cpu_cores,
+            compute_device=compute_device, gpu_percent=gpu_percent,
+            case_name=case.name, ref_cl=case.ref_cl, ref_cd=case.ref_cd,
+            parent=self,
+        )
+        worker.log_signal.connect(self.log_text.append)
+        worker.finished_signal.connect(self._on_official_run_finished)
+        self._official_workers = getattr(self, "_official_workers", [])
+        self._official_workers.append(worker)
+        self.log_text.append(
+            f"Внимание: запускаю официальный кейс «{case.name}» напрямую "
+            f"(его эталонная сетка SU2). Это {case.solver}-расчёт по "
+            f"официальному config.cfg.")
+        worker.start()
+
+    def _on_official_run_finished(self, ok, message):
+        self.log_text.append(message)
+        QMessageBox.information(
+            self, "Официальный кейс",
+            message if ok else f"Не удалось выполнить официальный кейс.\n\n{message}")
+
+    def _prepare_official_case_run(self, case, case_id, markers):
+        """Готовит официальный кейс к запуску и запускает его (один клик).
+
+        Официальные сетки SU2 — это уже построенные телооблегающие объёмные
+        меши (крыло/профиль + дальнее поле + симметрия). Они НЕ являются
+        замкнутыми телами, поэтому телооблекающую сетку заново из них не
+        построить — только ступеньку, на которой SU2 расходится. Вместо
+        этого кейс запускается как есть по официальным сетке и config.cfg
+        (это и есть эталонная сетка), а пользователь получает эталонные Cl/Cd.
+        """
+        import os
+        out_dir = os.path.join(WORK_DIR_BASE, f"_official_{case_id}")
+        try:
+            official_cases.prepare_case_run_dir(case_id, out_dir)
+        except Exception as e:
+            self.log_text.append(
+                f"Ошибка: не удалось подготовить официальный кейс "
+                f"«{case.name}»: {e}")
+            QMessageBox.critical(
+                self, "Официальная геометрия",
+                f"Не удалось подготовить официальный кейс «{case.name}».\n\n"
+                f"{type(e).__name__}: {e}")
+            return
+        self.log_text.append(
+            f"Внимание: «{case.name}» — официальная объёмная сетка SU2, а не "
+            f"замкнутое тело. Повторно облечь её сеткой нельзя (получилась бы "
+            f"ступенька и мусорные Cl/Cd), поэтому кейс запускается как есть: "
+            f"эталонная сетка + официальный config.cfg.")
+        self._start_official_run(case, out_dir)
 
     # =============================================================
     # ТАБЛИЦА ТЕЛ
@@ -6093,6 +6344,12 @@ class MainWindow(QMainWindow):
             return "RANS"
         if idx == 2:
             return "RANS"
+        if idx == 3:
+            return "INC_EULER"
+        if idx == 4:
+            return "INC_RANS"
+        if idx == 5:
+            return "INC_RANS"
         return "EULER"
 
     def get_turb_model(self) -> str:
@@ -6101,7 +6358,7 @@ class MainWindow(QMainWindow):
             idx = int(self.combo_solver.currentIndex())
         except Exception:
             return "SA"
-        if idx == 2:
+        if idx in (2, 5):
             return "SST"
         return "SA"
 
@@ -6961,29 +7218,24 @@ class MainWindow(QMainWindow):
         return params
 
     def export_config_preset(self):
-        """Экспорт пресета настроек SU2 в файл .su2preset."""
+        """Экспорт текущего конфига (или его выбранных значений) в .su2preset."""
         import su2_preset_format as PF
         w = self.pr_w
-        source = w["source"].currentData()
         try:
-            name = w["name"].text().strip() or "Без имени"
-            if source == "session":
-                params = self._session_params()
-                if not params:
-                    w["out"].setText(
-                        "Внимание: Настройки проекта ещё не созданы — сначала "
-                        "подготовьте расчёт либо выберите встроенный шаблон.")
-                    return
-                description = "Экспорт текущих настроек проекта AeroOpt"
-                based_on = None
+            if "table" in w:
+                params = preset_table_params(w["table"])
             else:
-                preset = PF.builtin_presets().get(source)
-                if not preset:
-                    w["out"].setText("Внимание: Встроенный шаблон не найден")
-                    return
-                params = dict(preset.get("params") or {})
-                description = str(preset.get("description") or "")
-                based_on = source
+                params = {}
+            label = w["combo"].currentText() if "combo" in w else "пресет"
+            if not params:
+                w["out"].setText(
+                    "Внимание: нечего экспортировать — сначала выберите "
+                    "конфиг или заполните значения.")
+                return
+            # Имя файла выводим из подписи конфига (без префиксов вида
+            # «Встроенный: / Официальный: / Мой: ») либо из названия пресета.
+            name = label.split(": ", 1)[-1].strip() or "пресет"
+            name = name.replace(":", "-").replace("/", "-")
             check = PF.validate_preset(PF.make_preset(name, params))
             if not check["ok"]:
                 w["out"].setText("Внимание: Пресет не прошёл проверку:\n"
@@ -6995,8 +7247,7 @@ class MainWindow(QMainWindow):
                 f"Пресет AeroOpt (*{PF.EXTENSION});;JSON (*.json)")
             if not path:
                 return
-            PF.export_preset(path, name, params, description=description,
-                             based_on=based_on)
+            PF.export_preset(path, name, params)
             w["out"].setText(
                 PF.describe_format() + "\n\nСохранено: " + path
                 + f"\nПараметров: {len(params)}\n\nСодержимое:\n"
@@ -7006,7 +7257,7 @@ class MainWindow(QMainWindow):
             w["out"].setText(f"Внимание: Ошибка экспорта: {e}")
 
     def import_config_preset(self):
-        """Импорт и проверка пресета."""
+        """Импорт и проверка пресета — значения попадают в таблицу."""
         import su2_preset_format as PF
         w = self.pr_w
         path, _ = QFileDialog.getOpenFileName(
@@ -7020,8 +7271,16 @@ class MainWindow(QMainWindow):
             w["out"].setText(f"Внимание: Не удалось прочитать пресет: {e}")
             return
         self._imported_preset = preset
-        w["name"].setText(preset.get("name") or "Импортированный")
         params = preset.get("params") or {}
+        # Заполняем редактируемую таблицу — пользователь может править,
+        # применить или сохранить как свой пресет.
+        if "table" in w:
+            table = w["table"]
+            table.setRowCount(0)
+            table.setRowCount(len(params))
+            for i, (k, v) in enumerate(sorted(params.items())):
+                table.setItem(i, 0, QTableWidgetItem(str(k)))
+                table.setItem(i, 1, QTableWidgetItem(str(v)))
         lines = [f"Импорт: {os.path.basename(path)}",
                  f"Имя: {preset.get('name')}",
                  f"Версия формата: {preset.get('schema_version')}",
@@ -7034,14 +7293,21 @@ class MainWindow(QMainWindow):
         self.log_text.append(f"Пресет импортирован: {path}")
 
     def apply_imported_preset(self):
-        """Применяет импортированный пресет к настройкам проекта."""
+        """Применяет конфиг (из таблицы или импортированный) к проекту."""
         import su2_preset_format as PF
         w = self.pr_w
+        if "table" in w:
+            params = preset_table_params(w["table"])
+        else:
+            params = {}
         preset = self._imported_preset
-        if not preset:
-            w["out"].setText("Внимание: Сначала импортируйте файл пресета")
+        if not params and preset:
+            params = dict(preset.get("params") or {})
+        if not params:
+            w["out"].setText(
+                "Внимание: Сначала импортируйте файл пресета или заполните "
+                "таблицу параметров.")
             return
-        params = dict(preset.get("params") or {})
         try:
             catalogue = PF.key_catalogue()
         except Exception:
@@ -7060,6 +7326,8 @@ class MainWindow(QMainWindow):
                         setattr(sess, k, v)
                     except Exception:
                         pass
+        label = w["combo"].currentText() if "combo" in w else ""
+        name = label or (preset.get("name") if preset else "конфиг")
         text = (f"Применено параметров: {len(applied)}\n"
                 + "\n".join("  Готово: " + a for a in applied))
         if skipped:
@@ -7070,7 +7338,7 @@ class MainWindow(QMainWindow):
                  "«SU2»: часть ключей SU2 пишется в config.cfg только при "
                  "подготовке нового расчёта.")
         w["out"].setText(text)
-        self.log_text.append(f"Готово: Пресет «{preset.get('name')}» применён: "
+        self.log_text.append(f"Готово: Пресет «{name}» применён: "
                              f"{len(applied)} параметров")
 
 

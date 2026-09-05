@@ -19,8 +19,10 @@ ui/analysis_pages.py — страницы панели настроек для �
 from __future__ import annotations
 
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
+    QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 from postprocessing.report import TEMPLATES
@@ -241,55 +243,204 @@ def build_specials_page(on_polar=None, on_report=None, on_csv=None) -> tuple:
 # Пресеты конфигурации
 # ---------------------------------------------------------------------------
 
+def _collect_all_presets() -> dict:
+    """Все конфиги пресетов: встроенные + официальные + пользовательские.
+
+    Возвращает ``{подпись: {kind, name, params, desc}}``. Подпись
+    («Встроенный: …», «Официальный: …», «Мой: …») — это текст пункта в
+    выпадающем списке. ``kind``: builtin / official / user (по нему
+    разрешаются «Сохранить» / «Удалить»).
+    """
+    import su2_autoconfig as _AC
+    items = {}
+    for name in _AC.PRESET_ORDER:
+        label, desc = _AC.PRESET_INFO.get(name, (name, ""))
+        items["Встроенный: %s (%s)" % (label, name)] = {
+            "kind": "builtin", "name": name,
+            "params": dict(_AC.PRESETS[name]), "desc": desc,
+        }
+    try:
+        import su2_config_dialog as _D
+        for label, meta in _D.OFFICIAL_PRESETS.items():
+            items[label] = {                       # label = «Официальный: …»
+                "kind": "official", "name": label,
+                "params": dict(meta["params"]),
+                "desc": meta.get("description", ""),
+            }
+        for name, params in _D.load_user_presets().items():
+            items["Мой: %s" % name] = {
+                "kind": "user", "name": name,
+                "params": dict(params), "desc": "",
+            }
+    except Exception:                              # pragma: no cover
+        pass
+    return items
+
+
+def _reload_preset_combo(combo) -> None:
+    combo.clear()
+    for label in _collect_all_presets():
+        combo.addItem(label)
+
+
+def preset_table_params(table) -> dict:
+    """Собирает ``{ключ: значение}`` из редактируемой таблицы пресета."""
+    params = {}
+    if table is None:
+        return params
+    for i in range(table.rowCount()):
+        k_item = table.item(i, 0)
+        if k_item is None:
+            continue
+        k = str(k_item.text()).strip()
+        if not k:
+            continue
+        v_item = table.item(i, 1)
+        params[k] = str(v_item.text()) if v_item is not None else ""
+    return params
+
+
+def _load_selected_preset(w) -> None:
+    """Показывает параметры выбранного конфига в редактируемой таблице."""
+    label = w["combo"].currentText()
+    info = _collect_all_presets().get(label)
+    table = w["table"]
+    table.setRowCount(0)
+    if not info:
+        w["out"].setText("Выберите конфиг — здесь появятся его параметры.")
+        return
+    params = info["params"]
+    table.setRowCount(len(params))
+    for i, (k, v) in enumerate(sorted(params.items())):
+        table.setItem(i, 0, QTableWidgetItem(str(k)))
+        table.setItem(i, 1, QTableWidgetItem(str(v)))
+    head = "%s — параметров: %d." % (label, len(params))
+    if info.get("desc"):
+        head += "\n" + info["desc"]
+    w["out"].setText(head)
+
+
+def _save_user_preset(w) -> None:
+    """Сохраняет текущие значения таблицы как пользовательский пресет."""
+    import su2_config_dialog as _D
+    params = preset_table_params(w["table"])
+    if not params:
+        w["out"].setText("Внимание: нет ни одного параметра для сохранения.")
+        return
+    name, ok = QInputDialog.getText(None, "Мой пресет", "Название пресета:")
+    if not ok or not name.strip():
+        return
+    name = name.strip()
+    presets = _D.load_user_presets()
+    presets[name] = params
+    _D.save_user_presets(presets)
+    _reload_preset_combo(w["combo"])
+    idx = w["combo"].findText("Мой: %s" % name)
+    if idx >= 0:
+        w["combo"].setCurrentIndex(idx)
+    w["out"].setText(f"Пресет «{name}» сохранён ({len(params)} параметров).")
+
+
+def _delete_user_preset(w) -> None:
+    """Удаляет выбранный пользовательский пресет (с подтверждением)."""
+    import su2_config_dialog as _D
+    label = w["combo"].currentText()
+    info = _collect_all_presets().get(label)
+    if not info or info["kind"] != "user":
+        w["out"].setText(
+            "Удалить можно только свой пресет. Встроенные и официальные "
+            "конфиги защищены от изменения, их можно скопировать под своим "
+            "именем через «Сохранить как мой пресет».")
+        return
+    name = info["name"]
+    ret = QMessageBox.question(
+        None, "Удалить пресет",
+        f"Удалить пресет «{name}»?",
+        QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+    if ret != QMessageBox.Yes:
+        return
+    presets = _D.load_user_presets()
+    if name in presets:
+        del presets[name]
+        _D.save_user_presets(presets)
+    _reload_preset_combo(w["combo"])
+    w["out"].setText(f"Пресет «{name}» удалён.")
+
+
 def build_presets_page(on_export=None, on_import=None, on_apply=None) -> tuple:
-    """Страница «Формат конфигурации»: именованные пресеты config.cfg."""
+    """Страница «Формат конфигурации»: выбор и правка пресетов config.cfg.
+
+    Выпадающий список содержит ВСЕ конфиги (встроенные ultra/safe,
+    официальные кейсы SU2 и пользовательские). Ниже — редактируемая
+    таблица параметров выбранного конфига; значения можно менять. Под ней —
+    «Применить к проекту», «Сохранить как мой пресет» и «Удалить мой пресет»,
+    а также импорт/экспорт файла .su2preset.
+    """
     page = QWidget()
     lay = QVBoxLayout(page)
     lay.setContentsMargins(10, 10, 10, 10)
 
     lbl = QLabel(
-        "Пресет — именованный набор параметров SU2 (JSON, расширение "
-        ".su2preset). Импорт/экспорт позволяют переносить удачные "
-        "настройки между проектами и хранить их в системе контроля версий.")
+        "Конфиг — именованный набор параметров SU2. Выберите его в списке, "
+        "при необходимости правьте значения в таблице, затем примените к "
+        "проекту, сохраните как свой или удалите. Импорт/экспорт позволяют "
+        "переносить настройки файлом .su2preset.")
     lbl.setWordWrap(True)
     lay.addWidget(lbl)
 
-    gb = QGroupBox("Пресет")
+    gb = QGroupBox("Конфиг")
     f = QFormLayout(gb)
     w = {}
-    w["name"] = QLineEdit("Мой пресет")
-    w["source"] = QComboBox()
-    w["source"].addItem("Текущие настройки проекта", "session")
-    try:
-        import su2_autoconfig as _AC
-        for _n in _AC.PRESET_ORDER:
-            _lbl = _AC.PRESET_INFO.get(_n, (_n, ""))[0]
-            w["source"].addItem("Встроенный: %s (%s)" % (_lbl, _n), _n)
-    except Exception:
-        w["source"].addItem("Встроенный: Долго, но точно (ultra)", "ultra")
-        w["source"].addItem("Встроенный: Быстро, но грубо (safe)", "safe")
-    w["btn_export"] = QPushButton("Экспортировать пресет…")
-    w["btn_import"] = QPushButton("Импортировать пресет…")
-    w["btn_apply"] = QPushButton("Готово: Применить импортированный к проекту")
+    w["combo"] = QComboBox()
+    _reload_preset_combo(w["combo"])
+    w["combo"].currentTextChanged.connect(
+        lambda _t: _load_selected_preset(w))
+    f.addRow("Конфиг:", w["combo"])
+
+    w["table"] = QTableWidget(0, 2)
+    w["table"].setHorizontalHeaderLabels(["Ключ", "Значение"])
+    w["table"].horizontalHeader().setStretchLastSection(True)
+    w["table"].horizontalHeader().setSectionResizeMode(
+        0, QHeaderView.ResizeToContents)
+    w["table"].horizontalHeader().setSectionResizeMode(
+        1, QHeaderView.Stretch)
+    w["table"].setSelectionBehavior(QAbstractItemView.SelectRows)
+    w["table"].setMinimumHeight(220)
+    w["table"].verticalHeader().setVisible(False)
+    w["table"].setToolTip(
+        "Значения можно менять. Ключи с ошибкой распознаются при "
+        "применении к проекту как предупреждение (SU2 развивается).")
+    f.addRow(w["table"])
+    lay.addWidget(gb)
+
+    row = QHBoxLayout()
+    w["btn_apply"] = QPushButton("Готово: Применить к проекту")
+    w["btn_save"] = QPushButton("Сохранить как мой пресет")
+    w["btn_delete"] = QPushButton("Удалить мой пресет")
+    w["btn_export"] = QPushButton("Экспорт…")
+    w["btn_import"] = QPushButton("Импорт…")
+    for b in (w["btn_apply"], w["btn_save"], w["btn_delete"],
+              w["btn_export"], w["btn_import"]):
+        row.addWidget(b)
+    lay.addLayout(row)
+
+    if on_apply:
+        w["btn_apply"].clicked.connect(on_apply)
     if on_export:
         w["btn_export"].clicked.connect(on_export)
     if on_import:
         w["btn_import"].clicked.connect(on_import)
-    if on_apply:
-        w["btn_apply"].clicked.connect(on_apply)
-    f.addRow("Имя:", w["name"])
-    f.addRow("Источник:", w["source"])
-    f.addRow(w["btn_export"])
-    f.addRow(w["btn_import"])
-    f.addRow(w["btn_apply"])
-    lay.addWidget(gb)
+    w["btn_save"].clicked.connect(lambda: _save_user_preset(w))
+    w["btn_delete"].clicked.connect(lambda: _delete_user_preset(w))
 
     w["out"] = QTextEdit(); w["out"].setReadOnly(True)
     w["out"].setPlaceholderText(
-        "Содержимое пресета и результат проверки: неизвестные ключи "
+        "Описание конфига и результат проверки. Неизвестные ключи "
         "считаются предупреждением (SU2 развивается, и новый ключ не "
-        "должен ломать старый пресет), отсутствующие значения — тоже.")
+        "должен ломать старый пресет).")
     lay.addWidget(w["out"], stretch=1)
+
+    _load_selected_preset(w)
     return page, w
 
 

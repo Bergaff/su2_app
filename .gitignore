@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+venv_t/
 
 # Сборка .exe (PyInstaller)
 build/
@@ -26,3 +27,6 @@ _skipped.node
 
 # артефакты тестов
 tests/_tmp_*/
+
+# официальные 3D-сетки SU2 (качаются official_cases.downloader, крупные файлы)
+official_cases/meshes/

@@ -269,6 +269,11 @@ STALL_START = 50        # не судить раньше: совпадает с 
 STALL_FLAT_MARGIN = 1.0  # порядков до цели сходимости — дальше ждать нечего
 DEFAULT_CONV_MINVAL = -7.0  # как в CONV_RESIDUAL_MINVAL у config_builder
 
+# Порог, выше которого коэффициент считается физически невозможным и
+# расценен как blow-up (расхождение), а не как результат. У самолёта при
+# M=0.176 CL/CD — единицы-десятки; 1e3 уже срыв, 1e19 — явный разлёт.
+MAX_PHYSICAL_COEFF = 1e3
+
 
 def stall_patience_for(max_iter):
     """Терпение детектора, согласованное с лимитом итераций.
@@ -824,6 +829,25 @@ class SU2Worker:
                 "Проверьте, что тело самолёта нанесено на границу 'airfoil' "
                 "и геометрия замкнута.")
 
+        # Физический потолок коэффициентов. Разошедшийся расчёт (дырявая
+        # стенка, вывернутые ячейки) всё равно пишет history.csv, и числа
+        # 1e19 проходят проверку «не нули» выше. Такие коэффициенты — не
+        # результат, а признак срыва: у самолёта при M=0.176 CL/CD физически
+        # в пределах десятков, а 1e19 это 10^19 — явный blow-up.
+        for _k, _name in (("cl", "CL"), ("cd", "CD"), ("cm", "CM")):
+            try:
+                _v = float(hist[_k])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if abs(_v) > MAX_PHYSICAL_COEFF:
+                return self._result(aoa, False,
+                    f"Решение разошлось ({_name}={_v:.3g} — физически "
+                    f"невозможно, предел {MAX_PHYSICAL_COEFF:g}).\n"
+                    "Проверьте сетку: стенка 'airfoil' должна быть "
+                    "замкнутой (без дыр), иначе маркер стены дырявый и "
+                    "давление интегрируется по потоку.\n\n"
+                    f"Хвост лога:\n{self._tail_text()}")
+
         res = self._result(aoa, True, rms=hist.get("rms"))
         res.update({"cl": hist["cl"], "cd": hist["cd"], "cm": hist["cm"]})
         if hist.get("half_model"):
@@ -1267,10 +1291,16 @@ class OptimizationWorker(QThread):
                 mesh_dst = os.path.join(case_dir, "mesh.su2")
                 if os.path.exists(MESH_FILE):
                     shutil.copy2(MESH_FILE, mesh_dst)
-                from solver.config_builder import build_su2_config
+                from solver.config_builder import (
+                    build_su2_config, low_mach_incompressible_solver)
                 planes = self._enabled_symmetry_planes(mesh_dst)
+                # T-low-mach: на малых скоростях считаем несжимаемым решателем
+                # (как и в основном прогоне через write_case_config), иначе
+                # оптимизация получает тот же завышенный Cd сжимаемого EULER.
+                solver_eff = low_mach_incompressible_solver(
+                    self.solver, self.physics.get("mach"))
                 text = build_su2_config(
-                    fp.aoa, self.physics, self.solver, self.ref_data,
+                    fp.aoa, self.physics, solver_eff, self.ref_data,
                     mesh_quality=getattr(self, "mesh_quality", None),
                     use_symmetry=bool(planes),
                     symmetry_planes=planes,
@@ -1387,3 +1417,72 @@ class OptimizationWorker(QThread):
             self.log_signal.emit(f"Оптимизация завершена за {dt:.0f} сек. "
                                  f"Лучший K={best.get('k_weighted', 0):.2f}")
         self.opt_finished.emit(best if best_score > -1e17 else None)
+
+
+# ---------------------------------------------------------------------------
+# OfficialCaseRunWorker — одиночный «официальный кейс SU2» одним нажатием
+# ---------------------------------------------------------------------------
+class OfficialCaseRunWorker(QThread):
+    """Запускает готовый официальный кейс SU2 (эталонные сетка+config).
+
+    Подготавливается заранее через ``official_cases.prepare_case_run_dir``
+    (каталог с ``mesh.su2`` и ``config.cfg``), а здесь только исполняется
+    через ``SU2Worker`` — тот же механизм, что и обычная расчётная точка.
+    По завершении сравнивает полученные Cl/Cd с эталонными значениями из
+    регрессии SU2 (``ref_cl``/``ref_cd``).
+    """
+
+    log_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(int, str)
+    finished_signal = pyqtSignal(bool, str)
+
+    def __init__(self, case_dir, cpu_cores=1, compute_device="cpu",
+                 gpu_percent=0, case_name="", ref_cl=None, ref_cd=None,
+                 parent=None):
+        super().__init__(parent)
+        self.case_dir = case_dir
+        self.cpu_cores = max(1, int(cpu_cores or 1))
+        self.compute_device = str(compute_device or "cpu")
+        self.gpu_percent = int(gpu_percent or 0)
+        self.case_name = case_name or os.path.basename(case_dir)
+        self.ref_cl = ref_cl
+        self.ref_cd = ref_cd
+
+    def run(self):
+        worker = SU2Worker(
+            self.case_dir, self.cpu_cores,
+            log_cb=lambda m: self.log_signal.emit(m),
+            progress_cb=lambda p: self.progress_signal.emit(int(p), "Расчёт"),
+            compute_device=self.compute_device,
+            gpu_percent=self.gpu_percent,
+        )
+        try:
+            res = worker.run(0.0)
+        except Exception as e:                      # pragma: no cover
+            self.finished_signal.emit(False, f"Ошибка запуска официального "
+                                             f"кейса: {e}")
+            return
+        if res.get("error"):
+            msg = res.get("error_msg") or f"расчёт не сошёлся ({res.get('rms')})"
+            self.finished_signal.emit(
+                False, f"«{self.case_name}»: {msg}")
+            return
+        cl = float(res.get("cl", 0.0) or 0.0)
+        cd = float(res.get("cd", 0.0) or 0.0)
+        cm = float(res.get("cm", 0.0) or 0.0)
+        lines = [
+            f"Готово: официальный кейс «{self.case_name}»: "
+            f"CL={cl:.5f}, CD={cd:.5f}, CM={cm:.5f}.",
+        ]
+        if self.ref_cl is not None or self.ref_cd is not None:
+            lines.append("Эталон (регрессия SU2):")
+            if self.ref_cl is not None:
+                dev = abs(cl - self.ref_cl) / max(abs(self.ref_cl), 1e-9) * 100
+                lines.append(f"  CL={self.ref_cl:.5f} (отклонение {dev:.1f}%)")
+            if self.ref_cd is not None:
+                dev = abs(cd - self.ref_cd) / max(abs(self.ref_cd), 1e-9) * 100
+                lines.append(f"  CD={self.ref_cd:.5f} (отклонение {dev:.1f}%)")
+        else:
+            lines.append("Эталонные значения для этого кейса не заданы.")
+        self.log_signal.emit("\n".join(lines))
+        self.finished_signal.emit(True, "\n".join(lines))

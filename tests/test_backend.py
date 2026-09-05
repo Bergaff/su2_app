@@ -180,6 +180,21 @@ _td = _case(None)
 check("без config.cfg масштаб 1.0", symmetry_scale(_td) == 1.0,
       symmetry_scale(_td))
 
+# --- физический потолок коэффициентов ------------------------------------
+# Разошедшийся расчёт (дырявая стенка) пишет history.csv с числами 1e19.
+# Такой «результат» нельзя выдавать за успех: он проходит проверку «не
+# нули», но физически невозможен. MAX_PHYSICAL_COEFF отсекает blow-up —
+# SU2Worker.run вернёт error, а не «успешный» результат с CL=1e19.
+from solver.workers import MAX_PHYSICAL_COEFF
+
+check("MAX_PHYSICAL_COEFF определён (1e3)",
+      isinstance(MAX_PHYSICAL_COEFF, (int, float)) and MAX_PHYSICAL_COEFF == 1e3,
+      MAX_PHYSICAL_COEFF)
+check("нормальные CL/CD ниже потолка",
+      abs(0.30) < MAX_PHYSICAL_COEFF and abs(0.020) < MAX_PHYSICAL_COEFF)
+check("blow-up CL=1.34e19 превышает потолок",
+      abs(1.34e19) > MAX_PHYSICAL_COEFF)
+
 # --- «Полный самолёт» подстраивает ГО по фюзеляжу ------------------------
 # Без этого hs_pos_x остаётся заводским (6.5 м) при фюзеляже, который
 # кончается на x=+4: оперение висело в 2.5 м позади хвоста.
@@ -232,7 +247,8 @@ if _MW is not None:
 
 # ---------------------------------------------------------------- config_builder
 print("== solver.config_builder ==")
-from solver.config_builder import build_su2_config, write_case_config
+from solver.config_builder import (
+    build_su2_config, write_case_config, low_mach_incompressible_solver)
 
 class _FakeSession:
     solver = "RANS"
@@ -287,6 +303,42 @@ _check_euler = build_su2_config(aoa=0.0, physics=_FakeSession.physics,
                                 ref_data=_FakeSession.ref_data)
 check("EULER-конфиг собирается", "SOLVER= EULER" in _check_euler
       and "CARBON_MODEL" not in _check_euler)
+
+# --- T-low-mach: несжимаемый решатель (INC_EULER / INC_RANS) ---------------
+_inc_phys = {"mach": 0.176, "rho": 1.225, "speed": 60.0,
+             "pressure": 101325.0, "temperature": 288.15}
+_inc_euler = build_su2_config(aoa=3.0, physics=_inc_phys, solver="INC_EULER",
+                              ref_data=(1.20, 12.0, 0.25, 0.0, 0.0),
+                              markers=["airfoil"])
+check("INC_EULER-конфиг собирается",
+      "SOLVER= INC_EULER" in _inc_euler
+      and "MACH_NUMBER" not in _inc_euler
+      and "CARBON_MODEL" not in _inc_euler)
+check("INC_EULER: заданы плотность и скорость потока",
+      "INC_DENSITY_INIT=" in _inc_euler and "INC_VELOCITY_INIT=" in _inc_euler
+      and "INC_NONDIM= INITIAL_VALUES" in _inc_euler)
+check("INC_EULER: официальная схема FDS",
+      "CONV_NUM_METHOD_FLOW= FDS" in _inc_euler)
+check("INC_EULER: угол атаки в скорости (u=Vcos, w=Vsin)",
+      "59.917772" in _inc_euler and "3.140157" in _inc_euler)
+_inc_rans = build_su2_config(aoa=3.0, physics=_inc_phys, solver="INC_RANS",
+                             ref_data=(1.20, 12.0, 0.25, 0.0, 0.0),
+                             markers=["airfoil"], turb_model="SST")
+check("INC_RANS-конфиг собирается",
+      "SOLVER= INC_RANS" in _inc_rans and "KIND_TURB_MODEL= SST" in _inc_rans
+      and "MARKER_HEATFLUX=" in _inc_rans)
+import su2_autoconfig as _AC  # noqa: E402 — лёгкий импорт для локальной проверки
+check("INC_L2: оба INC-конфига читаемы для SU2 (lint-чистые)",
+      _AC.su2_lint_lines(_inc_euler) == [] and _AC.su2_lint_lines(_inc_rans) == [])
+check("low_mach_incompressible_solver: малый Mach -> INC_*",
+      low_mach_incompressible_solver("EULER", 0.176) == "INC_EULER"
+      and low_mach_incompressible_solver("RANS", 0.176) == "INC_RANS")
+check("low_mach_incompressible_solver: большой Mach не трогается",
+      low_mach_incompressible_solver("RANS", 0.5) == "RANS")
+check("low_mach_incompressible_solver: INC_* сохраняется",
+      low_mach_incompressible_solver("INC_RANS", 0.176) == "INC_RANS")
+check("low_mach_incompressible_solver: без Mach — без переключения",
+      low_mach_incompressible_solver("EULER", None) == "EULER")
 
 with tempfile.TemporaryDirectory() as td:
     p = write_case_config(td, 6.0, _FakeSession())
@@ -1193,6 +1245,21 @@ with tempfile.TemporaryDirectory() as td:
 check("_session_params читает объект расчёта",
       isinstance(_w6._session_params(), dict))
 
+# Регрессия: apply_imported_preset падал с NameError ('preset_table_params' is
+# not defined), потому что функция импортировалась локально внутри __init__ и
+# не была видна другим методам. Это ловится только когда в pr_w есть 'table'
+# (в реальном окне он есть; в _mk_window выше его не было — тест не доставал
+# до падавшей строки). Здесь проверяем сам путь с таблицей.
+_w6b = _mk_window()
+_w6b.pr_w = {**_w6b.pr_w,
+             "table": _FakeTable([["CFL_NUMBER", "3.5"],
+                                  ["MUSCL_FLOW", "YES"]])}
+_w6b._imported_preset = None
+_w6b.apply_imported_preset()
+check("apply_imported_preset с таблицей не падает NameError",
+      isinstance(_w6b.pr_w["out"].text(), str)
+      and "Применено параметров" in _w6b.pr_w["out"].text())
+
 print("== ui.main_window: DOE-таблица и адаптация по Cp ==")
 _w7 = _mk_window()
 check("_doe_param_names: расширенный набор параметров",
@@ -1515,13 +1582,16 @@ _SU2_V8_OPTIONS = frozenset({
     "REYNOLDS_LENGTH", "REYNOLDS_NUMBER", "SCREEN_OUTPUT", "SCREEN_WRT_FREQ_INNER",
     "SIDESLIP_ANGLE", "SLOPE_LIMITER_FLOW", "SLOPE_LIMITER_TURB", "SOLUTION_FILENAME",
     "SOLVER", "SURFACE_FILENAME", "TIME_DISCRE_FLOW", "TIME_DISCRE_TURB",
-    "VENKAT_LIMITER_COEFF", "VOLUME_FILENAME"
+    "VENKAT_LIMITER_COEFF", "VOLUME_FILENAME",
+    # Несжимаемый решатель INC_* (малые скорости): параметры инициализации.
+    "INC_DENSITY_INIT", "INC_VELOCITY_INIT", "INC_NONDIM",
+    "INC_DENSITY_REF", "INC_VELOCITY_REF", "INC_TEMPERATURE_REF",
 })
 
 def _aeroopt_option_keys():
     """Все имена опций, которые AeroOpt пишет или предлагает в config.cfg."""
     found = set()
-    for eq in ("EULER", "RANS"):
+    for eq in ("EULER", "RANS", "INC_EULER", "INC_RANS"):
         for sym in ([], ["xz"]):
             for tm in ("SA", "SST"):
                 txt = _bsc(3.0, _phys, eq, _ref, markers=["airfoil"],

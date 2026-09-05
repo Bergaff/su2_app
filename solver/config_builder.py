@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Iterable, Mapping, Optional, Sequence
 
@@ -437,6 +438,159 @@ OUTPUT_WRT_FREQ= 100
 """
 
 
+def _inc_velocity(speed: float, aoa_deg: float) -> tuple:
+    """Скорость набегающего потока для несжимаемого решателя INC_*.
+
+    SU2 кодирует угол атаки в компонентах ``INC_VELOCITY_INIT``. Ось
+    размаха крыла у нас — Y, вертикаль — Z, поэтому AoA поворачивает поток
+    в плоскости X-Z: u = V·cos(a), v = 0, w = V·sin(a).
+    """
+    a = math.radians(float(aoa_deg or 0.0))
+    v = float(speed or 0.0)
+    return v * math.cos(a), 0.0, v * math.sin(a)
+
+
+def build_inc_config(p: Mapping, markers=None, restart: bool = False,
+                     mesh_quality=None,
+                     use_symmetry: bool = False,
+                     symmetry_planes: list = None,
+                     enable_cuda: bool = False,
+                     n_bodies: int = 0, n_points: int = 0,
+                     cfl_aggressive: bool = False,
+                     solver_name: str = "INC_EULER",
+                     turb_model: str = "SA") -> str:
+    """Шаблон config.cfg для несжимаемого решателя SU2 (INC_*).
+
+    Это официальный способ SU2 считать внешнее обтекание на малых скоростях
+    (M<0.3): сжимаемый EULER/RANS на таких режимах становится жёстким по
+    акустике и завышает сопротивление. Ключевые параметры:
+        SOLVER= INC_EULER / INC_NAVIER_STOKES / INC_RANS
+        INC_DENSITY_INIT, INC_VELOCITY_INIT, INC_NONDIM= INITIAL_VALUES
+        CONV_NUM_METHOD_FLOW= FDS   (официальная схема для incompressible)
+
+    ``solver_name`` — одно из ``INC_EULER``, ``INC_NAVIER_STOKES``,
+    ``INC_RANS``. Для ``INC_RANS`` используется ``turb_model`` ("SA"/"SST").
+    """
+    sol = str(solver_name or "INC_EULER").strip().upper()
+    viscos = sol in ("INC_NAVIER_STOKES", "INC_RANS")
+    turbulent = sol == "INC_RANS"
+
+    restart_str = "YES" if restart else "NO"
+    body_markers = format_marker_list(markers)
+    if n_bodies or n_points:
+        inner_iter, _why = inner_iter_estimate(
+            mesh_quality, n_bodies=n_bodies, n_points=n_points,
+            is_rans=viscos)
+    else:
+        inner_iter, _why = _inner_iter_for_quality(mesh_quality), ""
+    cfl_param = CFL_PARAM_FAST if cfl_aggressive else CFL_PARAM_SAFE
+    cfl_adapt = "YES"
+    lin_iter = LINEAR_SOLVER_ITER
+
+    u, v, w = _inc_velocity(p.get("speed", 0.0), p.get("aoa", 0.0))
+    density = float(p.get("rho", 1.225) or 1.225)
+
+    # === ENABLE_CUDA: GPU-ветка произведения матрицы на вектор =========
+    cuda_line = "ENABLE_CUDA= YES" if enable_cuda else "% ENABLE_CUDA= NO   # выключено"
+    # ====================================================================
+
+    # === T1: MARKER_SYM — плоскости симметрии ========================
+    if symmetry_planes is None and use_symmetry:
+        symmetry_planes = ["xz"]
+    sym_names = _sym_marker_names(symmetry_planes)
+    if sym_names:
+        sym_line = "MARKER_SYM= ( " + " ".join(sym_names) + " )"
+    else:
+        sym_line = "% MARKER_SYM= ( symmetry_xy symmetry_xz symmetry_yz )  # выключено"
+    # ====================================================================
+
+    solver = "INC_RANS" if viscos else "INC_EULER"
+
+    # === T4: SST vs SA (только для турбулентного INC_RANS) ============
+    if turbulent and str(turb_model or "SA").strip().upper() in (
+            "SST", "MENTER", "KW", "K-OMEGA", "K_OMEGA"):
+        turb_block = (
+            "KIND_TURB_MODEL= SST\n"
+            "CONV_NUM_METHOD_TURB= ROE\n"
+            "MUSCL_TURB= YES\n"
+            "SLOPE_LIMITER_TURB= VENKATAKRISHNAN\n"
+        )
+    else:
+        turb_block = (
+            "KIND_TURB_MODEL= SA\n"
+            "CONV_NUM_METHOD_TURB= SCALAR_UPWIND\n"
+            "MUSCL_TURB= NO\n"
+            "CFL_REDUCTION_TURB= 0.5\n"
+        )
+    heatflux_markers = _format_marker_value_pairs(markers, 0.0)
+
+    if viscos:
+        # Вязкий INC (INC_NAVIER_STOKES / INC_RANS): стенка как heatflux.
+        wall_line = f"MARKER_HEATFLUX= {heatflux_markers}"
+    else:
+        wall_line = f"MARKER_EULER= {body_markers}"
+
+    screen = ("(INNER_ITER, WALL_TIME, RMS_PRESSURE, RMS_VELOCITY-X, "
+              "LIFT, DRAG)")
+    if turbulent:
+        screen = ("(INNER_ITER, WALL_TIME, RMS_PRESSURE, RMS_NU_TILDE, "
+                  "LIFT, DRAG)")
+
+    return f"""SOLVER= {sol}
+{turb_block if turbulent else ''}MATH_PROBLEM= DIRECT
+RESTART_SOL= {restart_str}
+SOLUTION_FILENAME= restart.dat
+RESTART_FILENAME= restart.dat
+MESH_FILENAME= {os.path.basename(str(p.get('MESH_FILENAME', 'mesh.su2')))}
+MESH_FORMAT= SU2
+INC_DENSITY_INIT= {density:.6f}
+INC_VELOCITY_INIT= ( {u:.6f}, {v:.6f}, {w:.6f} )
+INC_NONDIM= INITIAL_VALUES
+INC_DENSITY_REF= 1.0
+INC_VELOCITY_REF= 1.0
+INC_TEMPERATURE_REF= 1.0
+REF_LENGTH= {float(p['ref_length']):.12g}
+REF_AREA= {float(p['ref_area']):.12g}
+REF_ORIGIN_MOMENT_X= {float(p['ox']):.12g}
+REF_ORIGIN_MOMENT_Y= {float(p['oy']):.12g}
+REF_ORIGIN_MOMENT_Z= {float(p['oz']):.12g}
+{wall_line}
+{cuda_line}
+MARKER_FAR= ( farfield )
+{sym_line}
+MARKER_MONITORING= {body_markers}
+MARKER_PLOTTING= {body_markers}
+CONV_NUM_METHOD_FLOW= FDS
+MUSCL_FLOW= YES
+SLOPE_LIMITER_FLOW= VENKATAKRISHNAN
+VENKAT_LIMITER_COEFF= 0.05
+NUM_METHOD_GRAD= WEIGHTED_LEAST_SQUARES
+CFL_NUMBER= 25.0
+CFL_ADAPT= {cfl_adapt}
+CFL_ADAPT_PARAM= {cfl_param}
+TIME_DISCRE_FLOW= EULER_IMPLICIT
+TIME_DISCRE_TURB= EULER_IMPLICIT
+LINEAR_SOLVER= FGMRES
+LINEAR_SOLVER_PREC= ILU
+LINEAR_SOLVER_ERROR= 1e-6
+LINEAR_SOLVER_ITER= {lin_iter}
+INNER_ITER= {inner_iter}
+CONV_RESIDUAL_MINVAL= -10
+CONV_STARTITER= 50
+CONV_CAUCHY_ELEMS= 100
+CONV_CAUCHY_EPS= 1e-5
+SCREEN_OUTPUT= {screen}
+HISTORY_OUTPUT= (INNER_ITER, RMS_RES, AERO_COEFF)
+OUTPUT_FILES= (RESTART, PARAVIEW, SURFACE_PARAVIEW)
+% SU2 7.x appends .vtu to these names itself — write name without extension.
+VOLUME_FILENAME= flow
+SURFACE_FILENAME= surface_flow
+SCREEN_WRT_FREQ_INNER= 50
+HISTORY_WRT_FREQ_INNER= 1
+OUTPUT_WRT_FREQ= 100
+"""
+
+
 def _unpack_ref_data(ref_data: Sequence[float]):
     if ref_data is None or len(ref_data) != 5:
         raise ValueError(
@@ -520,9 +674,27 @@ def build_su2_config(aoa: float, physics: Mapping, solver: str,
         "ox": ox,
         "oy": oy,
         "oz": oz,
+        # Для несжимаемого решателя INC_*: плотность и скорость потока.
+        "rho": float(physics.get("rho", 1.225) or 1.225),
+        "speed": float(physics.get("speed", 0.0) or 0.0),
     }
 
     solver_name = str(solver or "EULER").strip().upper()
+    # === T-low-mach: несжимаемый решатель (INC_EULER / INC_RANS) =========
+    # Проверяем ДО RANS/EULER, потому что "INC_RANS" содержит "RANS", а
+    # "INC_EULER" содержит "EULER" — иначе они ушли бы в сжимаемые ветки.
+    if solver_name.startswith("INC_"):
+        return build_inc_config(
+            p, markers=markers, restart=restart,
+            mesh_quality=mesh_quality,
+            use_symmetry=use_symmetry,
+            symmetry_planes=symmetry_planes,
+            enable_cuda=enable_cuda,
+            n_bodies=n_bodies, n_points=n_points,
+            cfl_aggressive=cfl_aggressive,
+            solver_name=solver_name,
+            turb_model=turb_model,
+        )
     if solver_name.startswith("RANS") or "RANS" in solver_name:
         return build_rans_config(
             p, markers=markers, restart=restart,
@@ -598,6 +770,35 @@ def write_su2_config(path: str, aoa: float, physics: Mapping, solver: str,
     return cfg_path
 
 
+def low_mach_incompressible_solver(solver: str, mach) -> str:
+    """Сопоставляет сжимаемый решатель с несжимаемым на низком Mach.
+
+    Используется в write_case_config для включения INC_* по умолчанию на
+    малых скоростях (M < LOW_MACH_THRESHOLD) — это официальный способ SU2
+    получать правдоподобные Cl/Cd вместо завышенного Cd сжимаемого
+    решателя на таких режимах.
+
+    Возвращает исходный решатель, если Mach не мал или решатель уже
+    несжимаемый/неподдерживаемый.
+    """
+    s = str(solver or "").strip().upper()
+    try:
+        m = float(mach)
+    except (TypeError, ValueError):
+        return str(solver or "EULER")
+    if m >= LOW_MACH_THRESHOLD:
+        return s
+    mapping = {
+        "EULER": "INC_EULER",
+        "NAVIER_STOKES": "INC_NAVIER_STOKES",
+        "RANS": "INC_RANS",
+        "INC_EULER": "INC_EULER",
+        "INC_NAVIER_STOKES": "INC_NAVIER_STOKES",
+        "INC_RANS": "INC_RANS",
+    }
+    return mapping.get(s, s)
+
+
 def write_case_config(case_dir: str, aoa: float, session) -> str:
     """Создаёт ``config.cfg`` по данным ``CalculationSession``.
 
@@ -663,11 +864,34 @@ def write_case_config(case_dir: str, aoa: float, session) -> str:
     # Старое поле use_symmetry — для обратной совместимости
     use_symmetry_final = bool(enabled_planes)
 
+    # === T-low-mach: по умолчанию переключаем на несжимаемый решатель ======
+    # На малых скоростях (M<0.3) сжимаемый EULER/RANS даёт завышенный Cd.
+    # Включение INC_* по умолчанию управляется флагом session, а не
+    # подменяет выбор пользователя: если он сам выбрал INC_* — остаётся
+    # INC_*, а если выбрал сжимаемый и режим малый — уходит в INC_*.
+    solver_final = session.solver
+    if getattr(session, "use_incompressible_at_low_mach", True):
+        # Mach предпочтительно берём из physics; если его там нет (старые
+        # сессии), восстанавливаем из скорости потока и скорости звука,
+        # чтобы низкомаховые прогоны всегда уходили в INC_*, а не падали
+        # в расходимость сжимаемого EULER/RANS.
+        _physics = getattr(session, "physics", {}) or {}
+        _mach = _physics.get("mach")
+        if _mach is None:
+            _sp = _physics.get("speed")
+            _a = _physics.get("a")
+            try:
+                _mach = float(_sp) / max(float(_a), 1e-9)
+            except (TypeError, ValueError):
+                _mach = None
+        solver_final = low_mach_incompressible_solver(
+            session.solver, _mach)
+
     return write_su2_config(
         path=os.path.join(case_dir, "config.cfg"),
         aoa=aoa,
         physics=session.physics,
-        solver=session.solver,
+        solver=solver_final,
         ref_data=session.ref_data,
         markers=["airfoil"],
         restart=restart,
