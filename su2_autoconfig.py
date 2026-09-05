@@ -35,6 +35,7 @@ import math
 import os
 import re
 import shutil
+import time
 
 # ---------------------------------------------------------------------------
 # Пресеты. Трогаем ТОЛЬКО численную схему; граничные условия, маркеры,
@@ -371,24 +372,49 @@ def _case_dir(path):
 
 def _parse_history(case_dir):
     """Читает history.csv. Возвращает (last_iter, last_log10_rho,
-    first_log10_rho, n_rows) или None."""
+    first_log10_rho, n_rows, имя_колонки) или None.
+
+    Колонка невязки: rms[Rho] (сжимаемый решатель) либо rms[P] /
+    rms[pressure] (INC-решатель rms[Rho] не пишет вовсе). Раньше здесь
+    было жёсткое требование rms[Rho]: на INC-прогонах вердикт всегда
+    был «history.csv не найден или пуст - результат неясен», хотя файл
+    лежал рядом и был полным (замер на INC_EULER, V=60). Пороги
+    «сошёлся/разошёлся» — это log10 RMS-невязки, они одинаково применимы
+    к любой из этих колонок.
+
+    Чтение с повтором: сразу после завершения процесса Windows/антивирус
+    может отдавать файл с задержкой или «залоченным».
+    """
     hist = os.path.join(case_dir, "history.csv")
-    if not os.path.isfile(hist):
-        return None
-    try:
-        with open(hist, "r", encoding="utf-8", errors="replace", newline="") as f:
-            rows = list(csv.reader(f))
-    except Exception:
-        return None
-    if len(rows) < 2:
+    rows = None
+    for _attempt in range(3):
+        if os.path.isfile(hist):
+            try:
+                with open(hist, "r", encoding="utf-8", errors="replace",
+                          newline="") as f:
+                    rows = list(csv.reader(f))
+            except Exception:
+                rows = None
+            if rows is not None and len(rows) >= 2:
+                break
+        time.sleep(1.0)
+    if not rows or len(rows) < 2:
         return None
 
     header = [h.strip().strip('"').strip() for h in rows[0]]
     try:
         i_iter = header.index("Inner_Iter")
-        i_rho = next(i for i, h in enumerate(header)
-                     if h.lower().replace(" ", "") in ("rms[rho]",))
-    except (ValueError, StopIteration):
+    except ValueError:
+        return None
+    i_rho, rho_name = None, None
+    for _cand in ("rms[rho]", "rms[p]", "rms[pressure]"):
+        for i, h in enumerate(header):
+            if h.lower().replace(" ", "") == _cand:
+                i_rho, rho_name = i, (h.strip() or _cand)
+                break
+        if i_rho is not None:
+            break
+    if i_rho is None:
         return None
 
     def _val(row):
@@ -414,7 +440,7 @@ def _parse_history(case_dir):
             last_iter = int(float(r[i_iter]))
         except ValueError:
             pass
-    return last_iter, last_v, first_v, n
+    return last_iter, last_v, first_v, n, rho_name
 
 
 #: Признаки того, что SU2 умер на РАЗБОРЕ config.cfg, а не на счёте.
@@ -487,7 +513,7 @@ def detect_result(path, screen_text=None):
     if text_status == "config_error":
         return {"status": "config_error", "detail": _CONFIG_ERROR_DETAIL}
 
-    last_iter, last_v, first_v, n = info
+    last_iter, last_v, first_v, n, rho_name = info
     base = {
         "last_iter": last_iter, "last_log10_rho": last_v,
         "first_log10_rho": first_v, "n_rows": n,
@@ -503,18 +529,18 @@ def detect_result(path, screen_text=None):
     # при норме она падает до отрицательных значений).
     if last_v >= 8.0 or text_status == "diverged":
         return {**base, "status": "diverged",
-                "detail": (f"Расчёт разошёлся: log10(rms[Rho])={last_v:.2f} "
+                "detail": (f"Расчёт разошёлся: log10({rho_name})={last_v:.2f} "
                            f"на итерации {last_iter} (норма: падение до -4…-6).")}
     if last_v <= -4.0:
         return {**base, "status": "converged",
-                "detail": (f"Сходимость хорошая: log10(rms[Rho])={last_v:.2f} "
+                "detail": (f"Сходимость хорошая: log10({rho_name})={last_v:.2f} "
                            f"на итерации {last_iter}.")}
     if text_status == "error":
         return {**base, "status": "error",
-                "detail": (f"SU2 завершился ошибкой; log10(rms[Rho])="
+                "detail": (f"SU2 завершился ошибкой; log10({rho_name})="
                            f"{last_v:.2f} на итерации {last_iter}.")}
     return {**base, "status": "unknown",
-            "detail": (f"Прогон остановлен при log10(rms[Rho])={last_v:.2f} "
+            "detail": (f"Прогон остановлен при log10({rho_name})={last_v:.2f} "
                        f"(итерация {last_iter}); явного расхождения нет.")}
 
 
