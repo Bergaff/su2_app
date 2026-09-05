@@ -178,6 +178,243 @@ def _load_surface_refine():
         return None
 
 
+def _load_surface_remesh():
+    """Загрузить mesh/surface_remesh.py по пути файла (без mesh/__init__)."""
+    try:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "surface_remesh.py")
+        spec = importlib.util.spec_from_file_location(
+            "surface_remesh_standalone", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+
+def _surface_contains(other_pts, other_faces, pts, sample=200):
+    """Доля точек ``pts`` строго внутри замкнутой поверхности.
+
+    Чистый ray-casting по numpy без trimesh: для каждой точки — чётность
+    пересечений луча +X с треугольниками (Möller–Trumbore, векторно).
+    Точки на самой поверхности считаются снаружи (на границе чётность
+    нестабильна, а касание нас и интересует как «не пересечение»).
+    """
+    tri = np.asarray(other_pts, dtype=float)[
+        np.asarray(other_faces, dtype=np.int64)]
+    if len(pts) == 0 or len(tri) == 0:
+        return 0.0
+    pts = np.asarray(pts, dtype=float)
+    if len(pts) > sample:
+        idx = np.random.RandomState(0).choice(len(pts), sample, replace=False)
+        pts = pts[idx]
+    v0, v1, v2 = tri[:, 0], tri[:, 1], tri[:, 2]
+    e1, e2 = v1 - v0, v2 - v0
+    d = np.array([1.0, 0.0, 0.0])
+    pv = np.cross(d, e2)
+    det = np.sum(e1 * pv, axis=1)
+    ok = np.abs(det) > 1e-14
+    e1, e2, pv, det = e1[ok], e2[ok], pv[ok], det[ok]
+    v0 = v0[ok]
+    inside = np.zeros(len(pts), dtype=bool)
+    eps = 1e-12
+    for i, p in enumerate(pts):
+        tv = p - v0
+        u = np.sum(tv * pv, axis=1) / det
+        qv = np.cross(tv, e1)
+        vv = np.sum(qv * d, axis=1) / det
+        t = np.sum(e2 * qv, axis=1) / det
+        hit = (u >= -eps) & (vv >= -eps) & (u + vv <= 1 + eps) & (t > eps)
+        inside[i] = bool(hit.sum() % 2)
+    return float(inside.mean())
+
+
+def _separate_touching_components(body_meshes, h_surf, log=print):
+    """Раздвинуть компоненты, которые ПРИМЫКАЮТ друг к другу.
+
+    Генераторы ставят руль высоты вплотную к задней кромке ГО: линия
+    носка руля лежит В щелевом зазоре ЗК ГО (~0.3 мм). Пересечения
+    объёмов (корень крыла в фюзеляже) булево объединение режет честно,
+    а ВОТ КАСАНИЕ по линии/щели после изотропной ремешки ловит
+    gmsh-объёмник: мелкие треугольники обеих поверхностей занимают один
+    и тот же зазор и легально «касаются» — embed падает с «PLC Error:
+    A segment and a facet intersect».
+
+    Лечение — эксплуатационный зазор навески: касающаяся пара
+    (объёмы НЕ пересекаются в обе стороны) раздвигается по потоку (X):
+    меньший компонент смещается на delta = 4% его минимального габарита
+    (ограничено 0.5…3 мм). Реальные зазоры навески 0.5–2 мм, аэродинами-
+    чески это невидимая поправка, и она логгируется явно.
+
+    Возвращает список сдвинутых mesh (новые pv.PolyData) — те же объекты
+    для нетронутых.
+    """
+    n = len(body_meshes)
+    if n < 2 or h_surf is None:
+        return body_meshes
+    data = []
+    for m in body_meshes:
+        pts, fcs = to_triangles(m)
+        if pts is None or fcs is None:
+            data.append(None)
+            continue
+        vol = abs(surface_remesh_volume(pts, fcs))
+        data.append((pts, fcs, vol))
+    shifts = np.zeros((n, 3))
+    touched = set()
+    for i in range(n):
+        for j in range(i + 1, n):
+            if data[i] is None or data[j] is None:
+                continue
+            pts_i, fcs_i, vol_i = data[i]
+            pts_j, fcs_j, vol_j = data[j]
+            lo_i, hi_i = pts_i.min(axis=0), pts_i.max(axis=0)
+            lo_j, hi_j = pts_j.min(axis=0), pts_j.max(axis=0)
+            # зазор по осям: если по какой-то оси разнесены больше tol —
+            # пара далека, касания нет
+            tol = max(1e-5, 0.1 * h_surf)
+            gap = np.maximum(lo_i - hi_j, lo_j - hi_i)
+            if gap.max() > tol:
+                continue
+            # пересечение объёмов? тогда это честный transversal-случай
+            cij = _surface_contains(pts_j, fcs_j, pts_i)
+            cji = _surface_contains(pts_i, fcs_i, pts_j)
+            if cij > 0.0 or cji > 0.0:
+                continue
+            # чистое касание: сдвигаем меньший по объёму по +X
+            k = i if vol_i <= vol_j else j
+            ext = (pts_i if k == i else pts_j).max(axis=0) - \
+                  (pts_i if k == i else pts_j).min(axis=0)
+            delta = float(np.clip(0.04 * float(ext.min()), 0.0005, 0.003))
+            shifts[k, 0] = max(shifts[k, 0], delta)
+            touched.add(k)
+    if not touched:
+        return body_meshes
+    out = []
+    for k, m in enumerate(body_meshes):
+        if k not in touched:
+            out.append(m)
+            continue
+        m2 = m.copy()
+        m2.translate([float(shifts[k, 0]), 0.0, 0.0], inplace=True)
+        log("   Готово: компонент сдвинут на %.1f мм по потоку: он "
+            "примыкал к соседнему вплотную (зазор 0), а касающиеся "
+            "поверхности после уплотнения ломают объёмную сетку "
+            "(PLC Error). Это типовой зазор навески, геометрия больше "
+            "не меняется." % (1000.0 * shifts[k, 0]))
+        out.append(m2)
+    return out
+
+
+def surface_remesh_volume(points, faces):
+    """Знаковый объём замкнутой поверхности (для выбора меньшего в паре)."""
+    try:
+        from mesh.surface_remesh import surface_volume
+        return surface_volume(points, faces)
+    except Exception:
+        return 0.0
+
+
+def _h_surf_from_target(target_edge):
+    """Шаг изотропной поверхности из пресета качества.
+
+    ``target_edge`` — шаг у тела из пресета («Средняя» ~0.144 м при
+    размахе 9 м). Поверхность перестраивается с ребром 0.55*target: у
+    пресета наконец появляется реальное влияние на телооблекающую сетку
+    (раньше «Точная» вместо «Средней» давала +2% тетраэдров, потому что
+    плотность поверхности задавали генераторы геометрии, а не пресет).
+    """
+    if not target_edge or target_edge <= 0:
+        return None
+    return float(np.clip(0.55 * float(target_edge), 0.025, 0.6))
+
+
+def remesh_components_for_bodyfit(body_meshes, target_edge, log=print):
+    """Изотропная перестройка поверхности компонентов перед объединением.
+
+    Зачем: генераторы тонких поверхностей (ГО/руль — лофт из 3 сечений)
+    дают треугольники с соотношением сторон до тысяч (замер: руль —
+    медиана AR 208, максимум 7127, ребро 0.0002 м рядом с ребром 1.4 м).
+    Объёмный сеточник воспроизводит такую поверхность ограничением и
+    рожает рядом тетраэдры-бритвы — они валят второй порядок SU2 с
+    первой итерации (градиент на ребре 2e-4 м -> NaN). Перестройка
+    (surface_remesh.remesh_component) даёт равносторонние треугольники
+    на той же геометрии, с сохранением замкнутости (иначе — None и
+    исходная триангуляция, прежнее поведение).
+
+    Попутно собирает зоны «тонкого» поля размера: габариты компонентов
+    с минимальным габаритом меньше 3*h_surf — по ним gmsh-путь отберёт
+    патчи поверхности тела и сделает объём у пластины мельче её толщины.
+
+    Возвращает ``(meshes, thin_zones, h_thin)``; при недоступности
+    gmsh/ремешки вход возвращается как есть (None, None).
+    """
+    h_surf = _h_surf_from_target(target_edge)
+    if h_surf is None or not body_meshes:
+        return body_meshes, None, None
+    _srm = _load_surface_remesh()
+    if _srm is None or not getattr(_srm, "HAS_GMSH", False):
+        return body_meshes, None, None
+
+    body_meshes = _separate_touching_components(body_meshes, h_surf,
+                                                log=log)
+
+    out = []
+    thin_zones = []
+    thin_h = None
+    remeshed_any = False
+    for m in body_meshes:
+        pts, fcs = to_triangles(m)
+        if pts is None or fcs is None:
+            out.append(m)
+            continue
+        pts = np.asarray(pts, dtype=float)
+        fcs = np.asarray(fcs, dtype=np.int64)
+        ext = pts.max(axis=0) - pts.min(axis=0)
+        min_dim = float(ext.min())
+        tgt = _srm.component_target_edge(min_dim, h_surf)
+        med, p95, _mx, _frac = _srm.aspect_stats(pts, fcs)
+        new = None
+        if tgt is not None and _srm.surface_needs_remesh(pts, fcs):
+            try:
+                new = _srm.remesh_component(pts, fcs, tgt, log=log)
+            except Exception as e:                      # pragma: no cover
+                log("   Внимание: ремешка компонента не удалась (%s: %s) "
+                    "— используется исходная триангуляция"
+                    % (type(e).__name__, e))
+                new = None
+        if new is not None:
+            pts2, fcs2 = new
+            med2, p952, _mx2, _f2 = _srm.aspect_stats(pts2, fcs2)
+            log("   Готово: поверхность компонента перестроена: "
+                "%d -> %d граней, AR медиана %.0f -> %.1f, p95 %.0f -> %.1f"
+                % (len(fcs), len(fcs2), med, med2, p95, p952))
+            remeshed_any = True
+            flat = np.hstack([np.full((len(fcs2), 1), 3, dtype=np.int64),
+                              np.asarray(fcs2, dtype=np.int64)]).ravel()
+            m = pv.PolyData(np.asarray(pts2, dtype=float), flat)
+            pts, fcs = pts2, fcs2
+        # Тонкий компонент — источник мелкого поля размера в объёме.
+        if min_dim < 3.0 * h_surf:
+            # Зона = габарит компонента + запас 2*h_surf: патчи поверхности
+            # тела внутри зоны получат мелкий размер у себя и в объёме.
+            # h зоны — свой для каждого компонента (у руля 0.02, у ГО 0.05:
+            # общий минимум переизмельчил бы всё оперение).
+            pad = 2.0 * h_surf
+            thin_zones.append((pts.min(axis=0) - pad,
+                               pts.max(axis=0) + pad,
+                               tgt))
+            thin_h = tgt if thin_h is None else min(thin_h, tgt)
+        out.append(m)
+    if not remeshed_any and not thin_zones:
+        return body_meshes, None, None
+    if thin_zones:
+        return out, thin_zones, thin_h
+    return out, None, None
+
+
 def surface_needs_refinement(points, faces, target_edge):
     """Грубее ли поверхность целевого шага.
 
@@ -958,6 +1195,23 @@ def build_body_fitted_grid(body_meshes, body_min, body_max, margin,
             "Строится картезианская сетка фона." % ", ".join(_shared_miss))
         return None
 
+    # --- Изотропная перестройка поверхности компонентов -------------------
+    # До объединения: каждый компонент перестраивается отдельно (замкнутость
+    # проверяется по компоненту), затем как раньше сливаются manifold'ом в
+    # одну замкнутую поверхность. У тонких компонентов (ГО/руль/киль —
+    # лофты из 2-3 сечений) исходные треугольники вытянуты до AR ~7000, и
+    # объёмный сеточник рядом с ними даёт тетраэдры-бритвы — второй
+    # порядок SU2 (MUSCL) на такой поверхности расходится с первой
+    # итерации. Подробности — в remesh_components_for_bodyfit.
+    thin_zones = None
+    h_thin = None
+    try:
+        body_meshes, thin_zones, h_thin = remesh_components_for_bodyfit(
+            body_meshes, target_edge, log=log)
+    except Exception as e:                                  # pragma: no cover
+        log("   Внимание: перестройка поверхности не выполнена (%s: %s)"
+            % (type(e).__name__, e))
+
     body_pts, body_faces = union_surfaces(body_meshes, log=log)
     if body_pts is None:
         return None
@@ -1001,7 +1255,8 @@ def build_body_fitted_grid(body_meshes, body_min, body_max, margin,
                 body_meshes, body_min, body_max, margin, log=log,
                 target_edge=target_edge, max_surface_faces=max_surface_faces,
                 min_recovery=min_recovery, body_pts=body_pts,
-                body_faces=body_faces)
+                body_faces=body_faces,
+                thin_zones=thin_zones, h_thin=h_thin)
             if _gmsh is not None:
                 log("   Готово: телооблекающая сетка построена gmsh "
                     "(%d тетраэдров)" % _gmsh["n_tets"])

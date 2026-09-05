@@ -489,6 +489,77 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
             if parsed:
                 classify_and_append(np.asarray(parsed, dtype=np.int64))
 
+    # Дубликаты граней в одном маркере (два раза одна и та же тройка
+    # узлов) — нарушение формата для SU2 и удвоенные силы. Снимаем.
+    def _dedup(lines):
+        seen = set()
+        out = []
+        for line in lines:
+            key = tuple(sorted(int(x) for x in line.split()[1:4]))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(line)
+        if len(out) != len(lines):
+            print("   Готово: убрано дубликатов граней в маркерах: %d"
+                  % (len(lines) - len(out)))
+        return out
+
+    airfoil_tris = _dedup(airfoil_tris)
+    farfield_tris = _dedup(farfield_tris)
+    for _pl in list(symmetry_tris.keys()):
+        symmetry_tris[_pl] = _dedup(symmetry_tris[_pl])
+
+    # === Защита от «стен пустот» в маркере airfoil ====================
+    # Грань тела обязана лежать на поверхности тела: все её вершины —
+    # узлы поверхности. Стены объёмных пустот (брак сеточника) в плоскость
+    # bbox тела не помещаешь, поэтому проверяем расстояние от вершин
+    # граней airfoil до облака точек тел. Грань дальше допуска — значит
+    # сеточник оставил внутреннюю пустоту: такую сетку отдавать SU2
+    # нельзя, коэффициенты будут мусором. Падаем с ясным сообщением —
+    # вызывающий код откатится и покажет причину, а не «успех».
+    _body_cloud = kwargs.get("body_points", None)
+    _h_near_kw = kwargs.get("h_near", None)
+    if _body_cloud is not None and len(_body_cloud) and airfoil_tris:
+        # Чистый numpy без scipy: расстояния чанками (тест требует,
+        # чтобы проверка не зависела молча от внешних библиотек).
+        try:
+            _af_idx = np.asarray(
+                [[int(x) for x in line.split()[1:4]] for line in airfoil_tris],
+                dtype=np.int64)
+            _cloud_air = np.asarray(_body_cloud, dtype=float)
+            _vtx_air = surf_pts[_af_idx.reshape(-1)].astype(float)
+            _d_air = np.empty(len(_vtx_air), dtype=float)
+            _chunk = 256
+            for _c0 in range(0, len(_vtx_air), _chunk):
+                _c1 = min(_c0 + _chunk, len(_vtx_air))
+                _diff = _vtx_air[_c0:_c1, None, :] - _cloud_air[None, :, :]
+                _d_air[_c0:_c1] = np.sqrt(
+                    (_diff * _diff).sum(axis=2)).min(axis=1)
+            _d_air = _d_air.reshape(len(_af_idx), 3).max(axis=1)
+            _tol_air = (3.0 * _h_near_kw + 0.05) if _h_near_kw else 0.3
+            _bad_air = _d_air > _tol_air
+            if _bad_air.any():
+                _tri_pts = surf_pts[_af_idx[_bad_air]].astype(float)
+                _area_bad = float(0.5 * np.linalg.norm(np.cross(
+                    _tri_pts[:, 1] - _tri_pts[:, 0],
+                    _tri_pts[:, 2] - _tri_pts[:, 0]), axis=1).sum())
+                _bb0 = _tri_pts.reshape(-1, 3).min(axis=0)
+                _bb1 = _tri_pts.reshape(-1, 3).max(axis=0)
+                raise RuntimeError(
+                    "В маркере airfoil %d грань(ей) площадью %.2f м2 на "
+                    "расстоянии более %.2f м от тела ( bbox X %.1f..%.1f "
+                    "Y %.1f..%.1f Z %.1f..%.1f ). Это стены пустот в "
+                    "объёмной сетке: расчёт по такой сетке даст ложные "
+                    "коэффициенты. Сетка отвергнута."
+                    % (int(_bad_air.sum()), _area_bad, _tol_air,
+                       _bb0[0], _bb1[0], _bb0[1], _bb1[1],
+                       _bb0[2], _bb1[2]))
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+
     valid_tets = [tet for tet in tetras if len(tet) == 4]
 
     # === Проверка инварианта SU2 =====================================
@@ -1129,8 +1200,23 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                 continue
             axis, normal = spec
             n_before = grid.n_cells
+            # Плоскость реза сдвигается на 1e-5 м от нуля (в сторону
+            # сохраняемой половины). Узлы поверхности тел стоят РОВНО на
+            # y=0 (хребтовые точки фюзеляжа, симметричные лофты): плоскость,
+            # проходящая через узел, рождает при резке тетраэдры почти
+            # нулевого объёма (замер: 79 шт. на этом самолёте). Их нельзя
+            # ни оставить (нулевые контрольные объёмы => NaN у SU2), ни
+            # удалить (внутренняя пустота, стены которой уходят в маркер
+            # airfoil ложной стенкой). Сдвиг на 10 мкм снимает саму причину:
+            # узлы строго по одну сторону, резка не «зачёсывает» их.
+            # Маркер симметрии и признак «грань на плоскости» имеют допуск
+            # ~1e-4 м, так что срез на 1e-5 м они по-прежнему видят.
+            _ax_i = {"x": 0, "y": 1, "z": 2}[axis]
+            _eps_off = np.zeros(3)
+            _eps_off[_ax_i] = 1e-5
             try:
-                clipped = grid.clip(normal=normal, origin=(0.0, 0.0, 0.0),
+                clipped = grid.clip(normal=normal,
+                                    origin=tuple(float(v) for v in _eps_off),
                                     invert=False)
             except Exception as e:
                 print(f"   Симметрия {plane}: резка не удалась ({e}), "
@@ -1172,12 +1258,48 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         # =================================================================
 
         report(75, "Поиск вырожденных элементов")
+
+        # === Сварка совпавших точек ДО отбраковки вырожденных =========
+        # clip() на тетраэдрах, касающихся плоскости реза ребром/вершиной,
+        # оставляет нулевые «тетраэдры» с ПОВТОРЁННЫМИ узлами (замер на
+        # этом самолёте: 697 шт., медиана min_edge 0.0, объём ~1e-51).
+        # Удалять их нельзя: каждый удалённый внутренний тетраэдр оставляет
+        # пустоту в объёме, а стены пустот потом уходят в маркер airfoil
+        # (замер: 429 м2 ложной стенки в 25 м под самолётом, Cd=3.0 вместо
+        # ~0.02, CL=-2.1 вместо ~0.4 — второй порядок расходится).
+        # Сварка убирает их топологически корректно: грань схлопнувшегося
+        # элемента сокращается парами, соседние тетраэдры срастаются.
+        try:
+            _n_pre_weld = grid.n_points
+            _welded = grid.clean()
+            if _welded is not None and _welded.n_cells > 0:
+                grid = _welded
+            if grid.n_points != _n_pre_weld:
+                print("   Готово: сварено совпавших точек после резки: "
+                      "%d -> %d" % (_n_pre_weld, grid.n_points))
+        except Exception:
+            pass
+
         tets_raw = extract_cells(grid, cell_type=10)
         if not tets_raw:
             return False, "Не найдены тетраэдры после вырезания"
 
         tets_arr = np.array(tets_raw, dtype=np.int64)
         all_pts_grid = np.asarray(grid.points)
+
+        # Тетраэдры с повторяющимися индексами узлов объёма не имеют.
+        # После сварки их соседние грани сокращаются парами, поэтому
+        # удаление НЕ оставляет пустот (в отличие от удаления по объёму
+        # до сварки).
+        _st = np.sort(tets_arr, axis=1)
+        _rep = ((_st[:, 1] == _st[:, 0]) | (_st[:, 2] == _st[:, 1]) |
+                (_st[:, 3] == _st[:, 2]))
+        if _rep.any():
+            print("   Удалено схлопнутых тетраэдров (повтор узлов): %d"
+                  % int(_rep.sum()))
+            tets_arr = tets_arr[~_rep]
+            if len(tets_arr) == 0:
+                return False, "Все тетраэдры схлопнулись после сварки точек"
 
         p0 = all_pts_grid[tets_arr[:, 0]]
         p1 = all_pts_grid[tets_arr[:, 1]]
@@ -1195,6 +1317,98 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         n_inverted = int(inverted.sum())
         if n_inverted > 0:
             print(f"   Развёрнуто вывернутых тетраэдров (neg volume): {n_inverted}")
+            _swap = tets_arr[inverted, 2].copy()
+            tets_arr[inverted, 2] = tets_arr[inverted, 1]
+            tets_arr[inverted, 1] = _swap
+        # === Схлопывание вырожденных тетраэдров по кратчайшему ребру ===
+        # Остаточные вырожденные (резка прошла впритирку к узлу в дальнем
+        # поле; замер: 11 шт. на плоскости симметрии в 12..25 м от тела,
+        # короткое ребро ~3e-5 м) убираются слиянием концов короткого
+        # ребра, а не удалением: сетка остаётся плотной, пустот не
+        # возникает. Слияние с проверкой на выворачивание соседей; ребро
+        # длиннее 1e-3 м не трогаем (риск сдвига узлов поверхности тела).
+        _pairs6 = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+        _collapse_tol = 1e-3
+        _n_collapsed = 0
+        for _loops in range(3):
+            _p0 = all_pts_grid[tets_arr[:, 0]]
+            _p1 = all_pts_grid[tets_arr[:, 1]]
+            _p2 = all_pts_grid[tets_arr[:, 2]]
+            _p3 = all_pts_grid[tets_arr[:, 3]]
+            _sv = np.einsum('ij,ij->i', _p1 - _p0,
+                            np.cross(_p2 - _p0, _p3 - _p0)) / 6.0
+            _e6 = np.stack([
+                np.linalg.norm(_p1 - _p0, axis=1),
+                np.linalg.norm(_p2 - _p0, axis=1),
+                np.linalg.norm(_p3 - _p0, axis=1),
+                np.linalg.norm(_p2 - _p1, axis=1),
+                np.linalg.norm(_p3 - _p1, axis=1),
+                np.linalg.norm(_p3 - _p2, axis=1),
+            ], axis=1)
+            _vol = np.abs(_sv)
+            _me = _e6.min(axis=1)
+            _sliv = np.where((_vol <= 1e-12) & (_me > 1e-8))[0]
+            if len(_sliv) == 0:
+                break
+            _merged_any = False
+            for ti in _sliv:
+                t = tets_arr[ti]
+                best = None
+                for i1, i2 in _pairs6:
+                    L = float(np.linalg.norm(all_pts_grid[t[i1]]
+                                             - all_pts_grid[t[i2]]))
+                    if best is None or L < best[0]:
+                        best = (L, t[i1], t[i2])
+                _len, na, nb = best[0], int(best[1]), int(best[2])
+                if not np.isfinite(_len) or _len > _collapse_tol:
+                    continue
+                _mask = (tets_arr == nb).any(axis=1)
+                _saved = tets_arr[_mask].copy()
+                _shift = np.where(tets_arr[_mask] == nb, na, tets_arr[_mask])
+                # После слияния «умирают»: тэт с повторившимся узлом
+                # (грань (na,nb) сократилась) и тэты-дубликаты (по обе
+                # стороны сократившейся грани). Их грани сокращаются
+                # парами, поэтому удаление не оставляет пустот.
+                _sm = np.sort(_shift, axis=1)
+                _dead = ((_sm[:, 0] == _sm[:, 1]) | (_sm[:, 1] == _sm[:, 2])
+                         | (_sm[:, 2] == _sm[:, 3]))
+                _uniq, _first = np.unique(_sm[~_dead], axis=0,
+                                          return_index=True)
+                _keep_local = np.where(~_dead)[0][_first]
+                _q = all_pts_grid[_shift[_keep_local]]
+                _v = np.einsum('ij,ij->i',
+                               _q[:, 1] - _q[:, 0],
+                               np.cross(_q[:, 2] - _q[:, 0],
+                                        _q[:, 3] - _q[:, 0])) / 6.0
+                if (_v < 0.0).any():
+                    tets_arr[_mask] = _saved      # вывернулись — откат
+                else:
+                    _idx = np.where(_mask)[0]
+                    _surv = np.zeros(len(_idx), dtype=bool)
+                    _surv[_keep_local] = True
+                    tets_arr[_idx[_surv]] = _shift[_keep_local]
+                    _kill = _idx[~_surv]
+                    _alive = np.ones(len(tets_arr), dtype=bool)
+                    _alive[_kill] = False
+                    tets_arr = tets_arr[_alive]
+                    _merged_any = True
+                    _n_collapsed += 1
+            if not _merged_any:
+                break
+        if _n_collapsed:
+            print("   Готово: схлопнуто вырожденных тетраэдров по "
+                  "короткому ребру: %d" % _n_collapsed)
+
+        # Пересчёт после схлопывания; остаточно вырожденные удаляются
+        # как прежде (их пустоты ловит защита на стадии маркеров).
+        p0 = all_pts_grid[tets_arr[:, 0]]
+        p1 = all_pts_grid[tets_arr[:, 1]]
+        p2 = all_pts_grid[tets_arr[:, 2]]
+        p3 = all_pts_grid[tets_arr[:, 3]]
+        signed_vol = np.einsum('ij,ij->i', p1 - p0,
+                               np.cross(p2 - p0, p3 - p0)) / 6.0
+        inverted = signed_vol < 0
+        if inverted.any():
             _swap = tets_arr[inverted, 2].copy()
             tets_arr[inverted, 2] = tets_arr[inverted, 1]
             tets_arr[inverted, 1] = _swap
@@ -1296,12 +1510,22 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         report(97, "Запись файла mesh.su2")
         try:
             # === T1: пробрасываем use_symmetry в write_su2 =============
+            try:
+                _body_cloud_kw = np.vstack([
+                    np.asarray(m.points, dtype=float)
+                    for m in body_meshes
+                    if getattr(m, "n_points", 0) > 0
+                ])
+            except Exception:
+                _body_cloud_kw = None
             write_su2(grid, surface, su2_path,
                       log_cb=say,
                       use_symmetry=use_symmetry,
                       symmetry_planes=symmetry_planes,
                       pre_clip_points=_pre_clip_pts
-                      if bool(symmetry_planes) else None)
+                      if bool(symmetry_planes) else None,
+                      body_points=_body_cloud_kw,
+                      h_near=h_near)
             # ============================================================
         except RuntimeError as e:
             # ИСПРАВЛЕНО: пробрасываем наверх, а не теряем в логе

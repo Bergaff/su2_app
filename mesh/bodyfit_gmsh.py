@@ -282,7 +282,8 @@ def _coverage(points, tets, ext, body_pts, body_faces, tol):
 def build_body_fitted_grid_gmsh(body_meshes, body_min, body_max, margin,
                                 min_recovery=DEFAULT_MIN_RECOVERY, log=print,
                                 target_edge=None, max_surface_faces=400_000,
-                                body_pts=None, body_faces=None):
+                                body_pts=None, body_faces=None,
+                                thin_zones=None, h_thin=None):
     """Телооблегающая сетка через gmsh с гладким полем размера.
 
     ``body_pts``/``body_faces`` — уже готовая объединённая поверхность тела
@@ -362,7 +363,17 @@ def build_body_fitted_grid_gmsh(body_meshes, body_min, body_max, margin,
     h_near, h_far, dist_far, sampling = _size_field_params(
         bounds, body_min, body_max, target_edge)
 
-    # Записываем тело во временный STL и строим сетку gmsh.
+    # Шаг у тела должен повторять шаг ПОВЕРХНОСТИ: после изотропной
+    # перестройки компонентов (remesh_components_for_bodyfit) ребро
+    # поверхности ~0.55*target_edge. Если оставить поле крупнее
+    # (target_edge=0.144 при рёбрах поверхности 0.079), объём у стенки
+    # скачком удваивает размер в одном слое — тот «рваный» переход,
+    # который валит MUSCL.
+    h_surf = _bt._h_surf_from_target(target_edge)
+    if h_surf is not None and h_surf > 0:
+        h_near = min(h_near, h_surf)
+
+    # Запись STL и вызов gmsh: пробрасываем источники тонкого поля.
     _gmsh_tmp = tempfile.NamedTemporaryFile(suffix=".stl", delete=False)
     _gmsh_tmp.close()
     try:
@@ -370,7 +381,8 @@ def build_body_fitted_grid_gmsh(body_meshes, body_min, body_max, margin,
 
         grid, body_keys, boundary_ratio = _gmsh_mesh(
             _gmsh_tmp.name, body_pts, body_faces, bounds,
-            h_near, h_far, dist_far, sampling, log=log)
+            h_near, h_far, dist_far, sampling, log=log,
+            thin_zones=thin_zones, h_thin=h_thin)
     except Exception as e:                              # pragma: no cover
         log("   Внимание: gmsh не построил сетку (%s: %s) — пробую TetGen."
             % (type(e).__name__, e))
@@ -392,7 +404,14 @@ def build_body_fitted_grid_gmsh(body_meshes, body_min, body_max, margin,
         return None
 
     recovery = boundary_ratio
-    log("   Граней тела на границе сетки: %d из %d (%.2f%%)"
+    # Честная формулировка: это две разные величины. ``len(body_keys)`` —
+    # число граней СЕТОЧНОЙ границы, лежащих на теле (их меньше входных,
+    # если gmsh перестроил поверхность крупнее), а ``boundary_ratio`` —
+    # ПОКРЫТИЕ входных граней тела гранями границы. Печатать «21544 из
+    # 22898 (100.00%)» — прямым обманом пахнет: числа делятся не друг на
+    # друга. Пишем раздельно.
+    log("   Граней тела на границе сетки: %d (сеточных) из %d (входных); "
+        "покрытие входных граней %.2f%%"
         % (len(body_keys), len(body_faces), 100.0 * boundary_ratio))
     return {"grid": grid,
             "body_facets": np.asarray(body_keys, dtype=np.int64)
@@ -402,8 +421,67 @@ def build_body_fitted_grid_gmsh(body_meshes, body_min, body_max, margin,
             "n_tets": int(grid.n_cells)}
 
 
+
+
+def _iter_thin_zones(thin_zones):
+    """Нормализует зоны тонких компонентов: (lo[3], hi[3], h).
+
+    ``thin_zones`` — список троек (min, max, h) из
+    remesh_components_for_bodyfit; tolerate битые записи. Генератор.
+    """
+    if not thin_zones:
+        return
+    for z in thin_zones:
+        try:
+            lo = np.asarray(z[0], dtype=float)
+            hi = np.asarray(z[1], dtype=float)
+            h = float(z[2])
+        except Exception:
+            continue
+        if lo.shape == (3,) and hi.shape == (3,) and (hi >= lo).all() \
+                and h > 0:
+            yield lo, hi, h
+
+def _select_thin_surface_tags(thin_zones, box_surf_tags, tol=0.0):
+    """Теги 2D-сущностей тела, попадающие в зоны тонких компонентов.
+
+    ``thin_zones`` — список пар (min,max) габаритов тонких компонентов
+    (из remesh_components_for_bodyfit). Патч считается тонким, если его
+    bbox (с допуском ``tol``) лежит внутри одной из зон. Патчи короба
+    (``box_surf_tags``) не рассматриваются. Чистая логика без gmsh —
+    тестируется с фейковыми bbox.
+    """
+    if not thin_zones:
+        return []
+    zones = []
+    for z in thin_zones:
+        try:
+            lo = np.asarray(z[0], dtype=float)
+            hi = np.asarray(z[1], dtype=float)
+        except Exception:
+            continue
+        if lo.shape == (3,) and hi.shape == (3,) and (hi >= lo).all():
+            zones.append((lo - tol, hi + tol))
+    if not zones:
+        return []
+    import gmsh as _g
+    tags = []
+    for (d, t) in _g.model.getEntities(2):
+        if d != 2 or t in box_surf_tags:
+            continue
+        bb = _g.model.getBoundingBox(2, t)
+        lo = np.asarray(bb[0:3], dtype=float)
+        hi = np.asarray(bb[3:6], dtype=float)
+        for zlo, zhi in zones:
+            if (lo >= zlo).all() and (hi <= zhi).all():
+                tags.append(int(t))
+                break
+    return tags
+
+
 def _gmsh_mesh(stl_path, body_pts, body_faces, bounds,
-               h_near, h_far, dist_far, sampling, log=print):
+               h_near, h_far, dist_far, sampling, log=print,
+               thin_zones=None, h_thin=None):
     """Сам вызов gmsh: короб + embed тела + поле размера + generate(3).
 
     Возвращает ``(grid, body_keys, boundary_ratio)`` или бросает исключение.
@@ -440,7 +518,17 @@ def _gmsh_mesh(stl_path, body_pts, body_faces, bounds,
             gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
         except Exception:
             pass
-        gmsh.option.setNumber("Mesh.MeshSizeMin", h_near)
+        # Нижняя граница размера — не h_near, а половина самого мелкого
+        # запрошенного масштаба (тонкое поле у пластин оперения). Иначе
+        # MeshSizeMin «отсекает» мелкий размер поля, и у тонкой пластины
+        # объём остаётся крупнее её толщины -> сливеры.
+        try:
+            _h_min = h_near
+            for _z in _iter_thin_zones(thin_zones):
+                _h_min = min(_h_min, _z[2])
+            gmsh.option.setNumber("Mesh.MeshSizeMin", 0.5 * _h_min)
+        except Exception:
+            pass
         gmsh.option.setNumber("Mesh.MeshSizeMax", h_far)
         # Качество ячеек: без оптимизатора gmsh отдаёт сырой тетраэдральный
         # меш (Delaunay/фронтальный), и на телооблекающей поверхности с
@@ -451,6 +539,21 @@ def _gmsh_mesh(stl_path, body_pts, body_faces, bounds,
         # сохраняя встроенную поверхность тела как есть.
         try:
             gmsh.option.setNumber("Mesh.Optimize", 1)
+        except Exception:
+            pass
+        # 3D-алгоритм HXT (Mesh.Algorithm3D=10) вместо фронтального
+        # Делоне (1). Замер на полном самолёте (Средняя, XZ-симметрия):
+        # алгоритм 1 оставлял в грубой области ~300 тетраэдров почти
+        # нулевого объёма (291 «ill-shaped tets», vol ~1e-51 при рёбрах
+        # ~7 м); их последующее удаление как вырожденных рождает пустоты
+        # в объёме, а стены пустот уходят в маркер airfoil ложной стенкой
+        # (429 м2 в 25 м под самолётом => Cd=3.0, CL=-2.1, расходимость
+        # второго порядка). HXT на тех же данных дал 2 вырожденных, оба
+        # внутри тела (удаляются заливкой). Если старый gmsh значение
+        # не примет — остаётся алгоритм по умолчанию, а остаточные
+        # пустоты ловит защита на стадии маркеров.
+        try:
+            gmsh.option.setNumber("Mesh.Algorithm3D", 10)
         except Exception:
             pass
         gmsh.model.add("bodyfit_gmsh")
@@ -490,7 +593,46 @@ def _gmsh_mesh(stl_path, body_pts, body_faces, bounds,
         gmsh.model.mesh.field.setNumber(tfield, "SizeMax", h_far)
         gmsh.model.mesh.field.setNumber(tfield, "DistMin", h_near)
         gmsh.model.mesh.field.setNumber(tfield, "DistMax", dist_far)
-        gmsh.model.mesh.field.setAsBackgroundMesh(tfield)
+        bg_field = tfield
+
+        # Тонкое поле: у компонентов тоньше 3*h_near (пластины ГО/руля/
+        # киля) объём должен быть мельче толщины пластины — иначе у стенки
+        # рожаются тетраэдры-бритвы и второй порядок SU2 расходится с
+        # первой итерации. Патчи поверхности тела отбираются по габаритам
+        # тонких компонентов (thin_zones — пары (min,max) из
+        # remesh_components_for_bodyfit), рост до h_far ускоренный: мелкое
+        # нужно только в тонкой окрестности пластины.
+        thin_fields = []
+        for zone in _iter_thin_zones(thin_zones):
+            zlo, zhi, zh = zone
+            tags = _select_thin_surface_tags([(zlo, zhi)], box_surf_tags,
+                                             tol=0.25 * h_near)
+            if not tags or not zh or zh <= 0:
+                continue
+            dthin = gmsh.model.mesh.field.add("Distance")
+            gmsh.model.mesh.field.setNumber(dthin, "Sampling", sampling)
+            gmsh.model.mesh.field.setNumbers(dthin, "SurfacesList", tags)
+            tthin = gmsh.model.mesh.field.add("Threshold")
+            gmsh.model.mesh.field.setNumber(tthin, "InField", dthin)
+            gmsh.model.mesh.field.setNumber(tthin, "SizeMin", zh)
+            gmsh.model.mesh.field.setNumber(tthin, "SizeMax", h_far)
+            gmsh.model.mesh.field.setNumber(tthin, "DistMin", zh)
+            dist_thin = max(8.0 * zh, 0.1)
+            gmsh.model.mesh.field.setNumber(tthin, "DistMax", dist_thin)
+            thin_fields.append(tthin)
+            log("   Поле размера: тонкая деталь -> %.4f м (на %.2f м)"
+                % (zh, dist_thin))
+        if thin_fields:
+            try:
+                fmin = gmsh.model.mesh.field.add("Min")
+                gmsh.model.mesh.field.setNumbers(
+                    fmin, "FieldsList", [tfield] + thin_fields)
+                bg_field = fmin
+            except Exception as e:                      # pragma: no cover
+                log("   Внимание: тонкое поле размера не задано (%s: %s) — "
+                    "используется только поле тела." % (type(e).__name__, e))
+                bg_field = tfield
+        gmsh.model.mesh.field.setAsBackgroundMesh(bg_field)
 
         # Генерируем объём.
         gmsh.model.mesh.generate(3)
