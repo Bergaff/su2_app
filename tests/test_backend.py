@@ -1586,6 +1586,11 @@ _SU2_V8_OPTIONS = frozenset({
     # Несжимаемый решатель INC_* (малые скорости): параметры инициализации.
     "INC_DENSITY_INIT", "INC_VELOCITY_INIT", "INC_NONDIM",
     "INC_DENSITY_REF", "INC_VELOCITY_REF", "INC_TEMPERATURE_REF",
+    # Вязкость несжимаемого вязкого решателя (INC_RANS/INC_NAVIER_STOKES):
+    # без них SU2 v8.5 отвергает конфиг — Sutherland для INC запрещён
+    # (текст ошибки SU2 сам требует VISCOSITY_MODEL=CONSTANT_VISCOSITY
+    # и MU_CONSTANT).
+    "VISCOSITY_MODEL", "MU_CONSTANT",
 })
 
 def _aeroopt_option_keys():

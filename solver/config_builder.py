@@ -536,6 +536,22 @@ def build_inc_config(p: Mapping, markers=None, restart: bool = False,
         screen = ("(INNER_ITER, WALL_TIME, RMS_PRESSURE, RMS_NU_TILDE, "
                   "LIFT, DRAG)")
 
+    # Вязкость для INC_RANS / INC_NAVIER_STOKES. Без этих строк SU2
+    # падает при чтении конфига: по умолчанию VISCOSITY_MODEL= SUTHERLAND,
+    # а он для несжимаемого решателя запрещён («Sutherland's law only
+    # valid for ideal gases in incompressible flows. Must use
+    # VISCOSITY_MODEL=CONSTANT_VISCOSITY and set viscosity with
+    # MU_CONSTANT» — замер на SU2 8.5). Динамическую вязкость берём по
+    # Сазерленду от заданной температуры потока: при 288.15 K это
+    # 1.789e-5 Па·с — табличное значение для воздуха.
+    if viscos:
+        _t = float(p.get("temperature", 288.15) or 288.15)
+        _mu = 1.458e-6 * _t ** 1.5 / (_t + 110.4)
+        visc_lines = ("VISCOSITY_MODEL= CONSTANT_VISCOSITY\n"
+                      "MU_CONSTANT= %.6E" % _mu)
+    else:
+        visc_lines = "% INC_EULER вязкость не читает"
+
     return f"""SOLVER= {sol}
 {turb_block if turbulent else ''}MATH_PROBLEM= DIRECT
 RESTART_SOL= {restart_str}
@@ -549,6 +565,7 @@ INC_NONDIM= INITIAL_VALUES
 INC_DENSITY_REF= 1.0
 INC_VELOCITY_REF= 1.0
 INC_TEMPERATURE_REF= 1.0
+{visc_lines}
 REF_LENGTH= {float(p['ref_length']):.12g}
 REF_AREA= {float(p['ref_area']):.12g}
 REF_ORIGIN_MOMENT_X= {float(p['ox']):.12g}
