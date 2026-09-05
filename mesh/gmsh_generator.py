@@ -528,7 +528,12 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
                 [[int(x) for x in line.split()[1:4]] for line in airfoil_tris],
                 dtype=np.int64)
             _cloud_air = np.asarray(_body_cloud, dtype=float)
-            _vtx_air = surf_pts[_af_idx.reshape(-1)].astype(float)
+            # Маркерные строки несут ИНДЕКСЫ ТОЧЕК ФАЙЛА (vol_pts):
+            # classify_and_append пишет mapped = point_map[tri]. surf_pts
+            # после triangulate() может быть перенумерован — расстояния
+            # становятся мусором (замер: plane_wing, Точная — 55485
+            # «ложных стенок» 1.17 км2 на честной сетке).
+            _vtx_air = vol_pts[_af_idx.reshape(-1)].astype(float)
             _d_air = np.empty(len(_vtx_air), dtype=float)
             _chunk = 256
             for _c0 in range(0, len(_vtx_air), _chunk):
@@ -540,10 +545,14 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
             _tol_air = (3.0 * _h_near_kw + 0.05) if _h_near_kw else 0.3
             _bad_air = _d_air > _tol_air
             if _bad_air.any():
-                _tri_pts = surf_pts[_af_idx[_bad_air]].astype(float)
+                _tri_pts = vol_pts[_af_idx[_bad_air]].astype(float)
                 _area_bad = float(0.5 * np.linalg.norm(np.cross(
                     _tri_pts[:, 1] - _tri_pts[:, 0],
                     _tri_pts[:, 2] - _tri_pts[:, 0]), axis=1).sum())
+                if os.environ.get("AEROOPT_DUMP_GUARD"):
+                    np.savez("/home/user/repro/guard_dump.npz",
+                             bad=_af_idx[_bad_air], vol_pts=vol_pts,
+                             cloud=np.asarray(_body_cloud, dtype=float))
                 _bb0 = _tri_pts.reshape(-1, 3).min(axis=0)
                 _bb1 = _tri_pts.reshape(-1, 3).max(axis=0)
                 raise RuntimeError(
@@ -692,6 +701,58 @@ def write_su2(grid, surface, filename, markers_info=None, **kwargs):
 # ---------------------------------------------------------------------------
 # Главная функция генерации (с колбэком прогресса)
 # ---------------------------------------------------------------------------
+def _dense_body_cloud(body_meshes, spacing, cap=600000):
+    """Точки ПОВЕРХНОСТИ тела с шагом ~spacing.
+
+    Вершины STL бывают редкими (box-STL — 8 углов): расстояние до них не
+    измеряет расстояние до тела (замер: пластина 65x19x1.5 — её же
+    поверхность была названа «стенами пустот»). Сэмплируем барицентрической
+    сеткой по треугольникам.
+    """
+    try:
+        chunks = []
+        for m in body_meshes:
+            pts = np.asarray(m.points, dtype=float)
+            # pv.PolyData.faces — плоский массив [3,a,b,c, 3,d,e,f, ...]:
+            # раскручиваем вручную.
+            _flat = np.asarray(m.faces, dtype=np.int64).ravel()
+            _triples, _i = [], 0
+            while _i < len(_flat):
+                _k = int(_flat[_i])
+                if _k != 3:
+                    _i += 1
+                    continue
+                _triples.append(_flat[_i + 1:_i + 4])
+                _i += 4
+            fcs = (np.asarray(_triples, dtype=np.int64)
+                   if _triples else np.zeros((0, 3), dtype=np.int64))
+            if len(pts) == 0 or len(fcs) == 0:
+                continue
+            t = pts[fcs]
+            e = np.stack([t[:, 1] - t[:, 0], t[:, 2] - t[:, 1],
+                          t[:, 0] - t[:, 2]])
+            el = np.linalg.norm(e, axis=2).max(axis=0)
+            n = np.ceil(el / max(spacing, 1e-9)).astype(np.int64)
+            n = np.clip(n, 1, 24)
+            for i in range(len(fcs)):
+                k = int(n[i])
+                for a_ in range(k + 1):
+                    for b_ in range(k + 1 - a_):
+                        c_ = k - a_ - b_
+                        chunks.append((t[i, 0] * c_ + t[i, 1] * a_
+                                       + t[i, 2] * b_) / k)
+                if len(chunks) > cap:
+                    break
+            if len(chunks) > cap:
+                break
+        if not chunks:
+            return None
+        return np.unique(np.round(np.asarray(chunks, dtype=float), 9),
+                         axis=0)
+    except Exception:
+        return None
+
+
 def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=None,
                        cancel_cb=None, use_symmetry=False,
                        symmetry_planes=None, log_cb=None):
@@ -818,12 +879,19 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
             # элементов решает именно шаг у тела, поэтому порядок
             # восстановлен: 0.0075 вдвое мельче «Средней».
             _preset = body_size * 0.0075
-            _abs_floor = 0.04
+            # Пол 0.04 зажимал легитимные маленькие модели: ONERA M6
+            # (габарит 2.43 м) при «Точной» просил 0.018 м и получал
+            # 0.04 — вдвое грубее запрошенного. CAD в миллиметрах
+            # (деталь 10 мм) по-прежнему ловится: шаг в 1500 раз
+            # больше детали, предупреждение срабатывает.
+            _abs_floor = 0.015
             h_far = body_size * 0.45
             margin = body_size * 4.0
         else:
             _preset = body_size * 0.015
-            _abs_floor = 0.05
+            # 0.05 зажимало ONERA M6 при «Средней»: просил 0.0365,
+            # получал 0.05. CAD в миллиметрах по-прежнему ловится.
+            _abs_floor = 0.03
             h_far = body_size * 0.55
             margin = body_size * 3.2
         h_near = max(_preset, _abs_floor)
@@ -850,8 +918,10 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                 f"ниже допустимого минимума {_abs_floor:.4f} м — при "
                 f"габарите модели {body_size:.4f} м это {_abs_floor / max(body_size, 1e-12) * 100:.0f}% "
                 f"её размера. Применён минимум, сетка будет очень грубой. "
-                f"Проверьте масштаб модели: возможно, CAD-файл в "
-                f"миллиметрах, а расчёт идёт в метрах.")
+                f"Это чаще всего значит, что CAD в миллиметрах, а расчёт "
+                f"идёт в метрах: если модель задумана крупной, проверьте "
+                f"масштаб. Если она действительно маленькая — это "
+                f"ожидаемо, предупреждение можно игнорировать.")
         h_far = max(h_far, h_near * 3.0)
 
         print(f"   Шаг около тела: {h_near:.4f} м")
@@ -1284,6 +1354,7 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         if not tets_raw:
             return False, "Не найдены тетраэдры после вырезания"
 
+        _n_degenerate_removed = 0
         tets_arr = np.array(tets_raw, dtype=np.int64)
         all_pts_grid = np.asarray(grid.points)
 
@@ -1330,7 +1401,7 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         _pairs6 = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
         _collapse_tol = 1e-3
         _n_collapsed = 0
-        for _loops in range(3):
+        for _loops in range(32):
             _p0 = all_pts_grid[tets_arr[:, 0]]
             _p1 = all_pts_grid[tets_arr[:, 1]]
             _p2 = all_pts_grid[tets_arr[:, 2]]
@@ -1350,7 +1421,15 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
             _sliv = np.where((_vol <= 1e-12) & (_me > 1e-8))[0]
             if len(_sliv) == 0:
                 break
-            _merged_any = False
+            # Все слияния батча решаются по ОДНОМУ снимку tets_arr и
+            # применяются после цикла. Раньше слияние ужало tets_arr
+            # прямо внутри итерации по _sliv — индексы следующего слайвера
+            # уезжали за новый конец массива (IndexError на ONERA M6:
+            # index 29037 из 29032). Конфликт узлов в батче (узел уже
+            # переименован другим слиянием) — слияние пропускается,
+            # доделает следующий проход.
+            _ren = {}
+            _busy = set()
             for ti in _sliv:
                 t = tets_arr[ti]
                 best = None
@@ -1358,47 +1437,55 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                     L = float(np.linalg.norm(all_pts_grid[t[i1]]
                                              - all_pts_grid[t[i2]]))
                     if best is None or L < best[0]:
-                        best = (L, t[i1], t[i2])
-                _len, na, nb = best[0], int(best[1]), int(best[2])
+                        best = (L, int(t[i1]), int(t[i2]))
+                _len, na, nb = best
                 if not np.isfinite(_len) or _len > _collapse_tol:
                     continue
-                _mask = (tets_arr == nb).any(axis=1)
-                _saved = tets_arr[_mask].copy()
-                _shift = np.where(tets_arr[_mask] == nb, na, tets_arr[_mask])
-                # После слияния «умирают»: тэт с повторившимся узлом
-                # (грань (na,nb) сократилась) и тэты-дубликаты (по обе
-                # стороны сократившейся грани). Их грани сокращаются
-                # парами, поэтому удаление не оставляет пустот.
-                _sm = np.sort(_shift, axis=1)
-                _dead = ((_sm[:, 0] == _sm[:, 1]) | (_sm[:, 1] == _sm[:, 2])
-                         | (_sm[:, 2] == _sm[:, 3]))
-                _uniq, _first = np.unique(_sm[~_dead], axis=0,
-                                          return_index=True)
-                _keep_local = np.where(~_dead)[0][_first]
-                _q = all_pts_grid[_shift[_keep_local]]
-                _v = np.einsum('ij,ij->i',
-                               _q[:, 1] - _q[:, 0],
-                               np.cross(_q[:, 2] - _q[:, 0],
-                                        _q[:, 3] - _q[:, 0])) / 6.0
-                if (_v < 0.0).any():
-                    tets_arr[_mask] = _saved      # вывернулись — откат
-                else:
-                    _idx = np.where(_mask)[0]
-                    _surv = np.zeros(len(_idx), dtype=bool)
-                    _surv[_keep_local] = True
-                    tets_arr[_idx[_surv]] = _shift[_keep_local]
-                    _kill = _idx[~_surv]
-                    _alive = np.ones(len(tets_arr), dtype=bool)
-                    _alive[_kill] = False
-                    tets_arr = tets_arr[_alive]
-                    _merged_any = True
-                    _n_collapsed += 1
-            if not _merged_any:
+                if nb in _ren or na in _busy or nb in _busy:
+                    continue
+                _ren[nb] = na
+                _busy.add(na)
+                _busy.add(nb)
+            if not _ren:
                 break
+            _arr2 = tets_arr.copy()
+            for _nb, _na in _ren.items():
+                _arr2[_arr2 == _nb] = _na
+            # После слияния «умирают»: тэт с повторившимся узлом
+            # (грань (na,nb) сократилась) и тэты-дубликаты (по обе
+            # стороны сократившейся грани). Их грани сокращаются
+            # парами, поэтому удаление не оставляет пустот.
+            _sm = np.sort(_arr2, axis=1)
+            _dead = ((_sm[:, 0] == _sm[:, 1]) | (_sm[:, 1] == _sm[:, 2])
+                     | (_sm[:, 2] == _sm[:, 3]))
+            _uniq, _first = np.unique(_sm[~_dead], axis=0,
+                                      return_index=True)
+            _keep = np.where(~_dead)[0][_first]
+            _q = all_pts_grid[_arr2[_keep]]
+            _v = np.einsum('ij,ij->i',
+                           _q[:, 1] - _q[:, 0],
+                           np.cross(_q[:, 2] - _q[:, 0],
+                                    _q[:, 3] - _q[:, 0])) / 6.0
+            if (_v < 0.0).any():
+                break                    # вывернулись — батч целиком откат
+            tets_arr = np.ascontiguousarray(_arr2[_keep])
+            _n_collapsed += len(_ren)
         if _n_collapsed:
             print("   Готово: схлопнуто вырожденных тетраэдров по "
                   "короткому ребру: %d" % _n_collapsed)
 
+        # === Проверка стенки тела ПОСЛЕ резки и отбраковки ============
+        # Резка по плоскости симметрии сквозь тело, КАСАЮЩЕЕСЯ плоскости
+        # по ребру (зеркальные полу-модели: ONERA M6 -> зеркало, корневой
+        # контур — линия нулевой толщины), рождает вырожденные тетраэдры
+        # в зоне схлопывания. Их удаление оставляет ЩЕЛИ в стенке тела
+        # (замер: M6 с XZ-симметрией — 380 дыр в airfoil, SU2 падает с
+        # первой итерации; та же сетка без резки — 0 дыр). Здесь стенка
+        # тела проверяется на замкнутость: каждое ребро грани тела обязано
+        # иметь соседа среди граней тела ИЛИ граней, лежащих в плоскости
+        # реза. Дыра — сигнал, что резку через это тело делать нельзя:
+        # сетка перестраивается целиком без симметрии (см. проверку
+        # после сборки).
         # Пересчёт после схлопывания; остаточно вырожденные удаляются
         # как прежде (их пустоты ловит защита на стадии маркеров).
         p0 = all_pts_grid[tets_arr[:, 0]]
@@ -1426,9 +1513,114 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         n_degenerate = int((~valid_mask).sum())
         if n_degenerate > 0:
             print(f"   Удалено вырожденных тетраэдров: {n_degenerate}")
+        _n_degenerate_removed = n_degenerate
         tets_arr = tets_arr[valid_mask]
         if len(tets_arr) == 0:
             return False, "Все тетраэдры вырождены"
+
+        def _body_cloud_now():
+            # Плотная union-поверхность тела. Вершины компонентов бывают
+            # РЕДКИМИ (box-STL — 8 углов): расстояние до них не измеряет
+            # расстояние до тела (замер: пластина 65x19x1.5 — её же
+            # поверхность названа «стенами пустот»).
+            try:
+                _bp = (_bf or {}).get("body_pts") if "_bf" in dir() else None
+                if _bp is not None and len(_bp):
+                    return np.asarray(_bp, dtype=float)
+            except Exception:
+                pass
+            try:
+                return _dense_body_cloud(body_meshes, max(h_near * 0.6, 1e-6))
+            except Exception:
+                try:
+                    return np.vstack([
+                        np.asarray(m.points, dtype=float)
+                        for m in body_meshes if getattr(m, "n_points", 0) > 0
+                    ])
+                except Exception:
+                    return None
+
+        def _wall_holes(tets, pts, cloud):
+            """Число «дыр» в стенке тела финальной сетки.
+
+            Грань тела — граничная грань сетки, все три вершины которой
+            лежат в пределах допуска от облака точек тел. Рёбра граней
+            тела обязаны иметь соседа среди граней тела ИЛИ граней,
+            лежащих в плоскости реза (сечение тела — легальная граница).
+            Ребро без соседа — щель: стенка дырявая, SU2 с такой сеткой
+            не считается. Возвращает (число дыр, число граней тела).
+            """
+            if cloud is None or len(cloud) == 0 or len(tets) == 0:
+                return 0, 0
+            if not HAS_SCIPY:
+                return 0, 0
+            from scipy.spatial import cKDTree as _kd
+            f6 = np.sort(np.stack([tets[:, [0, 1, 2]], tets[:, [1, 2, 3]],
+                                   tets[:, [0, 2, 3]], tets[:, [0, 1, 3]]],
+                                  axis=1).reshape(-1, 3), axis=1)
+            _u, _c = np.unique(f6, axis=0, return_counts=True)
+            bnd = _u[_c == 1]
+            if len(bnd) == 0:
+                return 0, 0
+            tree = _kd(np.asarray(cloud, dtype=float))
+            d, _ = tree.query(pts[bnd].reshape(-1, 3))
+            df = d.reshape(len(bnd), 3).max(axis=1)
+            tol = max(3.0 * h_near + 0.05, 1e-9) if h_near else 0.3
+            on_body = df <= tol
+            if not on_body.any():
+                return 0, 0
+            bf = bnd[on_body]
+            bfp = pts[bf]
+            plane_ok = np.zeros(len(bf), dtype=bool)
+            diagp = float(np.ptp(pts, axis=0).max()) or 1.0
+            eps = 1e-5 * diagp
+            for plane in (symmetry_planes or []):
+                try:
+                    pname = str(plane).split(":", 1)[0].strip().lower()
+                    off = (float(str(plane).split(":", 1)[1])
+                           if ":" in str(plane) else 0.0)
+                except Exception:
+                    continue
+                ax = {"xz": 1, "xy": 2, "yz": 0}.get(pname)
+                if ax is None:
+                    continue
+                plane_ok |= (np.abs(bfp[:, :, ax] - off) <= eps).all(axis=1)
+            edge_cnt = {}
+            for fi, (a3, b3, c3) in enumerate(bf.tolist()):
+                if plane_ok[fi]:
+                    continue          # рёбра сечения парит плоскость
+                for (e1, e2) in ((a3, b3), (b3, c3), (c3, a3)):
+                    k = (e1, e2) if e1 < e2 else (e2, e1)
+                    edge_cnt[k] = edge_cnt.get(k, 0) + 1
+            # рёбра плоскостных граней — легальные соседи
+            for fi in np.where(plane_ok)[0]:
+                a3, b3, c3 = bf[fi].tolist()
+                for (e1, e2) in ((a3, b3), (b3, c3), (c3, a3)):
+                    k = (e1, e2) if e1 < e2 else (e2, e1)
+                    if k in edge_cnt:
+                        edge_cnt[k] += 1
+            hole_edges = [k for k, v in edge_cnt.items() if v == 1]
+            return len(hole_edges), len(bf)
+
+        if symmetry_planes and _n_degenerate_removed:
+            try:
+                _holes, _nbody = _wall_holes(tets_arr, all_pts_grid,
+                                             _body_cloud_now())
+            except Exception:
+                _holes, _nbody = 0, 0
+            if _holes:
+                say("Внимание: тело касается плоскости симметрии по ребру "
+                    "(зеркальная полу-модель или модель с острым бортом): "
+                    "резка по этой плоскости оставила %d щелей в стенке "
+                    "тела. Строю полную сетку без симметрии — коэффициенты "
+                    "это не меняет, только тетраэдров будет вдвое больше."
+                    % _holes)
+                return generate_mesh_impl(
+                    stl_paths, quality_text=quality_text,
+                    progress_cb=progress_cb, cancel_cb=cancel_cb,
+                    use_symmetry=False, symmetry_planes=[],
+                    log_cb=log_cb)
+
 
         check_cancel()
         report(84, "Очистка висячих точек")
@@ -1511,11 +1703,22 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         try:
             # === T1: пробрасываем use_symmetry в write_su2 =============
             try:
-                _body_cloud_kw = np.vstack([
-                    np.asarray(m.points, dtype=float)
-                    for m in body_meshes
-                    if getattr(m, "n_points", 0) > 0
-                ])
+                _body_cloud_kw = None
+                try:
+                    _bp2 = (_bf or {}).get("body_pts")
+                except Exception:
+                    _bp2 = None
+                if _bp2 is not None and len(_bp2):
+                    _body_cloud_kw = np.asarray(_bp2, dtype=float)
+                else:
+                    _body_cloud_kw = _dense_body_cloud(
+                        body_meshes, max(h_near * 0.6, 1e-6))
+                    if _body_cloud_kw is None:
+                        _body_cloud_kw = np.vstack([
+                            np.asarray(m.points, dtype=float)
+                            for m in body_meshes
+                            if getattr(m, "n_points", 0) > 0
+                        ])
             except Exception:
                 _body_cloud_kw = None
             write_su2(grid, surface, su2_path,
@@ -1528,7 +1731,18 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
                       h_near=h_near)
             # ============================================================
         except RuntimeError as e:
-            # ИСПРАВЛЕНО: пробрасываем наверх, а не теряем в логе
+            # Симметричная сборка дала дефектную стенку (щели у пинча,
+            # нулевые грани у XZ-среза и т.п.) — перестраиваем БЕЗ
+            # симметрии, как это уже делается для щелей. Замер: M6,
+            # XZ-срез сквозь прижатое к плоскости зеркало — иначе «0
+            # успешных, 1 с ошибкой».
+            if symmetry_planes:
+                say("Внимание: сетка с симметрией отвергнута: %s" % e)
+                say("Перестраиваю без симметрии (дольше, но надёжно)...")
+                return generate_mesh_impl(stl_paths, quality_text,
+                                          use_symmetry=False,
+                                          symmetry_planes=[],
+                                          log_cb=log_cb)
             return False, str(e)
 
         if os.path.exists(su2_path):
@@ -1547,8 +1761,12 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
     except MeshCancelled as mc:
         return False, str(mc)
     except Exception as e:
-        print(traceback.format_exc())
-        return False, str(e)
+        # Трейсбек обязан попасть в ЛОГ ПРИЛОЖЕНИЯ: stdout в собранном
+        # exe не существует, и пользователь видел только «index N is out
+        # of bounds» без места падения (замер: ONERA M6, Точная).
+        tb = traceback.format_exc(limit=8)
+        print(tb)
+        return False, "%s\n%s" % (e, tb)
 
 
 # ---------------------------------------------------------------------------

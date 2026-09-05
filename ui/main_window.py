@@ -3859,7 +3859,10 @@ class MainWindow(QMainWindow):
                                  f"Не удалось сохранить STL: {e}")
             return
 
-        self._add_body(stl_path, "other")
+        # Официальные кейсы библиотеки — крылья/профили: роль «крыло»
+        # сразу, иначе RefData падает на габариты («Крыла нет, RefData по
+        # габаритам: Lref=..., Sref=1.000» — замер: ONERA M6).
+        self._add_body(stl_path, "wing")
         if self.bodies:
             self.bodies[-1]["name"] = (
                 f"Официальный: {case.name} ({len(tris)} тр.)")

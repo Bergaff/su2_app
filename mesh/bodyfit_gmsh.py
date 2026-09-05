@@ -418,7 +418,14 @@ def build_body_fitted_grid_gmsh(body_meshes, body_min, body_max, margin,
             if len(body_keys) else np.zeros((0, 3), dtype=np.int64),
             "recovery": recovery,
             "bounds": bounds,
-            "n_tets": int(grid.n_cells)}
+            "n_tets": int(grid.n_cells),
+            # Плотная поверхность тела (union после ремешки): нужна
+            # валидатору стенок. Облако вершин КОМПОНЕНТОВ может быть
+            # редким (box-STL = 8 вершин) — расстояние до него не имеет
+            # смысла (замер: пластина 65x19x1.5, «стенами» назвалась её
+            # же поверхность).
+            "body_pts": np.asarray(body_pts, dtype=float),
+            "body_faces": np.asarray(body_faces, dtype=np.int64)}
 
 
 

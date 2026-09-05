@@ -1357,4 +1357,11 @@ def build_body_fitted_grid(body_meshes, body_min, body_max, margin,
             if marker else np.zeros((0, 3), dtype=np.int64),
             "recovery": recovery,
             "bounds": bounds,
-            "n_tets": int(len(tets_new))}
+            "n_tets": int(len(tets_new)),
+            # Плотная поверхность тела (см. комментарий в bodyfit_gmsh):
+            # валидатору стенок нужно расстояние до ПОВЕРХНОСТИ, а не до
+            # редких вершин компонентов.
+            "body_pts": np.asarray(body_pts, dtype=float)
+            if body_pts is not None else None,
+            "body_faces": np.asarray(body_faces, dtype=np.int64)
+            if body_faces is not None else None}
