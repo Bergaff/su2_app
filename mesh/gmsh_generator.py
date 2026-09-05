@@ -859,6 +859,7 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         if body_size < 1e-6:
             return False, "Геометрия вырождена (нулевой размер)"
 
+
         print("Создание фоновой сетки с локальным сгущением...")
 
         # Параметры сетки
@@ -927,6 +928,81 @@ def generate_mesh_impl(stl_paths, quality_text="Средняя", progress_cb=Non
         print(f"   Шаг около тела: {h_near:.4f} м")
         print(f"   Шаг вдали:      {h_far:.4f} м")
         print(f"   Margin:         {margin:.2f} м")
+
+        # === Касающиеся компоненты ==================================
+        # Пересечение (крыло сквозь фюзеляж) слияние собирает нормально,
+        # а КАСАНИЕ поверхностями (нулевой зазор) даёт в gmsh
+        # двухобъёмный BRep и краш «double free or corruption» внутри
+        # C++ (замер: два вплотную стоящих бокса; abort() в чужой
+        # библиотеке не ловится except, а gmsh исполняется в процессе
+        # приложения — краш убивает всё приложение). Предупреждаем до
+        # мешинга.
+        #
+        # Признаки строятся на ТОЧНОМ знаковом расстоянии до поверхности
+        # (vtk implicit distance): грубые оценки не работают — у
+        # касающихся тел vtk enclosed засчитывает контактную плоскость
+        # как «внутри» (замер: 50% точек), а расстояние до редких вершин
+        # STL у куба — это расстояние до 8 углов (мусор до 3 м). Замер:
+        # ремешка не сохраняет контактную плоскость бит-в-бит (после неё
+        # касание даёт зазор ~h/30), поэтому порог привязан к h_near.
+        if len(body_meshes) > 1:
+            try:
+                _touch_tol = max(0.1 * h_near, 1e-6 * body_size)
+                _den = max(0.5 * h_near, 1e-9)
+                from scipy.spatial import cKDTree as _ckd
+                _smp = {}
+                for _k, _m in enumerate(body_meshes):
+                    _smp[_k] = _dense_body_cloud([_m], _den)
+                for _i in range(len(body_meshes)):
+                    for _j in range(_i + 1, len(body_meshes)):
+                        _pi, _pj = _smp[_i], _smp[_j]
+                        if _pi is None or _pj is None:
+                            continue
+                        if len(_pi) < 4 or len(_pj) < 4:
+                            continue
+                        _have_imp = True
+                        _sd = []
+                        for _a, _b in ((_i, _j), (_j, _i)):
+                            try:
+                                _c = (pv.PolyData(_smp[_a])
+                                      .compute_implicit_distance(
+                                          body_meshes[_b]))
+                                _sd.append(np.asarray(
+                                    _c.point_data["implicit_distance"],
+                                    dtype=float))
+                            except Exception:
+                                _have_imp = False
+                                break
+                        if _have_imp:
+                            # Проникновение: есть точки строго внутри
+                            # (s<0) глубже порога -> честное пересечение.
+                            _pen = max(0.0,
+                                       float(-_sd[0].min()),
+                                       float(-_sd[1].min()))
+                            if _pen > _touch_tol:
+                                continue
+                            _gap = float(min(np.abs(_sd[0]).min(),
+                                             np.abs(_sd[1]).min()))
+                        else:
+                            # Фолбэк: расстояние между плотными выборками.
+                            _d1, _ = _ckd(_pi).query(_pj)
+                            _d2, _ = _ckd(_pj).query(_pi)
+                            _gap = float(min(_d1.min(), _d2.min()))
+                        if _gap < _touch_tol:
+                            say("Внимание: компоненты %d и %d "
+                                "соприкасаются или почти касаются "
+                                "(зазор ~%.3g м при шаге поверхности "
+                                "~%.3g м). gmsh на таких сборках падает "
+                                "(double free) вместе с приложением, а "
+                                "тонкая щель между деталями не "
+                                "прорешивается. Объедините детали в "
+                                "одно тело в CAD или разнесите их явно "
+                                "(на несколько шагов поверхности)."
+                                % (_i + 1, _j + 1, _gap, h_near))
+            except Exception:
+                # Диагностика не должна ломать мешинг.
+                pass
+        # =============================================================
 
         # === Телооблекающая сетка (TetGen) =============================
         #
